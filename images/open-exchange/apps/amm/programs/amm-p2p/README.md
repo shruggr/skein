@@ -1,6 +1,6 @@
 # amm-p2p
 
-The AMM overlay's **marketplace relay** (the app's box handler: interfaces `amm.swap/1`, `amm.pool/1` and `amm.liquidity/1`, docs/notes.md 2026-10-02 "Marketplace relay") and the app's pages, with the proofs-by-block direct call and the catch-up pass as utilities nothing routes or schedules (#2, the pull half of proof sync), as one [skein](https://github.com/shruggr/skein) program (Zig 0.16.0, wasm32-wasi), the `amm-p2p` program of the `amm` app (`etc/app.json`). The design notes cited below are amm-poc's docs/notes.md.
+The AMM overlay's **marketplace relay** (the app's box handler: interfaces `amm.swap/1` and `amm.pool/1` (0.9.0: `amm.liquidity/1` gone), docs/notes.md 2026-10-02 "Marketplace relay") and the app's pages, with the proofs-by-block direct call and the catch-up pass as utilities nothing routes or schedules (#2, the pull half of proof sync), as one [skein](https://github.com/shruggr/skein) program (Zig 0.16.0, wasm32-wasi), the `amm-p2p` program of the `amm` app (`etc/app.json`). The design notes cited below are amm-poc's docs/notes.md.
 
 ```
 zig build test-amm-p2p   # from the repo root: the direct call's request and reply, the catch-up plan, the names,
@@ -9,6 +9,15 @@ zig build test-amm-p2p   # from the repo root: the direct call's request and rep
                          # package, the record's lifecycle (dialled, or local), the validator named, the dispatch;
                          # the same for a pool deploy and an AddLiquidity; the manifest's role settings, natively
 ```
+
+## 0.9.0 (the Open Exchange, David Case 2026-10-09)
+
+This section supersedes what the rest of this file says where they differ.
+
+- **No `amm.liquidity/1`** (gone with the contract's AddLiquidity): the kind `liquidity`, `checkAdd`, `submitAdd`, the box `addLiquidity` on the validator and the state's `liquidity` map. `amm.pool/1` gains **`terms`**: `{validator: <this instance's identity>, peerId?: <its node>, lpFeeBps, validatorFeeBps, commissionBps}`, the validator's terms from `config.amm.ammValidator` (the Liquidity page deploys at them, to this skein's own validator).
+- **A deploy is delivered** (the LP's every input SIGHASH_SINGLE over its own output, one token unit left for the claim; relay.zig unchanged in its checks) and **accepted with the claimed deploy**: `applyReply` takes the validator's `tx` only when it is the delivered deploy with one output appended (`claimedOf`: the same version, inputs, lock time and outputs, one more after them); the record's `tx` / `txid` are the claimed deploy's and its `pool` the claimed deploy's output 0. An answer without `tx`, with the deploy unclaimed or another transaction, fails (`bad_reply`).
+- **Listing requests** (reads.zig): the box `amm/requests` (`{"address": "requests", "handler": "amm-p2p"}`, anyone): `{fn: "request", args: {tokenId}}` recorded under the head `amm/requests` (`{kind: "amm-requests", requests: <map tokenId → {tokenId, from, at}>}`, the latest per token); the read route `/requests` (filter `requests`) answers them newest first, less the tokens registered (the engine's `amm/topics`), JSON `[{tokenId, from, at}]`.
+- **Spends** (reads.zig): the read route `/spends?outpoint=<txid>.<vout>` (filter `spends`) answers the chain state of an outpoint (`chain/state`'s `spent`, read only): `{outpoint, spentBy?, current?, hops, closed}`, a pool followed from its output to its current one (each spender's output 0 while it is a pool; `closed` once a spender did not continue it). The LP's page reads its claim (spent: rescinded) and its pool (to Close) from it.
 
 ## 0.7.0 (skein's routes, filters and roles, shruggr/skein#143)
 

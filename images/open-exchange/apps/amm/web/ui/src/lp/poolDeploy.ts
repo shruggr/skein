@@ -1,71 +1,65 @@
 /**
- * Creating a pool from a token in the wallet (docs/notes.md, "Swap funding
- * and signing", applied to the deploy). The page holds no keys: every key
- * and signature comes from the wallet (`getPublicKey`, `createAction`,
- * `signAction`, `createSignature`). A deploy needs the validator's consent,
- * so it is gated like a swap: the funding is a nosend action, and the
- * validator broadcasts both transactions (src/lp/deployFlow.ts).
+ * Creating a pool from a token in the wallet: the deploy is DELIVERED to the
+ * skein, not broadcast (skein-amm 0.9.0, David Case 2026-10-09). The page
+ * holds no keys: every key and signature comes from the wallet
+ * (`getPublicKey`, `createAction`, `signAction`, `createSignature`).
  *
  *   1. **Funding transaction**: `createFunding` (src/market/swapAction.ts):
  *      `createAction` (signAndProcess false, noSend) + `signAction` (noSend),
  *      one exact output, P2PKH to a P1SAT key `amm-funding-<hex>`, in
- *      `1sat-deposit` with tags `amm-funding` + `hold:<expires>`,
- *      customInstructions `{protocolID, keyID, counterparty, amm: {deploy:
- *      <tokenId>, expires}}`. The amount: what the deploy's outputs take
- *      beyond the token inputs' sats (the sats deposit, + 1 for a token
- *      change output, − 1 per 1-sat token input), plus the miner fee of the
- *      deploy at the rate (`deployFunding`). No sats change anywhere.
- *   2. **Deploy transaction**, built here. The deploy is not a contract call
- *      (Pool.runar.go has no constructor method): it is a plain token
- *      transfer whose output 0 is the pool, so token change is allowed.
- *        inputs   the deposit's token outputs, in order (input 0 is the
- *                 "first token input": its outpoint keys the validator key
- *                 and the LP key), then the funding output (last)
- *        outputs  0  the pool: `PoolTemplate.lockDeploy(args, state)`,
- *                    `sats` satoshis
- *                 1  token change (Mandala value, P2PKH to the change key
- *                    below, filed in `bsv21`), when the inputs carry more
- *      Every input is signed with `createSignature` (SIGHASH_ALL|FORKID over
- *      the BIP-143 sighash computed here) and checked with `Spend`.
- *   3. The relay (src/lp/poolRelay.ts, `amm.pool.submit`) carries both to
- *      the validator, who consents and broadcasts.
- *   4. Accepted: `completePoolDeploy` internalizes the pool output (basket
- *      insertion into `bsv21`, tag `amm-pool`, no `amt`) and the token
- *      change, and relinquishes the funding output and the token inputs.
- *      Refused / timed out: `abandonPoolDeploy` aborts the funding action.
+ *      `1sat-deposit` (tags `amm-funding` + `hold:<expires>`). The amount:
+ *      what the deploy's outputs and the validator's claim take beyond the
+ *      token inputs' sats, plus the miner fee of the deploy with the claim
+ *      at the rate (`deployFunding`).
+ *   2. **Deploy transaction**, built here, every input signed
+ *      SIGHASH_SINGLE|FORKID over its own output (`createSignature` over the
+ *      BIP-143 sighash; checked with `Spend`), so the validator can append
+ *      the claim after them:
+ *        input 0     the first token input   → output 0, the pool
+ *        input j     each further input (the other token inputs, then the
+ *                    funding, last)          → output j, an LP output: the
+ *                    token change (Mandala value, P2PKH to the change key,
+ *                    filed in `bsv21`) first when the inputs carry more
+ *                    than the deposit and the claim's unit, else the LP's
+ *                    sats change (1 sat, P2PKH to the BRC-29 change key: a
+ *                    wallet payment to self)
+ *      The token inputs carry exactly ONE unit more than the pool takes and
+ *      the token change: that unit is the validator's claim.
+ *   3. The relay (src/lp/poolRelay.ts, `amm.pool.submit`, the skein's own
+ *      validator, `amm.pool.terms`) delivers it; the validator checks it
+ *      against its terms, appends the claim (one unit, P2PKH to the pool's
+ *      validator key, its payload that key's signature over the pool's
+ *      script and the first token input), submits it to its overlay (which
+ *      broadcasts it) and answers the claimed deploy.
+ *   4. Accepted: `completePoolDeploy` checks the answer is our deploy with
+ *      one output appended, internalizes the pool output (basket insertion
+ *      into `bsv21`, tag `amm-pool`, no `amt`; its claim's vout in the
+ *      customInstructions), the token change and the sats change, and
+ *      relinquishes the funding output and the token inputs. Refused /
+ *      timed out: `abandonPoolDeploy` aborts the funding action.
  *
  * Keys:
  *  - LP key: a BRC-29 key (src/wallet/brc29.ts) — `getPublicKey({protocolID:
  *    [2, "3241645161d8"], keyID: "<derivationPrefix> <derivationSuffix>",
  *    counterparty: "self", forSelf: true})` with derivationPrefix =
  *    base64("amm-lp") and derivationSuffix = base64("<txid>_<vout>"), keyed by
- *    input 0 of the transaction that sets it (here the first deposit input;
- *    on RemoveLiquidity the spent pool outpoint): the same rule as the
- *    validator's key, so "my pools" can re-derive it from the pool's history.
- *    BRC-29 because Pool.runar.go pays RemoveLiquidity's withdrawals to
- *    Hash160 of the current LP key: with the LP key a BRC-29 key, the sats
- *    withdrawal is a wallet payment the wallet internalizes (sender = the
- *    user's own identity). Not random, unlike a payment's: the outpoint makes
- *    it unique, and determinism keeps the history recovery. Pools created
- *    before this have a 1sat-sdk LP key (`P1SAT_PROTOCOL`, keyID
- *    "amm-lp-<txid>_<vout>", `legacyLpKeyId`).
- *  - Token change key: BRC-29 like the LP key, derivationPrefix =
- *    base64("amm-change"), derivationSuffix = base64("<txid>_<vout>") of the
- *    same first deposit input (`changeKeyId`). Never random: the wallet can
- *    re-derive it from the deploy's input 0 even when the page dies before
- *    `completePoolDeploy` files the change.
- *  - Validator key: the anyone-child of the chosen validator's identity for
+ *    the first deposit input. Close pays the pool's BSV to Hash160 of it, so
+ *    the payout is a wallet payment the wallet internalizes (sender = the
+ *    user's own identity). Pools created before have a 1sat-sdk LP key
+ *    (`P1SAT_PROTOCOL`, keyID "amm-lp-<txid>_<vout>", `legacyLpKeyId`).
+ *  - Change key (token change and sats change): BRC-29 like the LP key,
+ *    derivationPrefix = base64("amm-change"), derivationSuffix =
+ *    base64("<txid>_<vout>") of the same first deposit input
+ *    (`changeKeyId`).
+ *  - Validator key: the anyone-child of the validator's identity for
  *    `1-amm pool-<first deposit input>` (src/lib/keys.ts), a public
- *    derivation, computed here. amm-validator checks it against the first
- *    *token* input, so the funding input's position does not matter to it;
- *    it goes last so that input 0 stays the LP key's outpoint.
+ *    derivation, computed here; the claim is locked to it.
  *
  * Filing: the pool output goes to the `bsv21` basket with tags
  * `bsv21:<tokenId>` and `amm-pool`, customInstructions `{id, op: "amm-pool",
  * sym, dec, protocolID, keyID, counterparty, amm: {...}}` and **no `amt`**:
  * 1sat-sdk's balance and `sendBsv21` input selection skip rows without an
- * amount, so the pool is never picked as an ordinary token input; this
- * page's inventory skips `op: "amm-pool"` rows the same way.
+ * amount, so the pool is never picked as an ordinary token input.
  */
 import {
   BSV21_BASKET,
@@ -75,7 +69,6 @@ import {
 } from "@1sat/actions";
 import { BSV21_DEPLOY_TAG, DEPOSIT_BASKET } from "@1sat/types";
 import {
-  Beef,
   LockingScript,
   P2PKH,
   PublicKey,
@@ -102,9 +95,14 @@ import {
   type TokenInput,
 } from "../market/swapAction";
 import { priceOf } from "../market/view";
-import type { ValidatorChoice } from "./validators";
+/** The validator a pool names: its identity key (compressed, lowercase hex) and its libp2p peer ID. */
+export interface ValidatorChoice {
+  identityKey: string;
+  peerId?: string;
+}
 
-import { BRC29_PROTOCOL, brc29KeyID } from "../wallet/brc29";
+import { BRC29_PROTOCOL, brc29KeyID, WALLET_PAYMENT, identityKeyOf } from "../wallet/brc29";
+import { TransactionSignature } from "@bsv/sdk";
 import { tokenSourceBeef } from "./wallet";
 import { POOL_OP, POOL_TAG, isPoolRow } from "./poolRows";
 import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
@@ -115,9 +113,15 @@ export const LP_KEY_PREFIX = "amm-lp-";
 export const LP_KEY_PROTOCOL: WalletProtocol = BRC29_PROTOCOL;
 const LP_DERIVATION_PREFIX = Utils.toBase64(Utils.toArray("amm-lp", "utf8"));
 const CHANGE_DERIVATION_PREFIX = Utils.toBase64(Utils.toArray("amm-change", "utf8"));
-/** Validator fee and LP fee the form starts with (amm-topic's fixture pool; the instance's `ammValidator` terms are not exposed by its routes). */
+/** The validator's default terms (amm-validator's, `config.amm.ammValidator`); a deploy takes the skein's own from `amm.pool.terms`. */
 export const DEFAULT_LP_FEE_BPS = 30n;
 export const DEFAULT_VALIDATOR_FEE_BPS = 5n;
+/** The claim's token amount (one unit) and its sat: the validator appends it after the LP's outputs. */
+export const CLAIM_UNITS = 1n;
+/** The claim output's script length at most: id push, OP_1, OP_2DROP, a 72-byte DER payload push, OP_DROP, P2PKH. */
+export const CLAIM_SCRIPT_LENGTH = 1 + 32 + 1 + 1 + 1 + 72 + 1 + 25;
+/** The deploy's sighash: SINGLE|FORKID, each input over its own output (0.9.0). */
+export const DEPLOY_SCOPE = TransactionSignature.SIGHASH_SINGLE | TransactionSignature.SIGHASH_FORKID;
 
 const toHex = (b: number[] | Uint8Array) => Utils.toHex(Array.from(b));
 
@@ -258,24 +262,31 @@ export function poolableTokens(rows: BasketRow[], meta: Map<string, { sym?: stri
 }
 
 /**
- * The deposit's token inputs: an exact subset when one exists (no change),
- * else the largest outputs until the deposit is covered (token change back
- * to the wallet: allowed, the deploy is a plain transfer). Null when the
- * wallet holds less than `amount`.
+ * The deposit's token inputs, which must carry `amount` and the claim's one
+ * unit (0.9.0): one output carrying exactly `amount + 1` when the wallet has
+ * one (no change), else one output carrying more (token change), else an
+ * exact subset, else the largest outputs until covered. Each input is paired
+ * with an output of its own, so fewer inputs mean fewer outputs. Null when
+ * the wallet holds less than `amount + 1`.
  */
 export function selectDepositInputs(candidates: TokenInput[], amount: bigint): { inputs: TokenInput[]; change: bigint } | null {
   if (amount <= 0n) return null;
-  const exact = selectExactTokenInputs(candidates, amount);
-  if (exact) return { inputs: exact, change: 0n };
+  const need = amount + CLAIM_UNITS;
+  const one = candidates.find((c) => c.amount === need);
+  if (one) return { inputs: [one], change: 0n };
   const sorted = [...candidates].sort((a, b) => (a.amount > b.amount ? -1 : a.amount < b.amount ? 1 : 0));
+  const big = [...sorted].reverse().find((c) => c.amount > need); // the smallest that covers it
+  if (big) return { inputs: [big], change: big.amount - need };
+  const exact = selectExactTokenInputs(candidates, need);
+  if (exact) return { inputs: exact, change: 0n };
   const pick: TokenInput[] = [];
   let sum = 0n;
   for (const c of sorted) {
-    if (sum >= amount) break;
+    if (sum >= need) break;
     pick.push(c);
     sum += c.amount;
   }
-  return sum >= amount ? { inputs: pick, change: sum - amount } : null;
+  return sum >= need ? { inputs: pick, change: sum - need } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +320,7 @@ export interface PoolDeployPlan {
   /** `1-amm pool-<depositOutpoint>`'s key ID. */
   validatorKeyId: string;
   lpKeyId: string;
+  /** What the inputs carry beyond the deposit and the claim's unit. */
   tokenChange: bigint;
   sats: bigint;
   /** Initial marginal price, sats per token (display units when `dec` is known). */
@@ -340,7 +352,7 @@ export function planPoolDeploy(f: PoolDeployForm): PoolDeployPlan {
   if (f.lpFeeBps + f.validatorFeeBps + commissionBps >= 10_000n) throw new PoolDeployError("the fees together must stay below 100%");
   if (f.inputs.length === 0) throw new PoolDeployError("no token inputs");
   const held = f.inputs.reduce((a, t) => a + t.amount, 0n);
-  if (held < f.tokens) throw new PoolDeployError(`the inputs carry ${held}, the deposit is ${f.tokens}`);
+  if (held < f.tokens + CLAIM_UNITS) throw new PoolDeployError(`the inputs carry ${held}, the deposit and the claim's unit are ${f.tokens + CLAIM_UNITS}`);
   const first = f.inputs[0]!;
   const deposit = { txid: first.txid, vout: first.vout };
   const args: PoolArgs = { assetId, lpFeeBps: f.lpFeeBps, validatorFeeBps: f.validatorFeeBps, commissionBps };
@@ -359,7 +371,7 @@ export function planPoolDeploy(f: PoolDeployForm): PoolDeployPlan {
     depositOutpoint: validatorKeyId(deposit),
     validatorKeyId: validatorKeyId(deposit),
     lpKeyId: lpKeyId(`${first.txid}_${first.vout}`),
-    tokenChange: held - f.tokens,
+    tokenChange: held - f.tokens - CLAIM_UNITS,
     sats: f.sats,
     price: priceOf(f.sats, f.tokens, f.dec),
   };
@@ -401,7 +413,7 @@ function varIntSize(n: number): number {
   return n < 0xfd ? 1 : n <= 0xffff ? 3 : n <= 0xffffffff ? 5 : 9;
 }
 
-/** The deploy's size in bytes: `inputs` P2PKH-signed inputs (token inputs and the funding) at 108 bytes of unlocking script, the outputs. */
+/** The deploy's size in bytes: `inputs` P2PKH-signed inputs (token inputs and the funding) at 108 bytes of unlocking script, the outputs (the claim among them). */
 export function deployTxSize(outputs: { script: string }[], inputs: number): number {
   let size = 4 + varIntSize(inputs) + inputs * (36 + varIntSize(P2PKH_UNLOCK_LENGTH) + P2PKH_UNLOCK_LENGTH + 4);
   size += varIntSize(outputs.length);
@@ -413,14 +425,15 @@ export function deployTxSize(outputs: { script: string }[], inputs: number): num
 }
 
 /**
- * The exact funding of a deploy: Σ outputs − Σ token inputs' sats (the sats
- * deposit, + 1 for a token change output, − 1 per 1-sat token input), plus
- * ceil(size × rate / 1000) for the deploy with the funding as one more input.
+ * The exact funding of a deploy: Σ outputs (the LP's and the claim's sat) −
+ * Σ token inputs' sats, plus ceil(size × rate / 1000) for the deploy with the
+ * funding as one more input and the claim appended (0.9.0).
  */
 export function deployFunding(outputs: { satoshis: number; script: string }[], tokenInputs: { satoshis: number }[], satsPerKb: number): SwapFunding {
-  const outSum = outputs.reduce((a, o) => a + o.satoshis, 0);
+  const withClaim = [...outputs, { satoshis: 1, script: "00".repeat(CLAIM_SCRIPT_LENGTH) }];
+  const outSum = withClaim.reduce((a, o) => a + o.satoshis, 0);
   const tokenSats = tokenInputs.reduce((a, t) => a + t.satoshis, 0);
-  const size = deployTxSize(outputs, tokenInputs.length + 1);
+  const size = deployTxSize(withClaim, tokenInputs.length + 1);
   const fee = Math.ceil((size * satsPerKb) / 1000);
   const net = outSum - tokenSats;
   return { satoshis: Math.max(1, net + fee), outputs: net, fee, size, satsPerKb };
@@ -478,7 +491,7 @@ export interface PreparedPoolDeploy {
   expires: number;
   lpKey: { protocolID: WalletProtocol; keyID: string; publicKey: string };
   funding: SwapFunding & Funding & { reference: string };
-  /** Every input signed. */
+  /** The deploy as delivered: every input signed SIGHASH_SINGLE|FORKID, input i paired with output i. */
   deploy: Transaction;
   txid: string;
   /** The deploy as AtomicBEEF: the funding and the token inputs' source transactions with it. */
@@ -486,8 +499,10 @@ export interface PreparedPoolDeploy {
   tokenInputs: TokenInput[];
   /** Output 0 into `bsv21` as a pool row. */
   pool: BasketFiling;
-  /** Output 1 into `bsv21` as an ordinary token output, when there is token change. */
+  /** The token change into `bsv21` as an ordinary token output, when there is token change. */
   tokenChange: BasketFiling | null;
+  /** The sats change outputs, each a BRC-29 payment to self (the change key). */
+  satsChange: { outputIndex: number; satoshis: number; remittance: { derivationPrefix: string; derivationSuffix: string; senderIdentityKey: string } }[];
 }
 
 const P1SAT = P1SAT_PROTOCOL as WalletProtocol;
@@ -510,22 +525,30 @@ export async function preparePoolDeploy(i: PreparePoolDeployInput): Promise<Prep
     tags: [...bsv21FilterTags({ tokenId: sdkId }), POOL_TAG],
     customInstructions: poolCustomInstructions({ tokenId: sdkId, ...meta, protocolID: lpKey.protocolID, keyID: lpKey.keyID, args: plan.args, validatorIdentity: plan.state.validatorIdentity }),
   };
+  // One output per input after the pool: the token change first (if any), then the sats change.
+  const change = await deriveChangeKey(wallet, first);
   const outputs: { satoshis: number; script: string }[] = [{ satoshis: Number(plan.sats), script: plan.lockingScript }];
   let tokenChange: BasketFiling | null = null;
   if (plan.tokenChange > 0n) {
-    const { protocolID, keyID, publicKey } = await deriveChangeKey(wallet, first);
-    outputs.push({ satoshis: 1, script: tokenP2pkhScript(plan.tokenId, plan.tokenChange, publicKey) });
+    outputs.push({ satoshis: 1, script: tokenP2pkhScript(plan.tokenId, plan.tokenChange, change.publicKey) });
     tokenChange = {
       outputIndex: 1,
       basket: BSV21_BASKET,
       tags: bsv21FilterTags({ tokenId: sdkId }),
       customInstructions: buildBsv21CustomInstructions({
         token: { id: sdkId, amt: String(plan.tokenChange), op: "transfer", sym: meta.sym, dec: meta.dec },
-        protocolID,
-        keyID,
+        protocolID: change.protocolID,
+        keyID: change.keyID,
         counterparty: "self",
       }),
     };
+  }
+  const satsChange: PreparedPoolDeploy["satsChange"] = [];
+  const me = await identityKeyOf(wallet);
+  const changeLock = new P2PKH().lock(PublicKey.fromString(change.publicKey).toAddress()).toHex();
+  while (outputs.length < form.inputs.length + 1) {
+    satsChange.push({ outputIndex: outputs.length, satoshis: 1, remittance: { ...changeDerivation(`${first.txid}_${first.vout}`), senderIdentityKey: me } });
+    outputs.push({ satoshis: 1, script: changeLock });
   }
 
   // The token inputs' source transactions: the token's own basket, and `bsv21` (a deploy output there is tagged `bsv21:deploy`, not by its id).
@@ -557,8 +580,8 @@ export async function preparePoolDeploy(i: PreparePoolDeployInput): Promise<Prep
     for (const o of outputs) tx.addOutput({ satoshis: o.satoshis, lockingScript: LockingScript.fromHex(o.script) });
 
     const fi = form.inputs.length;
-    for (const [n, t] of form.inputs.entries()) tx.inputs[n]!.unlockingScript = await signP2pkhWithWallet(wallet, tx, n, t);
-    tx.inputs[fi]!.unlockingScript = await signP2pkhWithWallet(wallet, tx, fi, { satoshis: amounts.satoshis, lockingScript: f.lockingScript, protocolID: P1SAT, keyID: f.keyID, counterparty: "self" });
+    for (const [n, t] of form.inputs.entries()) tx.inputs[n]!.unlockingScript = await signP2pkhWithWallet(wallet, tx, n, t, DEPLOY_SCOPE);
+    tx.inputs[fi]!.unlockingScript = await signP2pkhWithWallet(wallet, tx, fi, { satoshis: amounts.satoshis, lockingScript: f.lockingScript, protocolID: P1SAT, keyID: f.keyID, counterparty: "self" }, DEPLOY_SCOPE);
     for (let n = 0; n < tx.inputs.length; n++) {
       if (!spendValid(tx, n)) throw new DeployShapeError(`input ${n} of the deploy does not validate`);
     }
@@ -574,6 +597,7 @@ export async function preparePoolDeploy(i: PreparePoolDeployInput): Promise<Prep
       tokenInputs: form.inputs,
       pool,
       tokenChange,
+      satsChange,
     };
   } catch (err) {
     await wallet.abortAction({ reference }).catch(() => undefined);
@@ -582,43 +606,73 @@ export async function preparePoolDeploy(i: PreparePoolDeployInput): Promise<Prep
 }
 
 export interface CompletedPoolDeploy {
+  /** The claimed deploy's txid (the validator appended its claim). */
   txid: string;
   /** `<txid>_0` */
   pool: string;
+  /** The claim's output index. */
+  claimVout: number;
   internalized: boolean;
   relinquished: string[];
   /** Internalize or relinquish errors (the deploy itself is final). */
   errors: string[];
 }
 
+/** Whether `claimed` is `delivered` with one output appended and nothing else changed (0.9.0). */
+export function isClaimedDeploy(delivered: Transaction, claimed: Transaction): boolean {
+  if (claimed.version !== delivered.version || claimed.lockTime !== delivered.lockTime) return false;
+  if (claimed.inputs.length !== delivered.inputs.length || claimed.outputs.length !== delivered.outputs.length + 1) return false;
+  for (const [n, d] of delivered.inputs.entries()) {
+    const c = claimed.inputs[n]!;
+    if (c.sourceTXID !== (d.sourceTXID ?? d.sourceTransaction?.id("hex")) || c.sourceOutputIndex !== d.sourceOutputIndex) return false;
+    if ((c.unlockingScript?.toHex() ?? "") !== (d.unlockingScript?.toHex() ?? "")) return false;
+  }
+  for (const [n, d] of delivered.outputs.entries()) {
+    const c = claimed.outputs[n]!;
+    if (c.satoshis !== d.satoshis || c.lockingScript.toHex() !== d.lockingScript.toHex()) return false;
+  }
+  return true;
+}
+
+/** The claimed deploy as AtomicBEEF: the validator's raw transaction over our deploy's ancestry. */
+export function claimedBeef(p: PreparedPoolDeploy, raw: number[]): { tx: Transaction; beef: number[] } {
+  let claimed: Transaction;
+  try {
+    claimed = Transaction.fromBinary(raw);
+  } catch {
+    claimed = Transaction.fromBEEF(raw);
+  }
+  if (!isClaimedDeploy(p.deploy, claimed)) throw new DeployShapeError(`the relay's deploy ${claimed.id("hex")} is not ours (${p.txid}) with a claim appended`);
+  for (const [n, input] of claimed.inputs.entries()) input.sourceTransaction = p.deploy.inputs[n]!.sourceTransaction;
+  return { tx: claimed, beef: claimed.toAtomicBEEF(true) };
+}
+
 /**
- * Accepted: the wallet files the pool output (and the token change) in
- * `bsv21` (`internalizeAction`, basket insertion) and drops what the deploy
- * spent from its baskets (`relinquishOutput`: the funding output in
- * `1sat-deposit`, the token inputs in `bsv21`). The validator does not sign
- * a deploy, so the relay's transaction, when it sends one, must be ours byte
- * for byte. The funding stays a `nosend` action; the wallet's
- * TaskCheckNoSends finds its proof once the validator's broadcast is mined.
+ * Accepted: the claimed deploy must be ours with one output appended (the
+ * validator's claim); the wallet files the pool output, the token change and
+ * the sats change (`internalizeAction`) and drops what the deploy spent from
+ * its baskets (`relinquishOutput`: the funding output in `1sat-deposit`, the
+ * token inputs in `bsv21`). The funding stays a `nosend` action; the
+ * wallet's TaskCheckNoSends finds its proof once the deploy is mined.
  */
 export async function completePoolDeploy(wallet: WalletInterface, p: PreparedPoolDeploy, raw?: number[], txid?: string): Promise<CompletedPoolDeploy> {
-  if (txid && txid !== p.txid) throw new DeployShapeError(`the relay's deploy is ${txid}, not ours (${p.txid})`);
-  if (raw) {
-    let got: string;
-    try {
-      got = Transaction.fromBinary(raw).id("hex");
-    } catch {
-      got = Transaction.fromBEEF(raw).id("hex");
-    }
-    if (got !== p.txid) throw new DeployShapeError(`the relay's deploy is ${got}, not ours (${p.txid})`);
-  }
-  const out: CompletedPoolDeploy = { txid: p.txid, pool: `${p.txid}_0`, internalized: false, relinquished: [], errors: [] };
-  const outputs: InternalizeOutput[] = [p.pool, ...(p.tokenChange ? [p.tokenChange] : [])].map((o) => ({
+  if (!raw) throw new DeployShapeError("the relay answered no claimed deploy");
+  const { tx, beef } = claimedBeef(p, raw);
+  const id = tx.id("hex");
+  if (txid && txid !== id) throw new DeployShapeError(`the relay's txid ${txid} is not its transaction's (${id})`);
+  const claimVout = tx.outputs.length - 1;
+  const out: CompletedPoolDeploy = { txid: id, pool: `${id}_0`, claimVout, internalized: false, relinquished: [], errors: [] };
+  const ci = JSON.parse(p.pool.customInstructions) as { amm: Record<string, unknown> };
+  ci.amm.claimVout = claimVout;
+  const pool = { ...p.pool, customInstructions: JSON.stringify(ci) };
+  const outputs: InternalizeOutput[] = [pool, ...(p.tokenChange ? [p.tokenChange] : [])].map((o) => ({
     outputIndex: o.outputIndex,
     protocol: "basket insertion",
     insertionRemittance: { basket: o.basket, tags: o.tags, customInstructions: o.customInstructions },
   }));
+  for (const c of p.satsChange) outputs.push({ outputIndex: c.outputIndex, protocol: WALLET_PAYMENT, paymentRemittance: { ...c.remittance } });
   try {
-    const r = await wallet.internalizeAction({ tx: p.atomicBeef, outputs, description: "AMM pool deploy", labels: ["amm-pool-deploy"] });
+    const r = await wallet.internalizeAction({ tx: beef, outputs, description: "AMM pool deploy", labels: ["amm-pool-deploy"] });
     out.internalized = r.accepted;
   } catch (err) {
     out.errors.push(`internalizeAction: ${err instanceof Error ? err.message : String(err)}`);

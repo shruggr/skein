@@ -40,7 +40,8 @@ const Fixtures = struct {
     fn init(a: std.mem.Allocator) !Fixtures {
         var f: Fixtures = .{ .txs = .init(a), .raws = .init(a), .id = undefined };
         inline for (.{
-            "fund",         "token_deploy",       "pool_deploy",        "swap_bsv_in",     "swap_tokens_in",  "remove_liquidity",
+            "fund",         "token_deploy",       "pool_deploy",        "swap_bsv_in",     "swap_tokens_in",  "close",
+            "close_fee",    "rescind",            "pool_deploy_delivered", "pool_deploy_forged", "pool_deploy_wrong_key",
             "legacy_fund",  "legacy_deploy0",     "legacy_deploy1",     "legacy_transfer", "legacy_migrate0", "legacy_migrate1",
             "legacy_mixed", "legacy_binary_json", "legacy_auth_deploy", "legacy_mint",     "legacy_unfunded",
         }) |name| {
@@ -125,8 +126,51 @@ test "pool: deploy admitted" {
 
     const v = try token.judge(a, .{ .txid = f.id }, tx, &.{0});
     try testing.expect(v.rejected == null);
-    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, v.outputs_to_admit); // pool, the taker's 50,000, the LP's change
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 4 }, v.outputs_to_admit); // pool, the taker's 50,000, the LP's change, the claim
     try testing.expectEqualSlices(u32, &.{0}, v.coins_to_retain);
+
+    // As the LP delivers it (no claim): the unassigned unit is burned, the rest admitted.
+    const d = try token.judge(a, .{ .txid = f.id }, try f.tx(a, "pool_deploy_delivered"), &.{0});
+    try testing.expect(d.rejected == null);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, d.outputs_to_admit);
+}
+
+test "pool: the claim (0.9.0): one unit, P2PKH to the pool's validator key, its payload that key's signature over the pool's script and the first token input; forged and wrong-key claims do not verify" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try Fixtures.init(a);
+    const raw = f.raws.get("pool_deploy").?;
+    const t = f.txs.get(w.beef.txidOf(raw)).?;
+    const ps = t.outputs[0].locking_script.bytes;
+    const p = (try pool.parse(brc162.decode(ps).?.lock)).?;
+    const first = t.inputs[0].previous_outpoint;
+    try testing.expectEqualSlices(u8, &f.id, &first.txid.bytes); // the token deploy's output 0
+    try testing.expectEqual(@as(?u32, vec.claim_vout), try pool.verifiedClaim(a, t.outputs, p, ps, first.txid.bytes, first.index));
+    const cl = pool.claimOf(t.outputs[vec.claim_vout].locking_script.bytes, f.id).?;
+    try testing.expect(pool.claimVerifies(cl, key33(vec.pool0.validator), ps, f.id, 0));
+    // The same claim over another first input, or against another key, does not verify.
+    try testing.expect(!pool.claimVerifies(cl, key33(vec.pool0.validator), ps, f.id, 1));
+    try testing.expect(!pool.claimVerifies(cl, key33(vec.identity), ps, f.id, 0));
+    // claimScript writes what the validator appends, byte for byte.
+    try testing.expectEqualSlices(u8, t.outputs[vec.claim_vout].locking_script.bytes, try pool.claimScript(a, f.id, cl.sig, cl.pkh));
+    // Not claims: the pool, a token payout of more than one unit, the sats change.
+    try testing.expect(pool.claimOf(ps, f.id) == null);
+    try testing.expect(pool.claimOf(t.outputs[1].locking_script.bytes, f.id) == null);
+    try testing.expect(pool.claimOf(t.outputs[3].locking_script.bytes, f.id) == null);
+
+    // As delivered (no claim), forged (another key signed the payload), wrong key (the pool's
+    // ValidatorPubKey is not the derivation, though its claim verifies against it): nothing.
+    for ([_][]const u8{ "pool_deploy_delivered", "pool_deploy_forged", "pool_deploy_wrong_key" }) |nm| {
+        const x = f.txs.get(w.beef.txidOf(f.raws.get(nm).?)).?;
+        const xs = x.outputs[0].locking_script.bytes;
+        const xp = (try pool.parse(brc162.decode(xs).?.lock)).?;
+        try testing.expect((try pool.verifiedClaim(a, x.outputs, xp, xs, f.id, 0)) == null);
+    }
+    const wk = f.txs.get(w.beef.txidOf(f.raws.get("pool_deploy_wrong_key").?)).?;
+    const wks = wk.outputs[0].locking_script.bytes;
+    const wkp = (try pool.parse(brc162.decode(wks).?.lock)).?;
+    try testing.expect(pool.claimVerifies(pool.claimOf(wk.outputs[4].locking_script.bytes, f.id).?, wkp.validator, wks, f.id, 0));
 }
 
 /// What the topic says about `tx` (it must admit it: no pool check runs in
@@ -154,7 +198,7 @@ test "pool: prefix disagreeing with state is admitted by the topic; pool.check f
     const low = cat(a, &.{ &.{0x20}, &f.id, brc162.pushAmount(&buf, vec.pool0.tokens - 1), &.{0x6d}, lock });
     const low_tx = try withOutput(a, tx, 0, low);
     try testing.expectEqual(pool.Violation.prefix_mismatch, try admittedButFlagged(a, f.id, low_tx, &.{0}));
-    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, (try token.judge(a, .{ .txid = f.id }, low_tx, &.{0})).outputs_to_admit);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 4 }, (try token.judge(a, .{ .txid = f.id }, low_tx, &.{0})).outputs_to_admit);
 
     // A pool whose code carries another asset id, under this token's prefix.
     const other = try a.dupe(u8, tx.outputs[0].script);
@@ -164,7 +208,7 @@ test "pool: prefix disagreeing with state is admitted by the topic; pool.check f
         @memset(other[i..][0..32], 0x5a);
         at = i + 32;
     }
-    try testing.expectEqual(@as(usize, 8), n); // assetId's eight slots
+    try testing.expectEqual(@as(usize, 6), n); // assetId's six slots (0.9.0: Swap and Close)
     try testing.expectEqual(pool.Violation.prefix_mismatch, try admittedButFlagged(a, f.id, try withOutput(a, tx, 0, other), &.{0}));
 
     // Slots that disagree with each other: malformed.
@@ -273,12 +317,6 @@ test "pool: any validator key is still a pool to the overlay (the key is the val
         @memcpy(c[c.len - pool.state_len + 8 + 33 ..][0..33], &k);
         try admittedAndPool(a, f.id, try withOutput(a, swap, 0, c), &.{0});
     }
-
-    // A removeLiquidity that rotates the key instead of carrying it over.
-    const remove = try f.tx(a, "remove_liquidity");
-    const cr = try a.dupe(u8, remove.outputs[0].script);
-    @memcpy(cr[cr.len - pool.state_len + 8 + 33 ..][0..33], &key33(vec.pool1.validator));
-    try admittedAndPool(a, f.id, try withOutput(a, remove, 0, cr), &.{0});
 }
 
 test "pool: methodOf reads Rúnar's method index (amm-validator's key convention)" {
@@ -288,9 +326,10 @@ test "pool: methodOf reads Rúnar's method index (amm-validator's key convention
     const f = try Fixtures.init(a);
     try testing.expectEqual(pool.Method.swap, pool.methodOf((try f.tx(a, "swap_bsv_in")).inputs[0].unlocking_script).?);
     try testing.expectEqual(pool.Method.swap, pool.methodOf((try f.tx(a, "swap_tokens_in")).inputs[0].unlocking_script).?);
-    try testing.expectEqual(pool.Method.remove_liquidity, pool.methodOf((try f.tx(a, "remove_liquidity")).inputs[0].unlocking_script).?);
-    try testing.expectEqual(pool.Method.add_liquidity, pool.methodOf(&.{0x51}).?);
+    try testing.expectEqual(pool.Method.close, pool.methodOf((try f.tx(a, "close")).inputs[0].unlocking_script).?);
+    try testing.expectEqual(pool.Method.close, pool.methodOf((try f.tx(a, "close_fee")).inputs[0].unlocking_script).?);
     try testing.expect(pool.methodOf(&.{}) == null);
+    try testing.expect(pool.methodOf(&.{0x52}) == null); // 2: AddLiquidity's index, gone
     try testing.expect(pool.methodOf(&.{0x53}) == null);
 }
 
@@ -305,10 +344,10 @@ test "pool: a pool anywhere but output 0 is admitted by the topic; pool.check fl
     std.mem.swap(bsv21.Output, &outs[0], &outs[1]);
     t.outputs = outs;
     try testing.expectEqual(pool.Violation.not_at_output_0, try admittedButFlagged(a, f.id, t, &.{0}));
-    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, (try token.judge(a, .{ .txid = f.id }, t, &.{0})).outputs_to_admit);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 4 }, (try token.judge(a, .{ .txid = f.id }, t, &.{0})).outputs_to_admit);
 }
 
-test "pool: swaps and a liquidity removal admitted; pool.check passes them" {
+test "pool: swaps, Closes and the rescind admitted; pool.check passes them" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -348,15 +387,24 @@ test "pool: swaps and a liquidity removal admitted; pool.check passes them" {
     // unaccounted for: rejected.
     try testing.expect((try token.judge(a, .{ .txid = f.id }, s2, &.{0})).rejected != null);
 
-    // RemoveLiquidity keeps the validator key: continuation (0) and the LP's
-    // token withdrawal (2).
-    const r = try f.tx(a, "remove_liquidity");
-    const v3 = try token.judge(a, .{ .txid = f.id }, r, &.{0});
-    try testing.expect(v3.rejected == null);
-    try testing.expectEqualSlices(u32, &.{ 0, 2 }, v3.outputs_to_admit);
+    // Close: no continuation; the LP's tokens (1) admitted, the BSV payout (0) and the change
+    // (2) P2PKH. bsvFee 1,000: the same, no change.
+    for ([_][]const u8{ "close", "close_fee" }) |nm| {
+        const v3 = try token.judge(a, .{ .txid = f.id }, try f.tx(a, nm), &.{0});
+        try testing.expect(v3.rejected == null);
+        try testing.expectEqualSlices(u32, &.{1}, v3.outputs_to_admit);
+        try testing.expectEqualSlices(u32, &.{0}, v3.coins_to_retain);
+    }
+    const cf = try f.tx(a, "close_fee");
+    try testing.expectEqual(@as(u64, vec.pool2.bsv - vec.close_bsv_fee), cf.outputs[0].satoshis);
 
-    // pool.check passes all three (and the deploy): amm-lookup indexes them.
-    for ([_][]const u8{ "pool_deploy", "swap_bsv_in", "remove_liquidity" }) |nm| {
+    // The rescind spends the claim and burns its unit: nothing admitted, the claim a coin consumed.
+    const rs = try token.judge(a, .{ .txid = f.id }, try f.tx(a, "rescind"), &.{0});
+    try testing.expect(rs.rejected == null);
+    try testing.expectEqual(@as(usize, 0), rs.outputs_to_admit.len);
+
+    // pool.check passes the deploy and the swaps: amm-lookup indexes them.
+    for ([_][]const u8{ "pool_deploy", "swap_bsv_in", "close" }) |nm| {
         const t = try f.tx(a, nm);
         try testing.expect(pool.check(try bsv21.judge(a, .{ .txid = f.id }, t, &.{0})) == null);
     }

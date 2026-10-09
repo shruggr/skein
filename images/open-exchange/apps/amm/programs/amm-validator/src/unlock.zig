@@ -11,9 +11,9 @@
 //! the `OP_RETURN` before the state). The preimage is BIP-143 with
 //! ALL|FORKID over the pool input, whose scriptCode is the lock after
 //! Rúnar's leading `OP_NOP OP_CODESEPARATOR` (so neither the token prefix
-//! nor those two bytes). Both signatures a pool method checks (the
-//! validator's, and the LP's for AddLiquidity) are over sha256d of that
-//! same preimage.
+//! nor those two bytes). The signatures a pool method checks (the
+//! validator's for Swap, the LP's for Close) are over sha256d of that
+//! preimage.
 const std = @import("std");
 const w = @import("chain");
 const mandala = @import("mandala");
@@ -32,18 +32,14 @@ pub const Layout = struct {
     args: usize,
     validator_sig: usize,
     next_validator: usize,
-    lp_sig: ?usize = null,
 };
 
 /// Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-/// commissionPkh) and
-/// AddLiquidity(lpSig, validatorSig, nextLpPubKey, nextValidatorPubKey,
-/// addBsv, addTokens). RemoveLiquidity is LP-only: no layout.
+/// commissionPkh). Close is the LP's alone: no layout (0.9.0).
 pub fn layoutOf(m: pool.Method) ?Layout {
     return switch (m) {
         .swap => .{ .args = 6, .validator_sig = 0, .next_validator = 1 },
-        .add_liquidity => .{ .args = 6, .validator_sig = 1, .next_validator = 3, .lp_sig = 0 },
-        .remove_liquidity => null,
+        .close => null,
     };
 }
 

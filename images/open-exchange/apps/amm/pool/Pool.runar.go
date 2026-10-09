@@ -25,7 +25,8 @@
 // output itself; a swap carries no arbitrary outputs.
 // The script cannot see token inputs, so every method that brings tokens in
 // requires the validator's signature: the validator's role is to confirm the
-// token inputs are valid and cover the token outputs.
+// token inputs are valid and cover the token outputs. Two methods (skein-amm
+// 0.9.0, David Case 2026-10-09): Swap, the validator's; Close, the LP's.
 package pool
 
 import runar "github.com/icellan/runar/packages/runar-go"
@@ -34,9 +35,9 @@ type Pool struct {
 	runar.StatefulSmartContract
 
 	TokenReserve runar.Bigint
-	// Keys rotate: each party supplies its next key on every spend it signs
-	// (validator: swap, addLiquidity; LP: addLiquidity, removeLiquidity).
-	// Payouts go to Hash160 of the current key. Next keys are derived
+	// The validator's key rotates: it names its next key on every Swap it
+	// signs. The LP's key is the pool's for its life (Close is its only
+	// spend). Payouts go to Hash160 of the current key. Next keys are derived
 	// off-chain so wallets can find their payouts from overlay data.
 	LpPubKey        runar.PubKey
 	ValidatorPubKey runar.PubKey
@@ -117,51 +118,28 @@ func (c *Pool) Swap(validatorSig runar.Sig, nextValidatorPubKey runar.PubKey, am
 	}
 }
 
-// AddLiquidity lets the LP deposit BSV and/or tokens. The LP owns the pool,
-// so deposits need not keep the reserve ratio. Tokens coming in need the
-// validator's signature.
+// Close pays the whole pool out to the LP and ends it: the LP's alone (David
+// Case, 2026-10-09: a position is deployed or closed, never resized in place;
+// resizing is a Close and a new deploy). bsvFee (0 <= bsvFee <= the pool's
+// sats) is left for the miner; the rest of the BSV goes to P2PKH of the LP key
+// (an output only when nonzero), then every token to the same key in one
+// BRC-162 value output. No continuation. bsvFee = 0 pays everything out: the
+// LP funds the miner fee (and the token output's sat) from another input,
+// with Rúnar's change output after the contract's.
 //
-// Outputs: 0 pool.
-func (c *Pool) AddLiquidity(lpSig runar.Sig, validatorSig runar.Sig, nextLpPubKey runar.PubKey, nextValidatorPubKey runar.PubKey, addBsv runar.Bigint, addTokens runar.Bigint) {
+// Outputs: 0 the BSV payout (when nonzero), then the tokens.
+func (c *Pool) Close(lpSig runar.Sig, bsvFee runar.Bigint) {
 	runar.Assert(runar.CheckSig(lpSig, c.LpPubKey))
-	runar.Assert(runar.CheckSig(validatorSig, c.ValidatorPubKey))
-	runar.Assert(addBsv >= 0)
-	runar.Assert(addTokens >= 0)
-	runar.Assert(addBsv+addTokens > 0)
-
-	c.TokenReserve = c.TokenReserve + addTokens
-	c.LpPubKey = nextLpPubKey
-	c.ValidatorPubKey = nextValidatorPubKey
-	c.writePool(runar.ExtractAmount(c.TxPreimage) + addBsv)
-}
-
-// RemoveLiquidity lets the LP withdraw BSV and/or tokens to their payout
-// lock. Either both reserves stay positive and the pool continues, or both
-// reach zero and the pool closes (no continuation output).
-//
-// Outputs: 0 pool (unless closing), then BSV and token withdrawals when nonzero.
-func (c *Pool) RemoveLiquidity(lpSig runar.Sig, nextLpPubKey runar.PubKey, removeBsv runar.Bigint, removeTokens runar.Bigint) {
-	runar.Assert(runar.CheckSig(lpSig, c.LpPubKey))
+	sats := runar.ExtractAmount(c.TxPreimage)
+	runar.Assert(bsvFee >= 0)
+	runar.Assert(bsvFee <= sats)
 	lpPkh := runar.Hash160(c.LpPubKey)
-	runar.Assert(removeBsv >= 0)
-	runar.Assert(removeTokens >= 0)
-	runar.Assert(removeBsv+removeTokens > 0)
-
-	newBsv := runar.ExtractAmount(c.TxPreimage) - removeBsv
-	c.TokenReserve = c.TokenReserve - removeTokens
-	c.LpPubKey = nextLpPubKey
-	closing := newBsv == 0 && c.TokenReserve == 0
-	runar.Assert(closing || (newBsv > 0 && c.TokenReserve > 0))
-
-	if !closing {
-		c.AddRawOutput(newBsv, c.poolScript())
+	payout := sats - bsvFee
+	tokens := c.tokenP2pkh(c.TokenReserve, lpPkh)
+	if payout > 0 {
+		c.AddRawOutput(payout, p2pkh(lpPkh))
 	}
-	if removeBsv > 0 {
-		c.AddRawOutput(removeBsv, p2pkh(lpPkh))
-	}
-	if removeTokens > 0 {
-		c.AddRawOutput(1, c.tokenP2pkh(removeTokens, lpPkh))
-	}
+	c.AddRawOutput(1, tokens)
 }
 
 // writePool emits the pool continuation holding bsvReserve.

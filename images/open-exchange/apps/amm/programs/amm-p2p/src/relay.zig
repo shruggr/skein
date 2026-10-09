@@ -54,7 +54,7 @@
 //! A node does not dial itself, so the relay does what the front door does
 //! with a frame on `/amm-validator/1/<call>` (skein programs/frontdoor
 //! libp2p.zig `stepped`): it calls the route's handler, amm-validator's fn
-//! (`swap`, `deploy`, `addLiquidity`), in-VM with the same package as the
+//! (`swap`, `deploy`), in-VM with the same package as the
 //! frame's body, from the relay thread's step. The handler answers `{verdict,
 //! body}` (the reply: accepted | refused; done) or `{wait: true}` after
 //! awaiting its submission (the thread rests on it); stepped again by the
@@ -76,15 +76,11 @@
 //! the funding merged in when missing>, pool: 0}`); accepted is the deploy
 //! itself (nobody signs it but the LP).
 //!
-//! **The AddLiquidity** (`amm.liquidity/1`: `checkAdd`, `submitAdd`): the
-//! LP's funding transaction and the AddLiquidity spending the pool (input 0),
-//! the LP's token outputs and the funding output, the LP's slot in the pool
-//! call signed and the validator's empty, given as a BEEF carrying the
-//! funding and the token inputs' sources. A record of kind `amm-liquidity` in
-//! the state map `liquidity`, the same lifecycle, relayed on
-//! `/amm-validator/1/addLiquidity` (box `addLiquidity`, body `{tx: <the
-//! add's BEEF, the funding merged in when missing>, pool}`); accepted is the
-//! validator's signed transaction (the add with its slot filled, checked).
+//! The deploy is delivered, not broadcast (0.9.0, David Case 2026-10-09): the LP signs every
+//! input SIGHASH_SINGLE, each paired with its own output, and leaves one token unit for the
+//! validator's claim, which the validator appends (amm-validator `deploy`); accepted is that
+//! claimed deploy: the same inputs, the LP's outputs and the claim after them (`claimedOf`).
+//! (AddLiquidity, `amm.liquidity/1`, is gone with the contract's method.)
 const std = @import("std");
 const w = @import("chain");
 const mandala = @import("mandala");
@@ -116,61 +112,50 @@ pub const fn_terms = "amm.swap.terms";
 /// The pool deploy through the relay (interface `amm.pool/1`).
 pub const fn_pool_submit = "amm.pool.submit";
 pub const fn_pool_status = "amm.pool.status";
-/// The AddLiquidity through the relay (interface `amm.liquidity/1`).
-pub const fn_liquidity_submit = "amm.liquidity.submit";
-pub const fn_liquidity_status = "amm.liquidity.status";
+/// The validator's terms (0.9.0): what a deploy here must carry.
+pub const fn_pool_terms = "amm.pool.terms";
 /// The validator's direct calls, and the boxes their packages name.
 pub const swap_protocol = "/amm-validator/1/swap";
 pub const swap_box = "swap";
 pub const deploy_protocol = "/amm-validator/1/deploy";
 pub const deploy_box = "deploy";
-pub const liquidity_protocol = "/amm-validator/1/addLiquidity";
-pub const liquidity_box = "addLiquidity";
 /// The launched relay thread's argument record: `{kind, id}`.
 pub const relay_kind = "amm-swap-relay";
 pub const pool_relay_kind = "amm-pool-relay";
-pub const liquidity_relay_kind = "amm-liquidity-relay";
 pub const record_kind = "amm-swap";
 pub const pool_record_kind = "amm-pool";
-pub const liquidity_record_kind = "amm-liquidity";
 pub const state_kind = "amm-app-state";
 
-/// What a record relays: a swap (`amm.swap/1`), a pool deploy
-/// (`amm.pool/1`) or an AddLiquidity (`amm.liquidity/1`). All kinds share the
-/// record's shape, its lifecycle and the app's state; each has its own map
-/// there (`swaps`, `pools`, `liquidity`), its own relay thread kind, and its
-/// own call on the validator.
+/// What a record relays: a swap (`amm.swap/1`) or a pool deploy
+/// (`amm.pool/1`). Both kinds share the record's shape, its lifecycle and the
+/// app's state; each has its own map there (`swaps`, `pools`), its own relay
+/// thread kind, and its own call on the validator.
 pub const Kind = enum {
     swap,
     pool,
-    liquidity,
 
     pub fn recordKind(k: Kind) []const u8 {
         return switch (k) {
             .swap => record_kind,
             .pool => pool_record_kind,
-            .liquidity => liquidity_record_kind,
         };
     }
     pub fn relayKind(k: Kind) []const u8 {
         return switch (k) {
             .swap => relay_kind,
             .pool => pool_relay_kind,
-            .liquidity => liquidity_relay_kind,
         };
     }
     pub fn protocol(k: Kind) []const u8 {
         return switch (k) {
             .swap => swap_protocol,
             .pool => deploy_protocol,
-            .liquidity => liquidity_protocol,
         };
     }
     pub fn box(k: Kind) []const u8 {
         return switch (k) {
             .swap => swap_box,
             .pool => deploy_box,
-            .liquidity => liquidity_box,
         };
     }
     /// The submit function whose answer a message caller waits for.
@@ -178,7 +163,6 @@ pub const Kind = enum {
         return switch (k) {
             .swap => fn_submit,
             .pool => fn_pool_submit,
-            .liquidity => fn_liquidity_submit,
         };
     }
     /// The record's field holding what was relayed: the raw swap, the deploy's BEEF, the add's BEEF.
@@ -186,7 +170,6 @@ pub const Kind = enum {
         return switch (k) {
             .swap => "swap",
             .pool => "deploy",
-            .liquidity => "add",
         };
     }
     /// The status function of the kind.
@@ -194,20 +177,19 @@ pub const Kind = enum {
         return switch (k) {
             .swap => fn_status,
             .pool => fn_pool_status,
-            .liquidity => fn_liquidity_status,
         };
     }
     pub fn ofRelay(s: []const u8) ?Kind {
-        inline for (.{ Kind.swap, Kind.pool, Kind.liquidity }) |k| if (eql(u8, s, k.relayKind())) return k;
+        inline for (.{ Kind.swap, Kind.pool }) |k| if (eql(u8, s, k.relayKind())) return k;
         return null;
     }
     pub fn ofRecord(s: []const u8) ?Kind {
-        inline for (.{ Kind.swap, Kind.pool, Kind.liquidity }) |k| if (eql(u8, s, k.recordKind())) return k;
+        inline for (.{ Kind.swap, Kind.pool }) |k| if (eql(u8, s, k.recordKind())) return k;
         return null;
     }
     /// The kind whose submit function is `name`.
     pub fn ofSubmit(name: []const u8) ?Kind {
-        inline for (.{ Kind.swap, Kind.pool, Kind.liquidity }) |k| if (eql(u8, name, k.submitFn())) return k;
+        inline for (.{ Kind.swap, Kind.pool }) |k| if (eql(u8, name, k.submitFn())) return k;
         return null;
     }
 };
@@ -538,8 +520,7 @@ pub fn nonceFor(kind: Kind, id: [32]u8) [16]u8 {
 
 /// The package for a record, to the validator: a swap's request BEEF (from
 /// the pair the record keeps) and the pool in box `swap`; a deploy's BEEF
-/// (`deployBeef`) and `pool: 0` in box `deploy`; an add's BEEF (`deployBeef`
-/// over the add) and the pool in box `addLiquidity`.
+/// (`deployBeef`) and `pool: 0` in box `deploy`.
 pub fn packageFor(a: Allocator, signer: Signer, rec: Record) ![]u8 {
     const f = given(a, rec.funding) orelse return error.BadRecord;
     const s = given(a, rec.swap) orelse return error.BadRecord;
@@ -549,8 +530,6 @@ pub fn packageFor(a: Allocator, signer: Signer, rec: Record) ![]u8 {
             break :blk try requestBody(a, try requestBeef(a, pair), rec.pool);
         },
         .pool => try deployBody(a, try deployBeef(a, f, s)),
-        // One BEEF, as a deploy's: the add's as received, the funding merged in when missing.
-        .liquidity => try requestBody(a, try deployBeef(a, f, s), rec.pool),
     };
     return package(a, signer, &rec.validator, rec.kind.box(), body, nonceFor(rec.kind, rec.id));
 }
@@ -690,264 +669,21 @@ pub fn deployBody(a: Allocator, tx: []const u8) !Value {
     }) };
 }
 
-// ---------------------------------------------------------------- the AddLiquidity (amm.liquidity/1)
-
-/// An AddLiquidity's call to the pool, as Rúnar lays it out (amm-validator
-/// unlock.zig): `_codePart, lpSig, validatorSig, nextLpPubKey,
-/// nextValidatorPubKey, addBsv, addTokens, _changePKH, _changeAmount,
-/// txPreimage, methodIndex`: pushes only.
-pub const AddCall = struct {
-    lp_sig: []const u8,
-    validator_sig: brc162.Push,
-    next_lp: []const u8,
-    next_validator: []const u8,
-    add_bsv: u64,
-    add_tokens: u64,
-    change_pkh: []const u8,
-    change: u64,
-};
-
-pub const add_pushes = 1 + 6 + 4;
-
-fn pushesOf(a: Allocator, script: []const u8) !?[]brc162.Push {
-    var pushes: std.ArrayList(brc162.Push) = .empty;
-    var pos: usize = 0;
-    while (pos < script.len) {
-        const p = brc162.readPush(script, pos) orelse return null;
-        try pushes.append(a, p);
-        pos = p.next;
+/// Whether `claimed` is the deploy `delivered` with the validator's claim appended (0.9.0): the
+/// same version, inputs and lock time, the delivered outputs first, and one more output.
+pub fn claimedOf(a: Allocator, delivered: []const u8, claimed: []const u8) bool {
+    const d = Transaction.parse(a, delivered) catch return false;
+    const c = Transaction.parse(a, claimed) catch return false;
+    if (c.serializedLen() != claimed.len) return false;
+    if (d.version != c.version or d.lock_time != c.lock_time or d.inputs.len != c.inputs.len or c.outputs.len != d.outputs.len + 1) return false;
+    for (d.inputs, c.inputs) |x, y| {
+        if (!eql(u8, &x.previous_outpoint.txid.bytes, &y.previous_outpoint.txid.bytes) or x.previous_outpoint.index != y.previous_outpoint.index or
+            x.sequence != y.sequence or !eql(u8, x.unlocking_script.bytes, y.unlocking_script.bytes)) return false;
     }
-    return pushes.items;
-}
-
-pub fn parseAddCall(a: Allocator, script: []const u8) !?AddCall {
-    const pushes = (try pushesOf(a, script)) orelse return null;
-    if (pushes.len != add_pushes) return null;
-    const arg = pushes[1..];
-    return .{
-        .lp_sig = arg[0].data,
-        .validator_sig = arg[1],
-        .next_lp = arg[2].data,
-        .next_validator = arg[3].data,
-        .add_bsv = numOf(arg[4]) orelse return null,
-        .add_tokens = numOf(arg[5]) orelse return null,
-        .change_pkh = arg[6].data,
-        .change = numOf(arg[7]) orelse return null,
-    };
-}
-
-fn isKey(k: []const u8) bool {
-    return k.len == 33 and (k[0] == 2 or k[0] == 3);
-}
-
-/// An AddLiquidity the relay carries (docs/notes.md 2026-10-02, "Swap funding
-/// and signing" applied to AddLiquidity): the LP's funding transaction (one
-/// exact output: the sats added + the miner fee) and the add spending the
-/// pool, the LP's token outputs and the funding output, the LP's slot and
-/// inputs signed, the validator's slot empty. The validator signs last.
-pub const AddPair = struct {
-    funding: Given,
-    /// The add as a BEEF (Atomic, V1, V2) whose subject it is.
-    add: Given,
-    pool: Outpoint,
-    call: AddCall,
-    /// The pool spent, holding `spent_sats`; its continuation (output 0).
-    spent: pool.Pool,
-    spent_sats: u64,
-    continuation: pool.Pool,
-};
-
-pub const AddChecked = union(enum) { ok: AddPair, refused: Refusal };
-
-fn refusedAdd(reason: []const u8, detail: ?[]const u8) AddChecked {
-    return .{ .refused = .{ .reason = reason, .detail = detail } };
-}
-
-/// The output a BEEF carries (raw), or null.
-fn beefOutput(a: Allocator, b: beef.Beef, txid: [32]u8, vout: u32) ?Transaction {
-    const e = b.find(txid) orelse return null;
-    const raw = e.raw orelse return null;
-    const t = e.tx orelse (Transaction.parse(a, raw) catch return null);
-    if (vout >= t.outputs.len) return null;
-    return t;
-}
-
-/// What `checkAdd` needs of the instance besides the arguments: the held
-/// transaction (`Env.heldFn`) for a pool source the add's BEEF does not carry.
-pub const Held = struct {
-    ctx: *anyopaque,
-    fn_: ?*const fn (ctx: *anyopaque, a: Allocator, txid: [32]u8) anyerror!?[]const u8 = null,
-};
-
-/// Check an AddLiquidity before anything is written (`amm.liquidity.submit`'s
-/// first step), as pool/Pool.runar.go's `AddLiquidity` writes it: input 0
-/// spends `pool` with an AddLiquidity call (method index 1) whose LP slot is
-/// signed (present) and validator slot `OP_0`; another input spends the
-/// funding transaction; every other input of both signed (present); the
-/// LP's other inputs' parents in the add's BEEF; the pool spent (from the
-/// BEEF, else held) is a pool naming `validator`; output 0 its continuation:
-/// the same code and readonly fields, the BSV reserve increased by addBsv,
-/// TokenReserve by addTokens, LpPubKey the call's nextLpPubKey,
-/// ValidatorPubKey the call's nextValidatorPubKey, which is the identity's
-/// anyone-child for the pool outpoint (the validator's convention); then
-/// Rúnar's change output only when `_changeAmount > 0`, nothing else. No fee
-/// and no commission: the contract has none on AddLiquidity.
-pub fn checkAdd(a: Allocator, funding_bytes: []const u8, add_bytes: []const u8, pool_text: []const u8, validator: []const u8, expires: u64, now: u64, held: Held) !AddChecked {
-    if (validator.len != 33 or (validator[0] != 2 and validator[0] != 3)) return refusedAdd("bad_validator", "an identity key: 33 bytes, compressed");
-    if (expires <= now) return refusedAdd("expired", null);
-    const funding = given(a, funding_bytes) orelse return refusedAdd("bad_funding", "not a transaction, or a BEEF whose subject is one");
-    const add = given(a, add_bytes) orelse return refusedAdd("bad_add", "not a BEEF whose subject is a transaction");
-    const ab = add.beef orelse return refusedAdd("bad_add", "the add is a BEEF carrying the funding and the token inputs' source transactions");
-    const tx = add.tx;
-    const op = Outpoint.parse(pool_text) orelse return refusedAdd("bad_pool", "want <txid>_<vout>");
-
-    // The add spends the pool (input 0) and an output of the funding transaction.
-    if (tx.inputs.len < 2) return refusedAdd("bad_add", "an add has the pool and the funding as inputs");
-    const p0 = tx.inputs[0].previous_outpoint;
-    if (p0.index != op.vout or !eql(u8, &p0.txid.bytes, &op.txid)) return refusedAdd("pool_not_input_0", null);
-    const spends_funding = for (tx.inputs[1..]) |in| {
-        if (eql(u8, &in.previous_outpoint.txid.bytes, &funding.txid) and in.previous_outpoint.index < funding.tx.outputs.len) break true;
-    } else false;
-    if (!spends_funding) return refusedAdd("funding_not_spent", null);
-
-    // Complete: every funding input and every add input but the pool's carries its unlocking script.
-    for (funding.tx.inputs, 0..) |in, i| if (in.unlocking_script.bytes.len == 0) return refusedAdd("funding_unsigned", try std.fmt.allocPrint(a, "input {d}", .{i}));
-    for (tx.inputs[1..], 1..) |in, i| if (in.unlocking_script.bytes.len == 0) return refusedAdd("add_unsigned", try std.fmt.allocPrint(a, "input {d}", .{i}));
-
-    // The pool call: AddLiquidity, laid out as Rúnar calls it, the LP's slot signed, the validator's empty.
-    const unlocking = tx.inputs[0].unlocking_script.bytes;
-    if (pool.methodOf(unlocking) != .add_liquidity) return refusedAdd("not_add_liquidity", null);
-    const call = (try parseAddCall(a, unlocking)) orelse return refusedAdd("bad_call", "not a Rúnar call of AddLiquidity");
-    if (call.validator_sig.op != brc162.OP_0) return refusedAdd("signature_slot_not_empty", null);
-    if (call.lp_sig.len == 0) return refusedAdd("lp_unsigned", "the LP's slot in the pool call is empty");
-    if (!isKey(call.next_lp)) return refusedAdd("bad_call", "nextLpPubKey");
-    if (!isKey(call.next_validator)) return refusedAdd("bad_call", "nextValidatorPubKey");
-    if (call.add_bsv + call.add_tokens == 0) return refusedAdd("bad_call", "addBsv + addTokens is 0");
-    if (call.change > 0 and call.change_pkh.len != 20) return refusedAdd("bad_call", "_changePKH");
-
-    // The LP's other inputs: each parent in the add's BEEF (the funding may come on its own).
-    for (tx.inputs[1..], 1..) |in, i| {
-        const pop = in.previous_outpoint;
-        if (eql(u8, &pop.txid.bytes, &funding.txid)) continue;
-        const e = ab.find(pop.txid.bytes) orelse return refusedAdd("missing_parent", try std.fmt.allocPrint(a, "input {d}: {s} is not in the add's BEEF", .{ i, &w.header.toHex(pop.txid.bytes) }));
-        if (e.raw == null) return refusedAdd("missing_parent", try std.fmt.allocPrint(a, "input {d}: {s} is in the add's BEEF by txid only", .{ i, &w.header.toHex(pop.txid.bytes) }));
-        if (beefOutput(a, ab, pop.txid.bytes, pop.index) == null) return refusedAdd("missing_parent", try std.fmt.allocPrint(a, "input {d}: no output {d} in its source", .{ i, pop.index }));
+    for (d.outputs, c.outputs[0..d.outputs.len]) |x, y| {
+        if (x.satoshis != y.satoshis or !eql(u8, x.locking_script.bytes, y.locking_script.bytes)) return false;
     }
-
-    // The pool spent: its source from the BEEF, else held here.
-    const src_tx: Transaction = beefOutput(a, ab, op.txid, op.vout) orelse blk: {
-        const f = held.fn_ orelse break :blk null;
-        const raw = (try f(held.ctx, a, op.txid)) orelse break :blk null;
-        const t = Transaction.parse(a, raw) catch break :blk null;
-        break :blk if (op.vout < t.outputs.len) t else null;
-    } orelse return refusedAdd("missing_parent", "input 0: the pool's source transaction is neither in the add's BEEF nor held here");
-    const spent_out = src_tx.outputs[op.vout];
-    const spent = switch (poolAt(spent_out.locking_script.bytes)) {
-        .pool => |p| p,
-        .none => return refusedAdd("not_a_pool", "input 0 does not spend a pool"),
-        .bad => |why| return refusedAdd("not_a_pool", try std.fmt.allocPrint(a, "input 0: {s}", .{why})),
-    };
-    if (!eql(u8, &spent.identity, validator)) return refusedAdd("wrong_validator", "the pool's ValidatorIdentity is another");
-    const spent_sats: u64 = @intCast(spent_out.satoshis);
-
-    // The next validator key: the identity's child for the pool outpoint (checked again by the validator).
-    const want = try pool.validatorKey(a, validator[0..33].*, op.txid, op.vout);
-    if (!eql(u8, &want, call.next_validator)) return refusedAdd("wrong_validator_key", try std.fmt.allocPrint(a, "nextValidatorPubKey is not the identity's child for {s}", .{pool_text}));
-
-    // The outputs, as the contract writes them.
-    if (tx.outputs.len == 0) return refusedAdd("bad_outputs", "no continuation");
-    const cont = switch (poolAt(tx.outputs[0].locking_script.bytes)) {
-        .pool => |p| p,
-        .none => return refusedAdd("bad_outputs", "output 0 is not a pool"),
-        .bad => |why| return refusedAdd("bad_outputs", try std.fmt.allocPrint(a, "output 0: {s}", .{why})),
-    };
-    const code = struct {
-        fn of(script: []const u8) []const u8 {
-            const tok = brc162.decode(script).?;
-            return tok.lock[0 .. tok.lock.len - 1 - pool.state_len];
-        }
-    }.of;
-    if (!eql(u8, code(tx.outputs[0].locking_script.bytes), code(spent_out.locking_script.bytes))) return refusedAdd("bad_outputs", "the continuation's code is not the pool's");
-    if (!eql(u8, &cont.asset_id, &spent.asset_id) or !eql(u8, &cont.identity, &spent.identity) or cont.lp_fee_bps != spent.lp_fee_bps or
-        cont.validator_fee_bps != spent.validator_fee_bps or cont.commission_bps != spent.commission_bps)
-        return refusedAdd("bad_outputs", "the continuation's readonly fields");
-    if (tx.outputs[0].satoshis != spent_sats + call.add_bsv) return refusedAdd("bad_outputs", "the continuation's BSV reserve is not the pool's + addBsv");
-    if (cont.token_reserve != spent.token_reserve + call.add_tokens) return refusedAdd("bad_outputs", "the continuation's TokenReserve is not the pool's + addTokens");
-    if (!eql(u8, &cont.lp, call.next_lp)) return refusedAdd("bad_outputs", "the continuation's LpPubKey is not nextLpPubKey");
-    if (!eql(u8, &cont.validator, call.next_validator)) return refusedAdd("bad_outputs", "the continuation's ValidatorPubKey is not nextValidatorPubKey");
-    var at: usize = 1;
-    if (call.change > 0) {
-        if (at >= tx.outputs.len) return refusedAdd("bad_outputs", "no change output");
-        const o = tx.outputs[at];
-        const pkh = p2pkhHash(o.locking_script.bytes) orelse return refusedAdd("bad_outputs", "the change output is not P2PKH");
-        if (!eql(u8, pkh, call.change_pkh) or o.satoshis != call.change) return refusedAdd("bad_outputs", "the change output is not the call's");
-        at += 1;
-    }
-    if (tx.outputs.len != at) return refusedAdd("bad_outputs", "outputs past the contract's");
-    return .{ .ok = .{ .funding = funding, .add = add, .pool = op, .call = call, .spent = spent, .spent_sats = spent_sats, .continuation = cont } };
-}
-
-/// Whether `signed` is the add `raw` with the validator's signature in its
-/// slot: every byte as the LP sent it but the pool call's validatorSig push,
-/// which is filled.
-pub fn signedAdd(a: Allocator, raw: []const u8, signed: []const u8) !bool {
-    const t = Transaction.parse(a, raw) catch return false;
-    const s = Transaction.parse(a, signed) catch return false;
-    if (s.serializedLen() != signed.len or t.inputs.len != s.inputs.len or t.inputs.len == 0) return false;
-    const tp = (try pushesOf(a, t.inputs[0].unlocking_script.bytes)) orelse return false;
-    const sp = (try pushesOf(a, s.inputs[0].unlocking_script.bytes)) orelse return false;
-    if (tp.len != add_pushes or sp.len != add_pushes or sp[2].data.len == 0) return false;
-    for (tp, sp, 0..) |x, y, i| if (i != 2 and !(x.op == y.op and eql(u8, x.data, y.data))) return false;
-    // The rest, byte for byte: the transaction with input 0's unlocking script as the add's.
-    const ins = try a.dupe(w.bsvz.transaction.Input, s.inputs);
-    ins[0].unlocking_script = t.inputs[0].unlocking_script;
-    var bare = s;
-    bare.inputs = ins;
-    return eql(u8, try bare.serialize(a), raw);
-}
-
-/// The id of an add record: sha256 of the add's raw bytes (the BEEF's subject, the validator's slot empty), or null when it is no BEEF of one.
-pub fn addId(a: Allocator, add: []const u8) ?[32]u8 {
-    return deployId(a, add);
-}
-
-/// amm.liquidity.submit `{funding, add, pool, validator, peerId, expires}` (the args
-/// already checked against the declared shape): the record, or why not. As
-/// `submit`: check first, write last; the same add again answers its record;
-/// one that timed out or failed in transport is relayed again.
-pub fn submitAdd(a: Allocator, env: Env, args: Value) !Submitted {
-    const funding = args.getBytes("funding") orelse return .{ .refused = .{ .reason = "bad_funding" } };
-    const add = args.getBytes("add") orelse return .{ .refused = .{ .reason = "bad_add" } };
-    const pool_text = args.getText("pool") orelse return .{ .refused = .{ .reason = "bad_pool" } };
-    const validator = args.getBytes("validator") orelse return .{ .refused = .{ .reason = "bad_validator" } };
-    const expires = args.getUint("expires") orelse return .{ .refused = .{ .reason = "expired" } };
-    const id = addId(a, add) orelse return .{ .refused = .{ .reason = "bad_add", .detail = "not a BEEF whose subject is a transaction" } };
-    if (try env.book.getKind(a, .liquidity, id)) |rec| {
-        if (rec.status == .pending) return .{ .pending = rec };
-        if (!rec.status.retryable()) return .{ .settled = rec };
-    }
-    switch (try checkAdd(a, funding, add, pool_text, validator, expires, env.now, .{ .ctx = env.ctx, .fn_ = env.heldFn })) {
-        .refused => |r| return .{ .refused = r },
-        .ok => {},
-    }
-    const peer = peerArg(args) orelse return .{ .refused = .{ .reason = "bad_peer", .detail = "peerId: the validator's libp2p peer ID, text" } };
-    var rec: Record = .{
-        .kind = .liquidity,
-        .id = id,
-        .funding = funding,
-        .swap = add,
-        .pool = pool_text,
-        .validator = validator[0..33].*,
-        .expires = expires,
-        .created = env.now,
-        .updated = env.now,
-        .peer = peer,
-        .local = isSelf(env, peer),
-        .request = env.request,
-    };
-    rec.thread = try env.launchFn(env.ctx, a, .liquidity, id);
-    try env.book.put(a, rec);
-    return .{ .launched = rec };
+    return true;
 }
 
 // ---------------------------------------------------------------- the record
@@ -1078,33 +814,29 @@ pub const Record = struct {
 };
 
 /// The app's state: `{kind: "amm-app-state", swaps: <the MST of swap records
-/// by id>, pools: <the MST of deploy records by id>, liquidity: <the MST of
-/// AddLiquidity records by id>}`.
+/// by id>, pools: <the MST of deploy records by id>}` (0.9.0: the AddLiquidity
+/// records' `liquidity` is no longer kept).
 pub const Book = struct {
     s: w.store.Store,
     swaps: w.store.Map,
     pools: w.store.Map,
-    liquidity: w.store.Map,
 
     pub fn load(a: Allocator, s: w.store.Store, saved: ?Value) !Book {
         const maps = try w.store.Maps.create(a, s);
         var swaps: ?[]const u8 = null;
         var pools: ?[]const u8 = null;
-        var liquidity: ?[]const u8 = null;
         if (saved) |st| {
             if (!eql(u8, st.getText("kind") orelse "", state_kind)) return error.BadState;
             swaps = st.getCid("swaps");
             pools = st.getCid("pools");
-            liquidity = st.getCid("liquidity");
         }
-        return .{ .s = s, .swaps = maps.map(swaps), .pools = maps.map(pools), .liquidity = maps.map(liquidity) };
+        return .{ .s = s, .swaps = maps.map(swaps), .pools = maps.map(pools) };
     }
 
     fn mapOf(b: *Book, kind: Kind) *w.store.Map {
         return switch (kind) {
             .swap => &b.swaps,
             .pool => &b.pools,
-            .liquidity => &b.liquidity,
         };
     }
 
@@ -1128,12 +860,10 @@ pub const Book = struct {
     pub fn state(b: *Book, a: Allocator) !Value {
         try b.swaps.flush();
         try b.pools.flush();
-        try b.liquidity.flush();
         return .{ .map = try a.dupe(cbor.Entry, &.{
             .{ .key = "kind", .value = .{ .text = state_kind } },
             .{ .key = "swaps", .value = if (b.swaps.root) |r| .{ .cid = r } else .null },
             .{ .key = "pools", .value = if (b.pools.root) |r| .{ .cid = r } else .null },
-            .{ .key = "liquidity", .value = if (b.liquidity.root) |r| .{ .cid = r } else .null },
         }) };
     }
 };
@@ -1163,35 +893,30 @@ pub const Effect = struct {
 
 /// The validator's answer frame (amm-validator README, "Protocol"):
 /// `{ok: true, tx, txid}` → accepted; `{ok: false, reason, detail?, txid?, pool?}` → refused.
-/// A deploy's `{ok: true, txid}` (the deploy admitted in the validator's
-/// overlay): accepted, `tx` the deploy itself and `txid` its txid, which the
-/// answer's must equal (and its `tx`, if any, the deploy).
+/// A deploy's `{ok: true, tx, txid}` (0.9.0: the deploy with the validator's
+/// claim appended, admitted in the validator's overlay): accepted when `tx` is
+/// the delivered deploy claimed (`claimedOf`) and `txid` its txid; the record's
+/// pool becomes the claimed deploy's output 0.
 pub fn applyReply(a: Allocator, r: *Record, frame: []const u8) void {
     const v = cbor.decode(a, frame) catch return settle(r, .failed, "bad_reply", "the validator's answer is not dag-cbor");
     const ok = v.getBool("ok") orelse return settle(r, .failed, "bad_reply", "the validator's answer has no ok");
     if (ok) {
         r.status = .accepted;
         if (r.kind == .pool) {
-            // Nobody signs a deploy but the LP: the transaction accepted is the deploy itself.
+            // The deploy the LP delivered, with the validator's claim appended.
             const d = given(a, r.swap) orelse return settle(r, .failed, "bad_record", "the deploy does not parse");
-            const txid = a.dupe(u8, &w.header.toHex(d.txid)) catch return settle(r, .failed, "bad_reply", "out of memory");
-            if (v.getText("txid")) |t| if (!eql(u8, t, txid)) return settle(r, .failed, "bad_reply", "the validator's txid is not the deploy's");
-            if (v.getBytes("tx")) |t| if (!eql(u8, t, d.raw)) return settle(r, .failed, "bad_reply", "the validator's transaction is not the deploy");
-            r.tx = d.raw;
+            const t = v.getBytes("tx") orelse return settle(r, .failed, "bad_reply", "accepted without the claimed deploy");
+            if (!claimedOf(a, d.raw, t)) return settle(r, .failed, "bad_reply", "the validator's transaction is not the deploy with a claim appended");
+            const txid = a.dupe(u8, &w.header.toHex(beef.txidOf(t))) catch return settle(r, .failed, "bad_reply", "out of memory");
+            if (v.getText("txid")) |x| if (!eql(u8, x, txid)) return settle(r, .failed, "bad_reply", "the validator's txid is not its transaction's");
+            r.tx = t;
             r.txid = txid;
+            r.pool = std.fmt.allocPrint(a, "{s}_0", .{txid}) catch return settle(r, .failed, "bad_reply", "out of memory");
             return;
         }
         r.tx = v.getBytes("tx");
         r.txid = v.getText("txid");
         if (r.tx == null) return settle(r, .failed, "bad_reply", "accepted without the transaction");
-        if (r.kind == .liquidity) {
-            // The validator signs last: what it answers is the add as the LP sent it, its slot filled.
-            const add = given(a, r.swap) orelse return settle(r, .failed, "bad_record", "the add does not parse");
-            if (!(signedAdd(a, add.raw, r.tx.?) catch false)) return settle(r, .failed, "bad_reply", "the validator's transaction is not the add with its signature");
-            const txid = a.dupe(u8, &w.header.toHex(beef.txidOf(r.tx.?))) catch return settle(r, .failed, "bad_reply", "out of memory");
-            if (r.txid) |t| if (!eql(u8, t, txid)) return settle(r, .failed, "bad_reply", "the validator's txid is not its transaction's");
-            r.txid = txid;
-        }
         return;
     }
     r.status = .refused;
@@ -1333,9 +1058,6 @@ pub const Env = struct {
     self_peer: ?[]const u8 = null,
     /// Launch the relay thread for the record `id` of `kind` → the thread (its origin's CID).
     launchFn: *const fn (ctx: *anyopaque, a: Allocator, kind: Kind, id: [32]u8) anyerror![]const u8,
-    /// A transaction this instance holds (its overlay's), raw, or null: the
-    /// spent pool's source when the add's BEEF does not carry it.
-    heldFn: ?*const fn (ctx: *anyopaque, a: Allocator, txid: [32]u8) anyerror!?[]const u8 = null,
 };
 
 pub const Submitted = union(enum) {
@@ -1451,7 +1173,7 @@ pub fn status(a: Allocator, book: *Book, args: Value) !Found {
     return statusOf(a, book, .swap, args);
 }
 
-/// amm.swap.status / amm.pool.status / amm.liquidity.status `{id}`: the record of that kind, or null (`not_found`).
+/// amm.swap.status / amm.pool.status `{id}`: the record of that kind, or null (`not_found`).
 pub fn statusOf(a: Allocator, book: *Book, kind: Kind, args: Value) !Found {
     const id = idParse(args.getText("id") orelse "") orelse return .bad_id;
     return if (try book.getKind(a, kind, id)) |r| .{ .found = r } else .not_found;

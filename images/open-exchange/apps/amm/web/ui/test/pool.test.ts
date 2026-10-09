@@ -7,7 +7,6 @@ import v from "./fixtures/amm-topic-vectors.json";
 const key = (n: number) => new PrivateKey(n.toString(16).padStart(2, "0").repeat(32), 16);
 const identity = key(0x7f);
 const lpKey = key(10);
-const lpNext = key(11);
 const taker = key(30);
 const anyone = new PrivateKey(1).toPublicKey();
 const validatorKey = (txid: string, vout: number) => identity.deriveChild(anyone, `1-amm pool-${txid}_${vout}`);
@@ -19,7 +18,8 @@ const tokenDeploy = Transaction.fromHex(v.token_deploy);
 const poolDeploy = Transaction.fromHex(v.pool_deploy);
 const swap1 = Transaction.fromHex(v.swap_bsv_in);
 const swap2 = Transaction.fromHex(v.swap_tokens_in);
-const remove = Transaction.fromHex(v.remove_liquidity);
+const close = Transaction.fromHex(v.close);
+const closeFee = Transaction.fromHex(v.close_fee);
 const assetId = Utils.toHex(tokenDeploy.hash() as number[]); // wire (internal) byte order
 
 const poolUtxo = (tx: Transaction): PoolUtxo => ({
@@ -65,7 +65,6 @@ describe("PoolTemplate.decode", () => {
     { tx: poolDeploy, p: v.pool0, lp: lpKey },
     { tx: swap1, p: v.pool1, lp: lpKey },
     { tx: swap2, p: v.pool2, lp: lpKey },
-    { tx: remove, p: v.pool3, lp: lpNext },
   ];
   it.each(pools.map((x, i) => [i, x] as const))("pool%i", (_, { tx, p, lp }) => {
     const pool = PoolTemplate.decode(tx.outputs[0]!.lockingScript)!;
@@ -76,7 +75,7 @@ describe("PoolTemplate.decode", () => {
   });
 
   it("returns null for every non-pool output", () => {
-    for (const tx of [fund, tokenDeploy, poolDeploy, swap1, swap2, remove]) {
+    for (const tx of [fund, tokenDeploy, poolDeploy, swap1, swap2, close, closeFee]) {
       tx.outputs.forEach((o, i) => {
         if (i === 0 && tx !== fund && tx !== tokenDeploy) return;
         expect(PoolTemplate.decode(o.lockingScript)).toBeNull();
@@ -144,39 +143,34 @@ describe("rebuilding the fixtures", () => {
     expect(call.tx.toHex()).toBe(v.swap_tokens_in);
   });
 
-  it("remove_liquidity: byte for byte, LP-signed", async () => {
-    const call = await PoolTemplate.removeLiquidity({
+  it("close, bsvFee 0: byte for byte, LP-signed, the fee and the token output's sat from another input, Rúnar's change after (0.9.0)", async () => {
+    const call = await PoolTemplate.close({
       pool: poolUtxo(swap2),
       inputs: [input(fund, 3, lpKey)],
-      removeBsv: 10_000n,
-      removeTokens: 100_000n,
-      nextLpPubKey: pub(lpNext),
+      bsvFee: 0n,
       lpKey,
       changePkh: pkh(lpKey),
-      fee: { sats: 500 },
+      fee: { sats: 600 },
     });
     expect(call.unsigned).toEqual([]);
-    expect(call.tx.toHex()).toBe(v.remove_liquidity);
+    expect(call.next).toBeNull();
+    expect(call.tx.toHex()).toBe(v.close);
+    expect(verifyInput(call.tx, 0)).toBe(true);
   });
 
-  it("addLiquidity (no fixture): LP signs while building, validator after; the interpreter accepts it", async () => {
-    // pool3 (remove_liquidity:0): LP key lpNext, validator key keyed by swap_bsv_in:0.
-    // The LP adds poolDeploy:2 (4,950,000 tokens) and 5,000 sats from remove_liquidity's change.
-    const call = await PoolTemplate.addLiquidity({
-      pool: poolUtxo(remove),
-      inputs: [input(poolDeploy, 2, lpKey), input(remove, 3, lpKey)],
-      addBsv: 5_000n,
-      addTokens: 4_950_000n,
-      nextLpPubKey: pub(key(12)),
-      lpKey: lpNext,
-      changePkh: pkh(lpKey),
-      fee: { satsPerKb: 100 },
-    });
-    expect(call.unsigned).toEqual(["validator"]);
-    expect(call.next!.pool.state.tokenReserve).toBe(BigInt(v.pool3.tokens) + 4_950_000n);
-    expect(PoolTemplate.decode(call.tx.outputs[0]!.lockingScript)).toEqual(call.next!.pool);
-    await PoolTemplate.signPoolInput(call, "validator", validatorKey(swap1.id("hex"), 0));
-    for (const i of [0, 1, 2]) expect(verifyInput(call.tx, i)).toBe(true);
+  it("close, bsvFee 1,000: byte for byte, the fee left from the pool's sats, no other input", async () => {
+    const plan = PoolTemplate.planClose({ pool: poolUtxo(swap2), bsvFee: BigInt(v.closeFee) });
+    expect(plan.outputs.map((o) => o.satoshis)).toEqual([BigInt(v.pool2.bsv - v.closeFee), 1n]);
+    const call = await PoolTemplate.close({ pool: poolUtxo(swap2), inputs: [], bsvFee: BigInt(v.closeFee), lpKey, changePkh: pkh(lpKey), fee: { sats: v.closeFee - 1 } });
+    expect(call.tx.toHex()).toBe(v.close_fee);
+    expect(verifyInput(call.tx, 0)).toBe(true);
+  });
+
+  it("close: bsvFee the whole pool leaves the tokens only; over it, or negative, is refused", () => {
+    const sats = BigInt(v.pool2.bsv);
+    expect(PoolTemplate.planClose({ pool: poolUtxo(swap2), bsvFee: sats }).outputs).toHaveLength(1);
+    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2), bsvFee: sats + 1n })).toThrow(PoolBuildError);
+    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2), bsvFee: -1n })).toThrow(PoolBuildError);
   });
 
   it("a fee rate: the interpreter accepts the finished swap", async () => {

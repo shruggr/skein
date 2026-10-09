@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "amm",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "programs": {
     "overlay": "bin/overlay.wasm",
     "mandala-topic": "bin/mandala-topic.wasm",
@@ -26,9 +26,9 @@
     },
     "amm": {
       "ammValidator": {
-        "minValidatorFeeBps": 5,
-        "maxLpFeeBps": 100,
-        "maxCommissionBps": null
+        "lpFeeBps": 30,
+        "validatorFeeBps": 5,
+        "commissionBps": 0
       },
       "commission": {
         "pkh": null
@@ -145,59 +145,16 @@
             "reason?": "string",
             "detail?": "string"
           }
-        }
-      }
-    },
-    {
-      "interface": "amm.liquidity/1",
-      "functions": {
-        "submit": {
-          "writes": true,
-          "args": {
-            "funding": "bytes",
-            "add": "bytes",
-            "pool": "string",
-            "validator": "bytes",
-            "peerId": "string",
-            "expires": "ms"
-          },
-          "answer": {
-            "id": "string",
-            "status": "string",
-            "funding": "bytes",
-            "add": "bytes",
-            "pool": "string",
-            "validator": "bytes",
-            "expires": "ms",
-            "created": "ms",
-            "updated": "ms",
-            "tx?": "bytes",
-            "txid?": "string",
-            "reason?": "string",
-            "detail?": "string",
-            "poolState?": "map"
-          }
         },
-        "status": {
+        "terms": {
           "writes": false,
-          "args": {
-            "id": "string"
-          },
+          "args": {},
           "answer": {
-            "id": "string",
-            "status": "string",
-            "funding": "bytes",
-            "add": "bytes",
-            "pool": "string",
-            "validator": "bytes",
-            "expires": "ms",
-            "created": "ms",
-            "updated": "ms",
-            "tx?": "bytes",
-            "txid?": "string",
-            "reason?": "string",
-            "detail?": "string",
-            "poolState?": "map"
+            "validator?": "bytes",
+            "peerId?": "string",
+            "lpFeeBps": "int",
+            "validatorFeeBps": "int",
+            "commissionBps": "int"
           }
         }
       }
@@ -212,13 +169,16 @@
     "topicDocumentation": "overlay.topicDocumentation",
     "lookupDocumentation": "overlay.lookupDocumentation",
     "tokens": "mandala-lookup.tokens",
-    "page": "amm-p2p.serve"
+    "page": "amm-p2p.serve",
+    "requests": "amm-p2p.requests",
+    "spends": "amm-p2p.spends"
   },
   "roles": {
     "root": [
       "register",
       "registerLookup",
-      "deregisterLookup"
+      "deregisterLookup",
+      "rescind"
     ]
   },
   "routes": [
@@ -238,6 +198,14 @@
       "handler": "amm-p2p"
     },
     {
+      "address": "validator",
+      "handler": "amm-validator"
+    },
+    {
+      "address": "requests",
+      "handler": "amm-p2p"
+    },
+    {
       "transport": "http",
       "address": "/call",
       "filters": [
@@ -249,11 +217,6 @@
       "transport": "libp2p",
       "address": "/amm-validator/1/swap",
       "handler": "amm-validator.swap"
-    },
-    {
-      "transport": "libp2p",
-      "address": "/amm-validator/1/addLiquidity",
-      "handler": "amm-validator.addLiquidity"
     },
     {
       "transport": "libp2p",
@@ -297,6 +260,20 @@
     },
     {
       "transport": "http",
+      "address": "/requests",
+      "filters": [
+        "requests"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/spends",
+      "filters": [
+        "spends"
+      ]
+    },
+    {
+      "transport": "http",
       "address": "/",
       "prefix": true,
       "filters": [
@@ -306,5 +283,5 @@
       "index": "index.html"
     }
   ],
-  "description": "An AMM over Mandala tokens (docs/AMM.md): the overlay engine (shruggr/skein-overlay 0.12.0, required: chain/1) with the Mandala components (shruggr/skein-mandala 0.9.1: the topic manager mandala-topic, one topic per token tm_mandala_<assetId> (BRC-207: tm_mandala_<txid>_0, tm_mandala_<txid>_<vout>) and the discovery topic tm_mandala; the lookups ls_mandala, ls_mandala_deploys and each token's ls_mandala_<assetId> (BRC-207's mandala-spendability and mandala-admission), one index; the token list, the read route /mandala/tokens of mandala-lookup), the pool liquidity lookup ls_amm (amm-lookup, one service over every token topic, each query naming its token), the validator (amm-validator: swap, addLiquidity, deploy as libp2p direct calls; it submits the signed transaction to its own overlay by message, {fn: \"submit\"} in the box submit (<app>/submit), and answers the call on the engine's answer) and amm-p2p: the marketplace relay (its box <app>/amm-p2p and the route /call; amm.swap/1, amm.pool/1, amm.liquidity/1: a taker's or an LP's transaction carried to the validator the caller names by identity key and libp2p peer ID, dialled, or handed in-VM to this instance's own amm-validator when that peer is this node) and the pages, www/ served from the app's own tree (skein-sdk files.serve) by the read route / (its filter page, amm-p2p's serve: anyone, signed or not, nothing logged; shruggr/skein#143), beside the engine's listing and documentation read routes and its derived /lookup; /call takes a signed request (kernel.brc104), the derived /submit a BEEF that validates (kernel.beef). Anyone submits to the engine by message in the box submit (<app>/submit), answered by message, or by POST /submit, BRC-22: it waits and answers the STEAK (skein-overlay 0.9.1+); the app's own box <app> is the engine's (derived), amm-p2p's box is <app>/amm-p2p (0.7.0). The manifest declares no topics: root registers each token with the engine, two messages in the app's box register (<app>/register once installed; the handler overlay.register, gated by roles: {root: [register, registerLookup, deregisterLookup]}): {fn: \"register\", args: {topic: \"tm_mandala_<assetId>\", program: \"mandala-topic\"}} then {fn: \"registerLookup\", args: {service: \"ls_mandala_<assetId>\", program: \"mandala-lookup\", topics: [\"tm_mandala_<assetId>\"]}} (the Token topics page, mandala/tokens/), and drops it with {fn: \"deregisterLookup\", args: {service}} then {fn: \"deregister\", args: {topic}}. Every skein is a market and a validator, always (skein-overlay 0.12.0; no switch): a register also asks the runtime's liveness tool for the topic's tm_mandala_<txid>_0-live beats (liveness, config.overlay.market {window}, else 40 000 ms), served at GET /amm/.live/tm_mandala_<txid>_0-live, which the pages read to name a validator, and beacons tm_mandala_<txid>_0-live every config.overlay.validator {every} ms, else 30 000 (the frame carries the instance's identity key, the gossip message its peer ID, the body the topic's view digest), and amm-validator signs swaps and takes on new liquidity (addLiquidity, deploy) for any registered token, refusing others not_validating. A deregister reverses both. This manifest sets neither ms."
+  "description": "An AMM over Mandala tokens, the Open Exchange (docs/AMM.md): the overlay engine (shruggr/skein-overlay 0.12.1, required: chain/1) with the Mandala components (shruggr/skein-mandala 0.9.2: the topic manager mandala-topic, one topic per token tm_mandala_<assetId> (BRC-207: tm_mandala_<txid>_0, tm_mandala_<txid>_<vout>) and the discovery topic tm_mandala; the lookups ls_mandala, ls_mandala_deploys and each token's ls_mandala_<assetId>, one index; the token list, the read route /mandala/tokens of mandala-lookup), the pool lookup ls_amm (amm-lookup, one service over every token topic, each query naming its token: a pool is listed only while its contract output and its deploy's claim are unspent and the claim verifies; registered by root beside its declaration, it beats on ls_amm-live, per token, this skein's per-validator totals of its listed pools: the prices), the validator (amm-validator: swap and deploy as libp2p direct calls; the deploy delivered, every input SIGHASH_SINGLE over its own output and one token unit left, checked against the validator's terms, config.amm.ammValidator {lpFeeBps, validatorFeeBps, commissionBps}, and claimed: one unit P2PKH to the pool's validator key, its payload that key's signature over the pool's script and the first token input; it submits to its own overlay by message, {fn: \"submit\"} in the box submit (<app>/submit), files the claim in the instance's wallet, and rescinds a listing on root's {fn: \"rescind\", args: {pool}} in the box validator (<app>/validator) by spending the claim as the wallet's caller input) and amm-p2p: the marketplace relay (its box <app>/amm-p2p and the route /call; amm.swap/1, amm.pool/1 with terms: a taker's or an LP's transaction carried to the validator the caller names by identity key and libp2p peer ID, dialled, or handed in-VM to this instance's own amm-validator when that peer is this node), the holders' listing requests (box <app>/requests, anyone; the read route /requests), the chain state of an outpoint (the read route /spends), and the pages, www/ served from the app's own tree by the read route / (its filter page, amm-p2p's serve; at the origin root by root's route to the same filter). The contract is Swap (the validator's) and Close (the LP's: everything out, bsvFee left for the miner). Anyone submits to the engine by message in the box submit, answered by message, or by POST /submit, BRC-22: it waits and answers the STEAK. The manifest declares no topics: root registers each token with the engine in the box register (<app>/register; roles: {root: [register, registerLookup, deregisterLookup, rescind]}): {fn: \"register\", args: {topic: \"tm_mandala_<assetId>\", program: \"mandala-topic\"}}, {fn: \"registerLookup\", args: {service: \"ls_mandala_<assetId>\", program: \"mandala-lookup\", topics: [\"tm_mandala_<assetId>\"]}} and {fn: \"registerLookup\", args: {service: \"ls_amm\", program: \"amm-lookup\"}}; deregisterLookup then deregister drop it. Every skein is a market and a validator, always (skein-overlay 0.12): a register asks liveness of and beacons the topic's tm_mandala_<txid>_0-live (config.overlay.market {window} / .validator {every}, else 40 000 / 30 000 ms; this manifest sets neither)."
 }

@@ -178,20 +178,10 @@ export interface SwapExpectation {
   minAmountOut?: bigint;
 }
 
-export interface AddLiquidityParams extends CallCommon {
-  addBsv: bigint;
-  addTokens: bigint;
-  nextLpPubKey: string;
-  nextValidatorPubKey?: string;
-  /** The LP's current key; when given, the LP slot is signed here. */
-  lpKey?: PoolSigner;
-}
-
-export interface RemoveLiquidityParams extends CallCommon {
-  removeBsv: bigint;
-  removeTokens: bigint;
-  nextLpPubKey: string;
-  /** The LP's current key; when given, the LP slot is signed here. */
+export interface CloseParams extends CallCommon {
+  /** The miner fee left from the pool's sats (0 <= bsvFee <= the pool's sats; 0: funded from `inputs`). */
+  bsvFee: bigint;
+  /** The LP's key; when given, the LP slot is signed here. */
   lpKey?: PoolSigner;
 }
 
@@ -206,7 +196,7 @@ export interface PoolCall {
   method: PoolMethod;
   /** The spent pool. */
   pool: Pool;
-  /** The continuation (output 0), or null when RemoveLiquidity closes the pool. */
+  /** The continuation (output 0), or null for a Close (it ends the pool). */
   next: { pool: Pool; satoshis: number; script: LockingScript } | null;
   /** BIP-143 preimage (hex) the pool's signatures are over. */
   preimage: string;
@@ -532,122 +522,52 @@ export class PoolTemplate {
   }
 
   /**
-   * AddLiquidity (method 1). Outputs: 0 pool, then change. Needs the LP's and
-   * the validator's signatures; the LP's is filled here when `lpKey` is given.
+   * Close (method 1; skein-amm 0.9.0, David Case 2026-10-09: a position is
+   * deployed or closed, never resized in place). LP-only. Outputs: 0 the BSV
+   * payout (the pool's sats less `bsvFee`, to the LP key's P2PKH; only when
+   * nonzero), then every token to the same key, then change. No continuation.
    */
-  static async addLiquidity(p: AddLiquidityParams): Promise<PoolCall> {
-    const plan = PoolTemplate.planAddLiquidity(p);
-    checkTokenInputs(p.inputs, plan.pool.args.assetId, p.addTokens);
-    const call = await buildCall({
-      common: p,
-      pool: plan.pool,
-      method: "addLiquidity",
-      outputs: plan.outputs,
-      args: plan.args,
-      sigSlots: plan.sigSlots,
-    });
-    call.next = { ...plan.next, script: call.tx.outputs[0]!.lockingScript };
-    if (p.lpKey) await PoolTemplate.signPoolInput(call, "lp", p.lpKey);
-    return call;
-  }
-
-  /**
-   * The AddLiquidity call without its funding (as `planSwap` for Swap): the
-   * one output the contract requires (the continuation at pool sats +
-   * addBsv, TokenReserve + addTokens, the next LP and validator keys) and
-   * the method arguments, both signature slots empty. The contract does not
-   * fix the ratio (the LP owns the pool): any addBsv, addTokens >= 0, not
-   * both 0. For a builder that funds the call itself: add the funding and
-   * exactly `addTokens` of token inputs, fill input 0 with `callUnlock`, the
-   * LP's slot with `signPoolInput`; the validator signs its slot last.
-   */
-  static planAddLiquidity(p: { pool: PoolUtxo; addBsv: bigint; addTokens: bigint; nextLpPubKey: string; nextValidatorPubKey?: string }): CallPlan {
-    const pool = decodeUtxo(p.pool);
-    const { state } = pool;
-    if (p.addBsv < 0n || p.addTokens < 0n || p.addBsv + p.addTokens <= 0n) {
-      throw new PoolBuildError("invalid", "addBsv and addTokens must be >= 0, and not both 0");
-    }
-    const nextValidatorPubKey = p.nextValidatorPubKey ?? deriveValidatorPubKey(state.validatorIdentity, { txid: p.pool.txid, vout: p.pool.vout });
-    PublicKey.fromString(nextValidatorPubKey);
-    PublicKey.fromString(p.nextLpPubKey);
-    const nextState: PoolFields = {
-      ...state,
-      tokenReserve: state.tokenReserve + p.addTokens,
-      lpPubKey: p.nextLpPubKey,
-      validatorPubKey: nextValidatorPubKey,
-    };
-    const newBsv = BigInt(p.pool.satoshis) + p.addBsv;
-    const continuation = PoolTemplate.lockContinuation(pool, nextState);
-    return {
-      pool,
-      poolUtxo: p.pool,
-      method: "addLiquidity",
-      outputs: [{ satoshis: newBsv, script: continuation.toHex() }],
-      args: [EMPTY_SIG, EMPTY_SIG, p.nextLpPubKey, nextValidatorPubKey, p.addBsv, p.addTokens],
-      sigSlots: { lp: 0, validator: 1 },
-      next: { pool: { ...pool, state: nextState, contractScript: pool.code + "6a" + stateHex(nextState) }, satoshis: Number(newBsv), script: continuation },
-    };
-  }
-
-  /**
-   * RemoveLiquidity (method 2). Outputs: 0 pool (unless both reserves reach 0),
-   * then the BSV withdrawal and the token withdrawal to the LP's current key
-   * (each when nonzero), then change. LP-only: no validator signature.
-   */
-  static async removeLiquidity(p: RemoveLiquidityParams): Promise<PoolCall> {
-    const plan = PoolTemplate.planRemoveLiquidity(p);
+  static async close(p: CloseParams): Promise<PoolCall> {
+    const plan = PoolTemplate.planClose(p);
     checkTokenInputs(p.inputs, plan.pool.args.assetId, 0n);
     const call = await buildCall({
       common: p,
       pool: plan.pool,
-      method: "removeLiquidity",
+      method: "close",
       outputs: plan.outputs,
       args: plan.args,
       sigSlots: plan.sigSlots,
     });
-    call.next = plan.closing ? null : { ...plan.next, script: call.tx.outputs[0]!.lockingScript };
+    call.next = null;
     if (p.lpKey) await PoolTemplate.signPoolInput(call, "lp", p.lpKey);
     return call;
   }
 
   /**
-   * The RemoveLiquidity call without its funding (as `planSwap` for Swap):
-   * the outputs the contract requires (pool unless closing, the BSV
-   * withdrawal, the token withdrawal, each to Hash160 of the current
-   * LpPubKey) and the method arguments, the LP's slot empty. For a BRC-100
-   * wallet that picks the funding and the change: hand these outputs over,
-   * fill input 0 with `callUnlock`, then the LP's slot with `signPoolInput`.
+   * The Close call without its funding (as `planSwap` for Swap): the outputs
+   * the contract requires (the BSV payout when nonzero, the tokens, each to
+   * Hash160 of the LpPubKey) and the method arguments, the LP's slot empty.
+   * `bsvFee` (0..the pool's sats) is left for the miner; at 0 the fee and the
+   * token output's sat come from another input (its change after the
+   * contract's outputs).
    */
-  static planRemoveLiquidity(p: { pool: PoolUtxo; removeBsv: bigint; removeTokens: bigint; nextLpPubKey: string }): CallPlan & { closing: boolean } {
+  static planClose(p: { pool: PoolUtxo; bsvFee: bigint }): CallPlan {
     const pool = decodeUtxo(p.pool);
     const { args, state } = pool;
-    if (p.removeBsv < 0n || p.removeTokens < 0n || p.removeBsv + p.removeTokens <= 0n) {
-      throw new PoolBuildError("invalid", "removeBsv and removeTokens must be >= 0, and not both 0");
-    }
-    PublicKey.fromString(p.nextLpPubKey);
-    const newBsv = BigInt(p.pool.satoshis) - p.removeBsv;
-    const newTokens = state.tokenReserve - p.removeTokens;
-    const closing = newBsv === 0n && newTokens === 0n;
-    if (!closing && !(newBsv > 0n && newTokens > 0n)) {
-      throw new PoolBuildError("invalid", "either both reserves stay positive or both reach zero");
-    }
-    const nextState: PoolFields = { ...state, tokenReserve: newTokens, lpPubKey: p.nextLpPubKey };
+    const sats = BigInt(p.pool.satoshis);
+    if (p.bsvFee < 0n || p.bsvFee > sats) throw new PoolBuildError("invalid", `bsvFee must be 0 to the pool's ${sats} sats`);
     const lpPkh = pkhOf(state.lpPubKey);
     const outputs: { satoshis: bigint; script: string }[] = [];
-    // A closing call has no continuation (and a zero token reserve has no Mandala prefix to write).
-    const continuation = closing ? new LockingScript() : PoolTemplate.lockContinuation(pool, nextState);
-    if (!closing) outputs.push({ satoshis: newBsv, script: continuation.toHex() });
-    if (p.removeBsv > 0n) outputs.push({ satoshis: p.removeBsv, script: p2pkhHex(lpPkh) });
-    if (p.removeTokens > 0n) outputs.push({ satoshis: 1n, script: tokenP2pkhHex(args.assetId, p.removeTokens, lpPkh) });
+    if (sats - p.bsvFee > 0n) outputs.push({ satoshis: sats - p.bsvFee, script: p2pkhHex(lpPkh) });
+    outputs.push({ satoshis: 1n, script: tokenP2pkhHex(args.assetId, state.tokenReserve, lpPkh) });
     return {
       pool,
       poolUtxo: p.pool,
-      method: "removeLiquidity",
+      method: "close",
       outputs,
-      args: [EMPTY_SIG, p.nextLpPubKey, p.removeBsv, p.removeTokens],
+      args: [EMPTY_SIG, p.bsvFee],
       sigSlots: { lp: 0 },
-      next: { pool: { ...pool, state: nextState, contractScript: pool.code + "6a" + stateHex(nextState) }, satoshis: Number(newBsv), script: continuation },
-      closing,
+      next: { pool, satoshis: 0, script: new LockingScript() },
     };
   }
 
@@ -714,8 +634,7 @@ export class PoolTemplate {
 /** Arg index of each signature, per method (Pool.runar.go's parameter order). */
 const SIG_SLOTS: Record<PoolMethod, Partial<Record<SigSlot, number>>> = {
   swap: { validator: 0 },
-  addLiquidity: { lp: 0, validator: 1 },
-  removeLiquidity: { lp: 0 },
+  close: { lp: 0 },
 };
 
 // ---------------------------------------------------------------------------

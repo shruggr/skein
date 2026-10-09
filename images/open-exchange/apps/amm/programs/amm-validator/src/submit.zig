@@ -63,3 +63,24 @@ pub fn submissionBeef(a: std.mem.Allocator, signed: []const u8, ancestry: ?beef.
     if (out.atomic != null) out.atomic = txid;
     return beef.serialize(a, out);
 }
+
+/// The transaction as Atomic BEEF (BRC-95), what the wallet's `internalize` takes: its ancestry
+/// (the request's BEEF, the subject replaced) with `signed` as the atomic subject, or the
+/// transaction alone when the request was raw.
+pub fn atomicBeef(a: std.mem.Allocator, signed: []const u8, ancestry: ?beef.Beef) ![]u8 {
+    const txid = beef.txidOf(signed);
+    const parsed = try w.bsvz.transaction.Transaction.parse(a, signed);
+    const entry: beef.Entry = .{ .txid = txid, .format = .raw, .raw = signed, .tx = parsed };
+    const b = ancestry orelse return beef.serialize(a, .{ .version = beef.V2, .atomic = txid, .bumps = &.{}, .entries = try a.dupe(beef.Entry, &.{entry}) });
+    const subject = b.subject() orelse return error.InvalidBeef;
+    const entries = try a.dupe(beef.Entry, b.entries);
+    const i = b.indexOf(subject) orelse return error.InvalidBeef;
+    entries[i] = entry;
+    var out = b;
+    out.entries = entries;
+    out.version = beef.V2;
+    out.atomic = txid;
+    out.form = .atomic;
+    out.vout = null;
+    return beef.serialize(a, out);
+}

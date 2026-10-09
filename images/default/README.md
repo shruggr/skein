@@ -39,9 +39,9 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   (01e68b4), shruggr/skein-git v0.2.0 (01e804a), shruggr/skein-site v0.9.0
   (b41f5d5) — each the same git tree as that tag's commit. images/host's
   `apps/onboard/`: shruggr/skein-onboard v0.4.0 (189b7c2).
-  images/open-exchange's (#147) `apps/amm/`: shruggr/skein-amm v0.8.1
-  (9624f8b, carrying skein-mandala v0.9.1 and its own engine, skein-overlay
-  0.12.0's build: one engine tonight; the standalone skein-overlay app comes
+  images/open-exchange's (#147) `apps/amm/`: shruggr/skein-amm v0.9.0
+  (d5f656e, Open Exchange, carrying skein-mandala v0.9.2 and its own engine, skein-overlay
+  0.12.1's build: one engine tonight; the standalone skein-overlay app comes
   back as `apps/overlay/` when the engine leaves amm). To move a pin,
   replace the directory with the new tag's tree (`git -C ../skein-amm
   archive <tag> | tar -x -C images/open-exchange/apps/amm` into an emptied

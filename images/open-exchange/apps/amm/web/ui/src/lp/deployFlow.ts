@@ -2,7 +2,7 @@
  * A prepared pool deploy through the relay to its end (as src/market/swapFlow.ts):
  *
  *   submit (amm.pool.submit) → poll amm.pool.status while pending →
- *     accepted: completePoolDeploy (internalizeAction + relinquishOutput)
+ *     accepted: completePoolDeploy (the claimed deploy checked; internalizeAction + relinquishOutput)
  *     refused / timeout: abandonPoolDeploy (abortAction of the funding)
  *     an error answer to submit (nothing recorded): abandonPoolDeploy
  *     no answer (network failure, the relay's transport `failed`, or still
@@ -70,7 +70,12 @@ export async function settlePoolDeploy(c: DeployRelayContext, p: PreparedPoolDep
     case "pending":
       return { status: "unknown", id: r.id, reason: "still pending past the deploy's expiry" };
     case "accepted":
-      return { status: "accepted", id: r.id, txid: p.txid, completed: await completePoolDeploy(c.wallet, p, r.tx, r.txid) };
+      try {
+        const completed = await completePoolDeploy(c.wallet, p, r.tx, r.txid);
+        return { status: "accepted", id: r.id, txid: completed.txid, completed };
+      } catch (err) {
+        return { status: "unknown", id: r.id, reason: `the accepted deploy: ${errText(err)}` };
+      }
     case "refused":
       await abandonPoolDeploy(c.wallet, p);
       return { status: "refused", id: r.id, reason: r.reason };

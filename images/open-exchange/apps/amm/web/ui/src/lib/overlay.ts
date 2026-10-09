@@ -246,7 +246,9 @@ export async function listTokenTopics(base: string): Promise<TokenTopic[]> {
 /** `POST <base>/lookup {service, query}`, signed. */
 export async function lookup(af: SignedFetch | null, base: string, service: string, query: Record<string, unknown>): Promise<unknown> {
   const url = `${base}/lookup`;
-  const res = await needSigned(af).fetch(url, {
+  // `/lookup` is a read route (skein-overlay, shruggr/skein#143): signed or not. Unsigned without a wallet.
+  const client: SignedFetch = af ?? { fetch: (u, c) => fetch(u, c as RequestInit) };
+  const res = await client.fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ service, query }),

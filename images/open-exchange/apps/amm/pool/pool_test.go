@@ -23,10 +23,12 @@ import (
 // go-sdk interpreter with the real BIP-143 preimage. Rúnar's SDK call helpers
 // don't understand a locking-script prefix yet, so they are bypassed.
 
+// The contract's public methods in declaration order (its ABI's method
+// index): Swap and Close (skein-amm 0.9.0: AddLiquidity and RemoveLiquidity
+// are gone).
 const (
 	methodSwap = iota
-	methodAddLiquidity
-	methodRemoveLiquidity
+	methodClose
 )
 
 // assetID is a canonical BRC-162 token id: the 32-byte deploy txid.
@@ -517,90 +519,109 @@ func TestSwapZeroFeeRates(t *testing.T) {
 	}
 }
 
-func TestAddLiquidity(t *testing.T) {
+// closeCall is the LP's Close leaving bsvFee for the miner: the BSV payout
+// (pool sats - bsvFee, when nonzero) to the LP's key, then every token to it.
+func (f *fixture) closeCall(p pool, bsvFee int64) call {
+	var outs []out
+	if p.bsv-bsvFee > 0 {
+		outs = append(outs, out{p.bsv - bsvFee, p2pkh(pkh(p.lp))})
+	}
+	outs = append(outs, out{1, tokenP2pkh(p.tokens, pkh(p.lp))})
+	return call{
+		method:   methodClose,
+		args:     [][]byte{nil, pushNum(bsvFee)},
+		outs:     outs,
+		signers:  []*ec.PrivateKey{p.lp},
+		sigSlots: []int{0},
+	}
+}
+
+func TestClose(t *testing.T) {
 	f := newFixture(t, 30, 5, 0)
 	p := pool{bsv: 1_000_000, tokens: 5_000_000, lp: key(t, 10), validator: key(t, 20)}
-	add := func(bsv, tokens int64) call {
-		after := pool{bsv: p.bsv + bsv, tokens: p.tokens + tokens, lp: next(p.lp), validator: next(p.validator)}
-		return call{
-			method: methodAddLiquidity,
-			args: [][]byte{nil, nil,
-				pushData(after.lp.PubKey().Compressed()), pushData(after.validator.PubKey().Compressed()),
-				pushNum(bsv), pushNum(tokens)},
-			outs:     []out{{after.bsv, f.poolScript(after)}},
-			signers:  []*ec.PrivateKey{p.lp, p.validator},
-			sigSlots: []int{0, 1},
-		}
-	}
 
-	t.Run("both assets, both keys rotate", func(t *testing.T) { mustPass(t, f.run(t, p, add(10_000, 50_000))) })
-	t.Run("one-sided", func(t *testing.T) { mustPass(t, f.run(t, p, add(0, 50_000))) })
+	t.Run("bsvFee 0: everything out, the fee from another input", func(t *testing.T) {
+		c := f.closeCall(p, 0)
+		if len(c.outs) != 2 || c.outs[0].sats != p.bsv {
+			t.Fatalf("expected the whole BSV reserve and the tokens: %+v", c.outs)
+		}
+		mustPass(t, f.run(t, p, c))
+	})
+	t.Run("bsvFee > 0: the fee left from the pool's sats", func(t *testing.T) {
+		mustPass(t, f.run(t, p, f.closeCall(p, 500)))
+	})
+	t.Run("bsvFee = the pool's sats: no BSV output, the tokens only", func(t *testing.T) {
+		c := f.closeCall(p, p.bsv)
+		if len(c.outs) != 1 {
+			t.Fatalf("expected the token output alone: %+v", c.outs)
+		}
+		mustPass(t, f.run(t, p, c))
+	})
+	t.Run("bsvFee over the pool's sats", func(t *testing.T) {
+		c := f.closeCall(p, p.bsv)
+		c.args[1] = pushNum(p.bsv + 1)
+		mustFail(t, f.run(t, p, c))
+	})
+	t.Run("a negative bsvFee", func(t *testing.T) {
+		c := f.closeCall(p, 0)
+		c.args[1] = pushNum(-1)
+		c.outs[0].sats = p.bsv + 1
+		mustFail(t, f.run(t, p, c))
+	})
 	t.Run("not the LP", func(t *testing.T) {
-		c := add(10_000, 50_000)
+		c := f.closeCall(p, 500)
 		c.signers[0] = p.validator
 		mustFail(t, f.run(t, p, c))
 	})
-	t.Run("no validator", func(t *testing.T) {
-		c := add(10_000, 50_000)
-		c.signers[1] = p.lp
+	t.Run("the payout understates bsvFee's remainder", func(t *testing.T) {
+		c := f.closeCall(p, 500)
+		c.outs[0].sats--
 		mustFail(t, f.run(t, p, c))
 	})
-	t.Run("pool output understates the deposit", func(t *testing.T) {
-		c := add(10_000, 50_000)
-		c.outs[0] = out{p.bsv + 10_000, f.poolScript(pool{tokens: p.tokens + 49_999, lp: next(p.lp), validator: next(p.validator)})}
+	t.Run("the BSV to another key", func(t *testing.T) {
+		c := f.closeCall(p, 500)
+		c.outs[0].script = p2pkh(pkh(key(t, 50)))
+		mustFail(t, f.run(t, p, c))
+	})
+	t.Run("not every token", func(t *testing.T) {
+		c := f.closeCall(p, 500)
+		c.outs[1].script = tokenP2pkh(p.tokens-1, pkh(p.lp))
+		mustFail(t, f.run(t, p, c))
+	})
+	t.Run("a continuation kept", func(t *testing.T) {
+		c := f.closeCall(p, 500)
+		c.outs = append([]out{{1, f.poolScript(pool{tokens: 1, lp: p.lp, validator: p.validator})}}, c.outs...)
 		mustFail(t, f.run(t, p, c))
 	})
 }
 
-func TestRemoveLiquidity(t *testing.T) {
-	f := newFixture(t, 30, 5, 0)
-	p := pool{bsv: 1_000_000, tokens: 5_000_000, lp: key(t, 10), validator: key(t, 20)}
-	remove := func(bsv, tokens int64) call {
-		after := pool{bsv: p.bsv - bsv, tokens: p.tokens - tokens, lp: next(p.lp), validator: p.validator}
-		// Withdrawals go to the key that signed (the current LP key).
-		var outs []out
-		if after.bsv != 0 || after.tokens != 0 {
-			outs = append(outs, out{after.bsv, f.poolScript(after)})
-		}
-		if bsv > 0 {
-			outs = append(outs, out{bsv, p2pkh(pkh(p.lp))})
-		}
-		if tokens > 0 {
-			outs = append(outs, out{1, tokenP2pkh(tokens, pkh(p.lp))})
-		}
-		return call{
-			method:   methodRemoveLiquidity,
-			args:     [][]byte{nil, pushData(after.lp.PubKey().Compressed()), pushNum(bsv), pushNum(tokens)},
-			outs:     outs,
-			signers:  []*ec.PrivateKey{p.lp},
-			sigSlots: []int{0},
+// AddLiquidity and RemoveLiquidity are gone (David Case, 2026-10-09): the
+// ABI has Swap and Close only, and a call of method index 2 is refused.
+func TestNoLiquidityMethods(t *testing.T) {
+	art, err := compiler.CompileFromSource("Pool.runar.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range art.ABI.Methods {
+		if m.IsPublic {
+			names = append(names, m.Name)
 		}
 	}
-
-	t.Run("both assets, LP key rotates", func(t *testing.T) { mustPass(t, f.run(t, p, remove(10_000, 50_000))) })
-	t.Run("tokens only", func(t *testing.T) { mustPass(t, f.run(t, p, remove(0, 50_000))) })
-	t.Run("not the LP", func(t *testing.T) {
-		c := remove(10_000, 50_000)
-		c.signers[0] = p.validator
-		mustFail(t, f.run(t, p, c))
-	})
-	t.Run("close: withdraw everything, no continuation", func(t *testing.T) {
-		mustPass(t, f.run(t, p, remove(p.bsv, p.tokens)))
-	})
-	t.Run("close by someone other than the LP", func(t *testing.T) {
-		c := remove(p.bsv, p.tokens)
-		c.signers[0] = p.validator
-		mustFail(t, f.run(t, p, c))
-	})
-	t.Run("all BSV but not all tokens", func(t *testing.T) {
-		mustFail(t, f.run(t, p, remove(p.bsv, 0)))
-	})
-	t.Run("all tokens but not all BSV", func(t *testing.T) {
-		mustFail(t, f.run(t, p, remove(0, p.tokens)))
-	})
-	t.Run("more than the pool holds", func(t *testing.T) {
-		mustFail(t, f.run(t, p, remove(p.bsv+1, p.tokens)))
-	})
+	if strings.Join(names, ",") != "swap,close" {
+		t.Fatalf("public methods: %v", names)
+	}
+	f := newFixture(t, 30, 5, 0)
+	p := pool{bsv: 1_000_000, tokens: 5_000_000, lp: key(t, 10), validator: key(t, 20)}
+	after := pool{bsv: p.bsv + 10_000, tokens: p.tokens + 50_000, lp: next(p.lp), validator: next(p.validator)}
+	mustFail(t, f.run(t, p, call{
+		method: 2,
+		args: [][]byte{nil, nil, pushData(after.lp.PubKey().Compressed()), pushData(after.validator.PubKey().Compressed()),
+			pushNum(10_000), pushNum(50_000)},
+		outs:     []out{{after.bsv, f.poolScript(after)}},
+		signers:  []*ec.PrivateKey{p.lp, p.validator},
+		sigSlots: []int{0, 1},
+	}))
 }
 
 func TestSwapCommission(t *testing.T) {

@@ -4,8 +4,6 @@ import { BSV21, buildInscriptionScript } from "@1sat/templates";
 import { LockingScript, P2PKH, PrivateKey, Transaction, type WalletInterface, type WalletOutput } from "@bsv/sdk";
 import { formatAmount, parseAmount } from "../src/lp/amounts";
 import { buildInventory, decodeTokenRow } from "../src/lp/inventory";
-import { imageOrdinals } from "../src/lp/ordinals";
-import { buildDeployArgs, deployToken, type DeployRequest, type DerivedKey } from "../src/lp/deploy";
 
 const T = (c: string) => c.repeat(64);
 const ADDR = PrivateKey.fromHex("01".padStart(64, "0")).toAddress();
@@ -145,105 +143,5 @@ describe("inventory", () => {
   it("lists outputs neither template decodes", () => {
     expect(inv.unrecognized).toEqual([`${T("d")}_0`]);
     expect(decodeTokenRow({ outpoint: `${T("d")}.0`, lockingScript: P2.toHex() })).toBeUndefined();
-  });
-});
-
-describe("ordinals picker", () => {
-  it("offers image ordinals with the outpoint that holds the bytes", () => {
-    const items = imageOrdinals([
-      row(`${T("1")}.0`, pngInscription(), { tags: ["type:image/png", "origin"] }),
-      // transferred: no envelope in the script, bytes at its origin
-      row(`${T("2")}.1`, P2.toHex(), { tags: ["type:image/jpeg", `origin:${T("9")}_0`] }),
-      // text inscription: not an image
-      row(`${T("3")}.0`, buildInscriptionScript(P2, new Uint8Array([104, 105]), "text/plain").toHex(), { tags: ["type:text/plain"] }),
-      // an image tag but no bytes and no pointer: unusable
-      row(`${T("4")}.0`, P2.toHex(), { tags: ["type:image/png"] }),
-    ]);
-    expect(items.map((i) => [i.outpoint, i.iconOutpoint, i.contentType, !!i.image])).toEqual([
-      [`${T("1")}_0`, `${T("1")}_0`, "image/png", true],
-      [`${T("2")}_1`, `${T("9")}_0`, "image/jpeg", false],
-    ]);
-  });
-});
-
-describe("deploy action", () => {
-  const key = (keyID: string, n: number): DerivedKey => ({
-    protocolID: [0, "onesat"],
-    keyID,
-    publicKey: PrivateKey.fromHex(n.toString(16).padStart(64, "0")).toPublicKey().toString(),
-  });
-  const tokenKey = key("bsv21-deploy-GOLD-00", 2);
-  const base: DeployRequest = { symbol: "GOLD", decimals: 2, supply: { kind: "fixed", amount: 100_000n }, icon: { kind: "none" } };
-  const tokenLock = new P2PKH().lock(PrivateKey.fromHex("02".padStart(64, "0")).toAddress());
-
-  const deployOut = (args: ReturnType<typeof buildDeployArgs>) => {
-    const out = args.outputs![0]!;
-    return { out, t: Mandala.decode(LockingScript.fromHex(out.lockingScript))!, ci: JSON.parse(out.customInstructions!) };
-  };
-
-  it("no icon: one bsv21 deploy output", () => {
-    const args = buildDeployArgs(base, tokenKey);
-    expect(args.outputs).toHaveLength(1);
-    expect(args.options).toMatchObject({ randomizeOutputs: false });
-    const { out, t, ci } = deployOut(args);
-    expect(out).toMatchObject({ satoshis: 1, basket: "bsv21", tags: ["bsv21:deploy"], outputDescription: "Deploy GOLD" });
-    expect(t).toMatchObject({ role: "deploy", amount: 100_000n, metadata: { sym: "GOLD", dec: 2 } });
-    expect(t.lock.toHex()).toBe(tokenLock.toHex());
-    expect(ci).toEqual({ amt: "100000", op: "deploy+mint", sym: "GOLD", dec: "2", protocolID: [0, "onesat"], keyID: "bsv21-deploy-GOLD-00" });
-  });
-
-  it("authority supply: amount 0, deploy+auth tags", () => {
-    const { out, t, ci } = deployOut(buildDeployArgs({ ...base, supply: { kind: "authority" } }, tokenKey));
-    expect(out.tags).toEqual(["bsv21:deploy", "bsv21:auth"]);
-    expect(t).toMatchObject({ role: "deploy", amount: 0n });
-    expect(ci).toMatchObject({ amt: "0", op: "deploy+auth" });
-  });
-
-  it("an icon is embedded in the deploy's payload, [mediaType, bytes] (BRC-162 draft BRCs#308): an upload or an ordinal's bytes; one output", () => {
-    for (const kind of ["upload", "ordinal"] as const) {
-      const args = buildDeployArgs({ ...base, icon: { kind, content: PNG, contentType: "image/png" } }, tokenKey);
-      expect(args.outputs).toHaveLength(1);
-      const { t, ci } = deployOut(args);
-      expect(t.metadata!.icon).toEqual({ mediaType: "image/png", bytes: PNG });
-      expect(ci.icon).toBeUndefined();
-    }
-    // The media type as embedded: its parameters dropped, lower case.
-    const { t } = deployOut(buildDeployArgs({ ...base, icon: { kind: "upload", content: PNG, contentType: "image/PNG; x=1" } }, tokenKey));
-    expect(t.metadata!.icon!.mediaType).toBe("image/png");
-  });
-
-  it("refuses bad input", () => {
-    expect(() => buildDeployArgs({ ...base, symbol: " " }, tokenKey)).toThrow();
-    expect(() => buildDeployArgs({ ...base, decimals: 19 }, tokenKey)).toThrow();
-    expect(() => buildDeployArgs({ ...base, supply: { kind: "fixed", amount: 0n } }, tokenKey)).toThrow();
-    expect(() => buildDeployArgs({ ...base, icon: { kind: "upload", content: PNG, contentType: "text/plain" } }, tokenKey)).toThrow();
-    expect(() => buildDeployArgs({ ...base, icon: { kind: "upload", content: new Uint8Array(), contentType: "image/png" } }, tokenKey)).toThrow();
-  });
-
-  it("derives keys through the wallet and hands the action to the wallet", async () => {
-    const calls: { getPublicKey: unknown[]; createAction: any[] } = { getPublicKey: [], createAction: [] };
-    const wallet = {
-      async getPublicKey(args: any) {
-        calls.getPublicKey.push(args);
-        return { publicKey: PrivateKey.fromHex("02".padStart(64, "0")).toPublicKey().toString() };
-      },
-      async createAction(args: any) {
-        calls.createAction.push(args);
-        return { txid: T("f") };
-      },
-    } as unknown as WalletInterface;
-    const res = await deployToken(wallet, { ...base, icon: { kind: "upload", content: PNG, contentType: "image/png" } });
-    expect(res).toMatchObject({ txid: T("f"), tokenId: `${T("f")}_0` });
-    expect(calls.getPublicKey).toHaveLength(1);
-    expect(calls.getPublicKey[0]).toMatchObject({ protocolID: [0, "onesat"], counterparty: "self", forSelf: true });
-    expect((calls.getPublicKey[0] as any).keyID).toMatch(/^bsv21-deploy-GOLD-[0-9a-f]{16}$/);
-    expect(calls.createAction).toHaveLength(1);
-    const ca = calls.createAction[0];
-    expect(ca.outputs).toHaveLength(1);
-    // 1sat-sdk's pipeline stamps its managed `id:<action>_<index>` tag on basketed outputs
-    expect(ca.outputs[0].tags.slice(0, 1)).toEqual(["bsv21:deploy"]);
-    expect(ca.outputs[0].tags[1]).toMatch(/^id:[0-9a-f]{16}_0$/);
-    expect(JSON.parse(ca.outputs[0].customInstructions).keyID).toBe((calls.getPublicKey[0] as any).keyID);
-    expect(ca.options).toMatchObject({ randomizeOutputs: false });
   });
 });

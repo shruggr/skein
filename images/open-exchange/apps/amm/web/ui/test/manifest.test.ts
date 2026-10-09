@@ -38,7 +38,7 @@ describe("manifest.json", () => {
   it("protocols: onesat, BRC-29 to self, identity key, AuthFetch's two, and every action label the pages use", () => {
     const used = new Set<string>();
     for (const src of sources(join(root, "src"))) for (const m of src.matchAll(/labels: \[([^\]]*)\]/g)) for (const l of m[1]!.matchAll(/"([^"]+)"/g)) used.add(l[1]!);
-    expect([...used].sort()).toEqual(["amm-add-liquidity", "amm-payout", "amm-pool-deploy", "amm-remove-liquidity", "amm-swap"]);
+    expect([...used].sort()).toEqual(["amm-close", "amm-payout", "amm-pool-deploy", "amm-swap"]);
     expect(g.protocolPermissions.map((p: { protocolID: unknown; counterparty?: string }) => [p.protocolID, p.counterparty])).toEqual([
       [[0, "onesat"], undefined],
       [[2, "3241645161d8"], "self"],
@@ -46,7 +46,7 @@ describe("manifest.json", () => {
       [[2, "server hmac"], "self"],
       // No counterparty: the instance's identity is not known here; the manager groups it per peer at first use.
       [[2, "auth message signature"], undefined],
-      ...["amm-swap", "amm-pool-deploy", "amm-remove-liquidity", "amm-add-liquidity", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
+      ...["amm-swap", "amm-pool-deploy", "amm-close", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
     ]);
   });
 

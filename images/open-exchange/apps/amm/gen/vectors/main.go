@@ -2,12 +2,16 @@
 //
 //	src/fixtures/pool_artifact.zig  the compiled Pool template (code with its
 //	                                constructor-arg placeholders) and the slots
-//	src/fixtures/vectors.zig        a token deploy, a pool deploy, two swaps and
-//	                                a liquidity removal, built like
+//	src/fixtures/vectors.zig        a token deploy, a pool deploy (delivered, then
+//	                                claimed; a forged and a wrong-key claim), two
+//	                                swaps, two Closes and a rescind, built like
 //	                                pool/pool_test.go and each pool spend run
 //	                                through the go-sdk interpreter; and legacy
 //	                                BRC-161 (JSON) token transactions with
 //	                                their migration to BRC-162 (legacyVectors)
+//
+//	web/ui/src/pool/pool.artifact.json         the compiled artifact for the pages
+//	web/ui/test/fixtures/amm-topic-vectors.json the transactions above for the pages' tests
 //
 // Run from the repo root after changing pool/Pool.runar.go:
 //
@@ -52,11 +56,11 @@ func keyID(txid *chainhash.Hash, vout uint32) string {
 }
 
 const (
-	methodSwap            = 0
-	methodRemoveLiquidity = 2
-	lpFeeBps              = 30
-	validatorFeeBps       = 5
-	commissionBps         = 10 // the relay's commission (0.10%)
+	methodSwap      = 0
+	methodClose     = 1
+	lpFeeBps        = 30
+	validatorFeeBps = 5
+	commissionBps   = 10 // the relay's commission (0.10%)
 )
 
 func must(err error) {
@@ -78,6 +82,8 @@ var (
 	// relay is the fixture relay's payout key: the swaps pay their
 	// commission to its P2PKH (Swap's commissionPkh, vectors' commission_pkh).
 	relay = key(50)
+	// validatorWallet holds the validator wallet's coin that funds the rescind.
+	validatorWallet = key(0x77)
 )
 
 // validatorKey is the validator's signing key for a pool created by a
@@ -283,7 +289,8 @@ func ceilFee(amount, bps int64) int64 { return (amount*bps + 9999) / 10000 }
 
 func main() {
 	src := flag.String("pool", "pool/Pool.runar.go", "the Pool contract")
-	outDir := flag.String("out", "src/fixtures", "where to write the fixtures")
+	outDir := flag.String("out", "src/fixtures", "where to write the Zig fixtures")
+	webDir := flag.String("web", "web/ui", "the pages: src/pool/pool.artifact.json and test/fixtures/amm-topic-vectors.json are written under it")
 	flag.Parse()
 
 	art, err := compiler.CompileFromSource(*src)
@@ -296,12 +303,19 @@ func main() {
 		panic("codeSepIndex slots are not supported by the topic's template matcher")
 	}
 	writeArtifact(filepath.Join(*outDir, "pool_artifact.zig"), &g.sa, *src)
+	writeArtifactJSON(filepath.Join(*webDir, "src/pool/pool.artifact.json"), js)
 
-	// A funding transaction (its own input is a stand-in) paying the LP and the taker.
+	// A funding transaction (its own input is a stand-in) paying the LP, the taker and the
+	// validator's wallet: 0 the LP's deploy funding, 1-2 the taker's swaps, 3 the LP's Close
+	// funding, 4-5 the LP's further deploy inputs (each paired with an LP output), 6 the
+	// validator wallet's coin for the rescind.
 	fundIn := &transaction.TransactionInput{SourceTXID: mustHash(strings.Repeat("11", 32)), SourceTxOutIndex: 0, SequenceNumber: 0xffffffff, UnlockingScript: script.NewFromBytes([]byte{0x51})}
 	fund := transaction.NewTransaction()
 	fund.AddInput(fundIn)
-	for _, o := range []out{{2_000_000, p2pkhScript(lpKey)}, {500_000, p2pkhScript(taker)}, {100_000, p2pkhScript(taker)}, {100_000, p2pkhScript(lpKey)}} {
+	for _, o := range []out{
+		{2_000_000, p2pkhScript(lpKey)}, {500_000, p2pkhScript(taker)}, {100_000, p2pkhScript(taker)}, {100_000, p2pkhScript(lpKey)},
+		{10_000, p2pkhScript(lpKey)}, {10_000, p2pkhScript(lpKey)}, {50_000, p2pkhScript(validatorWallet)},
+	} {
 		fund.AddOutput(&transaction.TransactionOutput{Satoshis: uint64(o.sats), LockingScript: script.NewFromBytes(o.script)})
 	}
 
@@ -315,18 +329,49 @@ func main() {
 	g.assetID = deploy.TxID().CloneBytes() // internal byte order
 	g.code = g.codeFor(g.assetID)
 
-	// Pool deploy: the LP deposits 5,000,000 tokens and 1,000,000 sats; 50,000
-	// tokens go to the taker (for the tokens-in swap), the rest back to the LP.
+	// Pool deploy (skein-amm 0.9.0, David Case 2026-10-09): the LP signs every input
+	// SIGHASH_SINGLE|FORKID, input i paired with its own output i — 0 the token input with
+	// the pool (5,000,000 tokens, 1,000,000 sats), then each further input with an LP
+	// output (1: 50,000 tokens to the taker, for the tokens-in swap; 2: the LP's token
+	// change; 3: the LP's sats change) — leaving exactly one token unit unassigned. The LP
+	// delivers that (pool_deploy_delivered); the validator appends output 4, the claim: one
+	// unit, P2PKH to the pool's validator key, its payload the validator key's signature
+	// over sha256(pool locking script ‖ first token input txid (internal order) ‖ vout LE4).
 	// Validator key ID: the first token input, deploy:0.
-	p0 := pool{bsv: 1_000_000, tokens: 5_000_000, lp: lpKey, validator: validatorKey(deploy.TxID(), 0)}
-	poolDeployIns := []in{{deploy, 0, lpKey}, {fund, 0, lpKey}}
-	poolDeploy := build(poolDeployIns, []out{
+	vkey := validatorKey(deploy.TxID(), 0)
+	p0 := pool{bsv: 1_000_000, tokens: 5_000_000, lp: lpKey, validator: vkey}
+	const deployFee = 700
+	deployIns := []in{{deploy, 0, lpKey}, {fund, 0, lpKey}, {fund, 4, lpKey}, {fund, 5, lpKey}}
+	lpChange := int64(1+2_000_000+10_000+10_000) - p0.bsv - 1 - 1 - 1 - deployFee
+	deployOuts := []out{
 		{p0.bsv, g.poolScript(p0)},
 		{1, g.tokenP2pkh(50_000, taker)},
-		{1, g.tokenP2pkh(4_950_000, lpKey)},
-		{2_000_000 - 1_000_000 - 2 - 500, p2pkhScript(lpKey)},
-	})
-	signP2pkh(poolDeploy, poolDeployIns)
+		{1, g.tokenP2pkh(10_000_000-5_000_000-50_000-1, lpKey)},
+		{lpChange, p2pkhScript(lpKey)},
+	}
+	delivered := build(deployIns, deployOuts)
+	signP2pkhFlag(delivered, deployIns, sighash.SingleForkID)
+	claimed := func(signer, lockTo *ec.PrivateKey, pl pool) *transaction.Transaction {
+		tx := delivered.ShallowClone()
+		tx.Outputs = append([]*transaction.TransactionOutput{}, tx.Outputs...)
+		lock := g.poolScript(pl)
+		if pl != p0 {
+			tx.Outputs[0] = &transaction.TransactionOutput{Satoshis: uint64(pl.bsv), LockingScript: script.NewFromBytes(lock)}
+		}
+		tx.AddOutput(&transaction.TransactionOutput{Satoshis: 1, LockingScript: script.NewFromBytes(g.claimScript(signer, lockTo, lock, deploy.TxID(), 0))})
+		return tx
+	}
+	poolDeploy := claimed(vkey, vkey, p0)
+	verifyP2pkh(poolDeploy) // the LP's SINGLE signatures hold with the claim appended
+	// A claim whose payload a non-validator key signed (locked to the validator key as the real one).
+	forged := claimed(key(0x66), vkey, p0)
+	// A pool naming a ValidatorPubKey that is not the derivation, its claim signed by that key.
+	wrong := key(0x55)
+	pw := p0
+	pw.validator = wrong
+	wrongKey := build(deployIns, append([]out{{pw.bsv, g.poolScript(pw)}}, deployOuts[1:]...))
+	signP2pkhFlag(wrongKey, deployIns, sighash.SingleForkID)
+	wrongKey.AddOutput(&transaction.TransactionOutput{Satoshis: 1, LockingScript: script.NewFromBytes(g.claimScript(wrong, wrong, g.poolScript(pw), deploy.TxID(), 0))})
 
 	// Swap 1: 20,000 sats in for tokens. Validator key ID: the pool input.
 	amountIn := int64(20_000)
@@ -368,42 +413,144 @@ func main() {
 		pushData(relay.PubKey().Hash())}, []*ec.PrivateKey{p1.validator}, []int{0}, taker, change2)
 	signP2pkh(swap2, swap2Ins)
 
-	// RemoveLiquidity: the LP withdraws 10,000 sats and 100,000 tokens; the
-	// validator does not sign, so its key carries over unchanged.
-	p3 := pool{bsv: p2.bsv - 10_000, tokens: p2.tokens - 100_000, lp: lpNext, validator: p2.validator}
-	change3 := int64(100_000) - 1 - 500
-	removeIns := []in{{swap2, 0, nil}, {fund, 3, lpKey}}
-	remove := build(removeIns, []out{
-		{p3.bsv, g.poolScript(p3)},
-		{10_000, p2pkhScript(p2.lp)},
-		{1, g.tokenP2pkh(100_000, p2.lp)},
+	// Close, bsvFee 0: everything out to the LP's key, the miner fee and the token output's
+	// sat from the LP's fund:3, its change Rúnar's change output.
+	change3 := int64(100_000) - 1 - 600
+	closeIns := []in{{swap2, 0, nil}, {fund, 3, lpKey}}
+	closeTx := build(closeIns, []out{
+		{p2.bsv, p2pkhScript(p2.lp)},
+		{1, g.tokenP2pkh(p2.tokens, p2.lp)},
 		{change3, p2pkhScript(lpKey)},
 	})
-	g.unlockPool(remove, methodRemoveLiquidity, [][]byte{nil, pushData(lpNext.PubKey().Compressed()), pushNum(10_000), pushNum(100_000)},
-		[]*ec.PrivateKey{p2.lp}, []int{0}, lpKey, change3)
-	signP2pkh(remove, removeIns)
+	g.unlockPool(closeTx, methodClose, [][]byte{nil, pushNum(0)}, []*ec.PrivateKey{p2.lp}, []int{0}, lpKey, change3)
+	signP2pkh(closeTx, closeIns)
+	// Close, bsvFee 1,000 (the same pool, a competing spend): the fee from the pool's sats, no
+	// other input, no change.
+	const closeFee = 1_000
+	closeFeeIns := []in{{swap2, 0, nil}}
+	closeFeeTx := build(closeFeeIns, []out{
+		{p2.bsv - closeFee, p2pkhScript(p2.lp)},
+		{1, g.tokenP2pkh(p2.tokens, p2.lp)},
+	})
+	g.unlockPool(closeFeeTx, methodClose, [][]byte{nil, pushNum(closeFee)}, []*ec.PrivateKey{p2.lp}, []int{0}, lpKey, 0)
 
+	// The validator's rescind: the claim (pool_deploy:4) spent by its key, the one unit burned
+	// (no token output), funded by the validator wallet's fund:6: an OP_FALSE OP_RETURN and the
+	// change, as the wallet's createAction builds it with the claim as a caller input.
+	rescindIns := []in{{poolDeploy, 4, vkey}, {fund, 6, validatorWallet}}
+	rescind := build(rescindIns, []out{{0, []byte{0x00, 0x6a}}, {50_000 + 1 - 300, p2pkhScript(validatorWallet)}})
+	signP2pkh(rescind, rescindIns)
+
+	named := []named{
+		{"fund", fund}, {"token_deploy", deploy}, {"pool_deploy_delivered", delivered}, {"pool_deploy", poolDeploy},
+		{"pool_deploy_forged", forged}, {"pool_deploy_wrong_key", wrongKey},
+		{"swap_bsv_in", swap1}, {"swap_tokens_in", swap2}, {"close", closeTx}, {"close_fee", closeFeeTx}, {"rescind", rescind},
+	}
 	var b strings.Builder
 	b.WriteString("//! Generated by `go run ./gen/vectors` from pool/Pool.runar.go: do not edit.\n")
-	b.WriteString("//! A token deploy, a pool deploy, a sats-in swap, a tokens-in swap and a\n")
-	b.WriteString("//! liquidity removal, each pool spend checked by the go-sdk interpreter;\n")
-	b.WriteString("//! then legacy BRC-161 token transactions (`legacy_*`, gen/main.go's\n")
-	b.WriteString("//! legacyVectors for what each one is).\n\n")
-	for _, t := range append([]named{{"fund", fund}, {"token_deploy", deploy}, {"pool_deploy", poolDeploy}, {"swap_bsv_in", swap1}, {"swap_tokens_in", swap2}, {"remove_liquidity", remove}}, legacyVectors()...) {
+	b.WriteString("//! A token deploy; a pool deploy as the LP delivers it (every input SIGHASH_SINGLE, each\n")
+	b.WriteString("//! paired with its output) and with the validator's claim appended (output 4), and two\n")
+	b.WriteString("//! deploys whose claim must not list (forged: another key signed the payload; wrong_key: the\n")
+	b.WriteString("//! pool's ValidatorPubKey is not the derivation); a sats-in and a tokens-in swap; a Close\n")
+	b.WriteString("//! with bsvFee 0 and one with bsvFee 1,000; the validator's rescind (the claim spent, the\n")
+	b.WriteString("//! unit burned). Each pool spend checked by the go-sdk interpreter. Then legacy BRC-161\n")
+	b.WriteString("//! token transactions (`legacy_*`, gen/main.go's legacyVectors for what each one is).\n\n")
+	for _, t := range append(named, legacyVectors()...) {
 		fmt.Fprintf(&b, "pub const %s = \"%s\";\n", t.name, t.tx.Hex())
 	}
 	fmt.Fprintf(&b, "\npub const identity = \"%s\";\n", hex.EncodeToString(identity.PubKey().Compressed()))
 	fmt.Fprintf(&b, "pub const lp_fee_bps = %d;\npub const validator_fee_bps = %d;\npub const commission_bps = %d;\n", lpFeeBps, validatorFeeBps, commissionBps)
 	fmt.Fprintf(&b, "pub const commission_pkh = \"%s\";\n", hex.EncodeToString(relay.PubKey().Hash()))
+	fmt.Fprintf(&b, "pub const lp = \"%s\";\n", hex.EncodeToString(lpKey.PubKey().Compressed()))
+	fmt.Fprintf(&b, "pub const claim_vout = 4;\npub const close_bsv_fee = %d;\npub const deploy_fee = %d;\n", closeFee, deployFee)
 	for _, p := range []struct {
 		name string
 		p    pool
-	}{{"pool0", p0}, {"pool1", p1}, {"pool2", p2}, {"pool3", p3}} {
+	}{{"pool0", p0}, {"pool1", p1}, {"pool2", p2}} {
 		fmt.Fprintf(&b, "pub const %s = .{ .bsv = %d, .tokens = %d, .validator = \"%s\" };\n", p.name, p.p.bsv, p.p.tokens, hex.EncodeToString(p.p.validator.PubKey().Compressed()))
 	}
 	fmt.Fprintf(&b, "pub const swap_bsv_in_tokens_out = %d;\n", tokOut)
 	must(os.WriteFile(filepath.Join(*outDir, "vectors.zig"), []byte(b.String()), 0o644))
-	fmt.Println("wrote", *outDir)
+
+	// The pages' copy (web/ui test/fixtures/amm-topic-vectors.json).
+	v := map[string]any{"_source": "gen/vectors (go run ./gen/vectors): src/fixtures/vectors.zig's transactions and constants. Do not edit."}
+	for _, t := range named {
+		v[t.name] = t.tx.Hex()
+	}
+	v["identity"] = hex.EncodeToString(identity.PubKey().Compressed())
+	v["lp"] = hex.EncodeToString(lpKey.PubKey().Compressed())
+	v["lpFeeBps"], v["validatorFeeBps"], v["commissionBps"] = lpFeeBps, validatorFeeBps, commissionBps
+	v["commissionPkh"] = hex.EncodeToString(relay.PubKey().Hash())
+	v["claimVout"], v["closeFee"] = 4, closeFee
+	for _, p := range []struct {
+		name string
+		p    pool
+	}{{"pool0", p0}, {"pool1", p1}, {"pool2", p2}} {
+		v[p.name] = map[string]any{"bsv": p.p.bsv, "tokens": p.p.tokens, "validator": hex.EncodeToString(p.p.validator.PubKey().Compressed())}
+	}
+	v["swapBsvInTokensOut"] = tokOut
+	vj, err := json.MarshalIndent(v, "", "  ")
+	must(err)
+	must(os.WriteFile(filepath.Join(*webDir, "test/fixtures/amm-topic-vectors.json"), append(vj, '\n'), 0o644))
+	fmt.Println("wrote", *outDir, *webDir)
+}
+
+// claimScript is the claim output's lock (skein-amm 0.9.0): a BRC-162 value output of one
+// unit whose payload is `signer`'s DER signature over claimDigest(poolLock, txid:vout),
+// P2PKH to `lockTo`.
+func (g *gen) claimScript(signer, lockTo *ec.PrivateKey, poolLock []byte, txid *chainhash.Hash, vout uint32) []byte {
+	d := claimDigest(poolLock, txid, vout)
+	sig, err := signer.Sign(d[:])
+	must(err)
+	s := append(append([]byte{}, g.tokenPrefix(1)...), pushData(sig.Serialize())...)
+	s = append(s, 0x75) // OP_DROP
+	return append(s, p2pkhScript(lockTo)...)
+}
+
+// claimDigest: sha256(pool locking script ‖ txid (internal byte order) ‖ vout, 4 bytes LE) —
+// the pool output's script and the LP's first token input (the txid of the deploy cannot be
+// signed: it includes the claim).
+func claimDigest(poolLock []byte, txid *chainhash.Hash, vout uint32) [32]byte {
+	m := append(append([]byte{}, poolLock...), txid.CloneBytes()...)
+	m = binary.LittleEndian.AppendUint32(m, vout)
+	return sha256.Sum256(m)
+}
+
+// signP2pkhFlag signs every keyed input with `flag`.
+func signP2pkhFlag(tx *transaction.Transaction, ins []in, flag sighash.Flag) {
+	for idx, i := range ins {
+		if i.key == nil {
+			continue
+		}
+		u, err := p2pkh.Unlock(i.key, &flag)
+		must(err)
+		s, err := u.Sign(tx, uint32(idx))
+		must(err)
+		tx.Inputs[idx].UnlockingScript = s
+	}
+}
+
+// verifyP2pkh runs every input of tx through the interpreter.
+func verifyP2pkh(tx *transaction.Transaction) {
+	for i, in := range tx.Inputs {
+		must(interpreter.NewEngine().Execute(
+			interpreter.WithTx(tx, i, in.SourceTxOutput()),
+			interpreter.WithForkID(),
+			interpreter.WithAfterGenesis(),
+			interpreter.WithAfterChronicle(),
+		))
+	}
+}
+
+// writeArtifactJSON writes the compiled artifact the pages use (compiler.ArtifactToJSON), its
+// buildTimestamp fixed so the file is a function of the contract alone.
+func writeArtifactJSON(path string, js []byte) {
+	var m map[string]any
+	must(json.Unmarshal(js, &m))
+	m["buildTimestamp"] = "reproducible: go run ./gen/vectors"
+	out, err := json.MarshalIndent(m, "", "  ")
+	must(err)
+	must(os.WriteFile(path, append(out, '\n'), 0o644))
 }
 
 type named struct {

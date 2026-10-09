@@ -550,8 +550,8 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
         s.outputs = elsewhere;
         try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
     }
-    // Not a swap: the remove-liquidity fixture's pool input.
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.remove_liquidity), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, t_expires, t_now, .{}), "not_a_swap");
+    // Not a swap: the Close fixture's pool input (0.9.0: the LP's alone).
+    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.close), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, t_expires, t_now, .{}), "not_a_swap");
 }
 
 fn keySigner(a: Allocator, priv: [32]u8) !relay.Signer {
@@ -1034,7 +1034,7 @@ test "this program's state head is under the app's name, amm/p2p (#77: an app ad
 
 // ================================================================ the pool deploy through the relay (amm.pool/1)
 
-/// The fixtures' LP (gen/main.go `key(10)`), who owns pool_deploy:2 (4,950,000 tokens) and fund:3 (100,000 sats).
+/// The fixtures' LP (gen/main.go `key(10)`), who owns pool_deploy:2 (4,949,999 tokens) and fund:3 (100,000 sats).
 const lp_priv: [32]u8 = .{10} ** 32;
 
 const DeployFx = struct {
@@ -1088,7 +1088,8 @@ fn rawEntry(raw: []const u8) w.beef.Entry {
 /// deploy spends pool_deploy:2 (the first token input) and that output, and
 /// writes the pool (50,000 sats / 1,000,000 tokens, ValidatorIdentity the
 /// fixtures' validator, ValidatorPubKey its child for pool_deploy:2) and the
-/// 3,950,000 token change to the LP; no sats change.
+/// 3,949,998 token change to the LP, one unit left for the validator's claim
+/// (0.9.0); no sats change.
 fn buildDeploy(a: Allocator, o: DeployOpts) !DeployFx {
     const fund_raw = unhex(a, vec.fund);
     const fund = try Transaction.parse(a, fund_raw);
@@ -1120,7 +1121,7 @@ fn buildDeploy(a: Allocator, o: DeployOpts) !DeployFx {
     d.inputs = if (o.token_input) try a.dupe(bsvz.transaction.Input, &.{ token_in, funding_in }) else try a.dupe(bsvz.transaction.Input, &.{funding_in});
     d.outputs = try a.dupe(bsvz.transaction.Output, &.{
         .{ .satoshis = @intCast(pool_sats), .locking_script = Script.init(try poolScript(a, pd.outputs[0].locking_script.bytes, 1_000_000, vkey)) },
-        .{ .satoshis = 1, .locking_script = Script.init(try pool_lib.payoutScript(a, asset_id, 3_950_000, lp, false)) },
+        .{ .satoshis = 1, .locking_script = Script.init(try pool_lib.payoutScript(a, asset_id, 3_949_998, lp, false)) },
     });
     if (o.sign_deploy) {
         if (o.token_input) try signP2pkh(a, &d, 0, pd.outputs[2].locking_script.bytes, 1, lp_priv);
@@ -1265,7 +1266,35 @@ test "pool relay: the one BEEF (the deploy's as received, the funding merged in 
     try testing.expect(!eql(u8, &relay.nonceFor(.pool, id), &relay.nonceFor(.swap, id)));
 }
 
-test "pool relay: the record's lifecycle — dial /amm-validator/1/deploy; accepted is the deploy itself (a txid not the deploy's fails); refused; kept in the app's state beside the swaps" {
+/// The deploy with a claim appended (any one more output: the relay checks the shape, the validator the claim).
+fn claimed(a: Allocator, deploy: []const u8) ![]const u8 {
+    var t = try Transaction.parse(a, deploy);
+    const outs = try a.alloc(bsvz.transaction.Output, t.outputs.len + 1);
+    @memcpy(outs[0..t.outputs.len], t.outputs);
+    outs[t.outputs.len] = t.outputs[1];
+    t.outputs = outs;
+    return t.serialize(a);
+}
+
+test "pool relay (0.9.0): claimedOf — the delivered deploy with one output appended, nothing else changed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const d = try buildDeploy(a, .{});
+    const c = try claimed(a, d.deploy);
+    try testing.expect(relay.claimedOf(a, d.deploy, c));
+    try testing.expect(relay.claimedOf(a, unhex(a, vec.pool_deploy_delivered), unhex(a, vec.pool_deploy)));
+    try testing.expect(!relay.claimedOf(a, d.deploy, d.deploy)); // nothing appended
+    try testing.expect(!relay.claimedOf(a, d.deploy, try claimed(a, c))); // two appended
+    try testing.expect(!relay.claimedOf(a, unhex(a, vec.pool_deploy_delivered), unhex(a, vec.pool_deploy_wrong_key))); // another pool
+    var t = try Transaction.parse(a, c);
+    const ins = try a.dupe(bsvz.transaction.Input, t.inputs);
+    ins[1].unlocking_script = Script.empty();
+    t.inputs = ins;
+    try testing.expect(!relay.claimedOf(a, d.deploy, try t.serialize(a))); // an input changed
+}
+
+test "pool relay: the record's lifecycle — dial /amm-validator/1/deploy; accepted is the deploy with the validator's claim appended (0.9.0; anything else fails); refused; kept in the app's state beside the swaps" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1280,14 +1309,19 @@ test "pool relay: the record's lifecycle — dial /amm-validator/1/deploy; accep
         const start = try relay.advance(a, &r, .start, t_now, null);
         try testing.expectEqualStrings(relay.deploy_protocol, start.emits[0].body.getText("protocol").?);
         _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 3 } }, t_now, "pkg");
+        const c = try claimed(a, d.deploy);
+        const c_hex = w.header.toHex(w.beef.txidOf(c));
         const done = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
             .{ .key = "ok", .value = .{ .boolean = true } },
-            .{ .key = "txid", .value = .{ .text = &txid_hex } },
+            .{ .key = "tx", .value = .{ .bytes = c } },
+            .{ .key = "txid", .value = .{ .text = &c_hex } },
         } }) } }, t_now + 9, null);
         try testing.expect(done.done);
         try testing.expectEqual(relay.Status.accepted, r.status);
-        try testing.expectEqualSlices(u8, d.deploy, r.tx.?);
-        try testing.expectEqualStrings(&txid_hex, r.txid.?);
+        try testing.expectEqualSlices(u8, c, r.tx.?);
+        try testing.expectEqualStrings(&c_hex, r.txid.?);
+        try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}_0", .{&c_hex}), r.pool);
+        _ = txid_hex;
 
         // Kept under `pools`, not `swaps`; the answer names `deploy`.
         var book = try relay.Book.load(a, ms.store(), null);
@@ -1302,18 +1336,19 @@ test "pool relay: the record's lifecycle — dial /amm-validator/1/deploy; accep
         const ans = readBack(a, try back.answer(a));
         try testing.expectEqualSlices(u8, d.deploy_beef, ans.getBytes("deploy").?);
         try testing.expect(ans.get("swap") == null);
-        try testing.expectEqualSlices(u8, d.deploy, ans.getBytes("tx").?);
+        try testing.expectEqualSlices(u8, try claimed(a, d.deploy), ans.getBytes("tx").?);
         try testing.expectEqualStrings("accepted", ans.getText("status").?);
     }
-    // An accept naming another transaction: failed, not accepted.
-    {
+    // An accept without the claimed deploy, with the deploy unclaimed, or naming another txid: failed, not accepted.
+    for ([_]?[]const u8{ null, d.deploy, try claimed(a, d.deploy) }, [_]?[]const u8{ null, null, "ab" ** 32 }) |tx, txid| {
         var r = fresh;
         _ = try relay.advance(a, &r, .start, t_now, null);
         _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 4 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = true } },
-            .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-        } }) } }, t_now, null);
+        var es: std.ArrayList(cbor.Entry) = .empty;
+        try es.append(a, .{ .key = "ok", .value = .{ .boolean = true } });
+        if (tx) |t| try es.append(a, .{ .key = "tx", .value = .{ .bytes = t } });
+        if (txid) |t| try es.append(a, .{ .key = "txid", .value = .{ .text = t } });
+        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = es.items }) } }, t_now, null);
         try testing.expectEqual(relay.Status.failed, r.status);
         try testing.expectEqualStrings("bad_reply", r.reason.?);
     }
@@ -1441,427 +1476,6 @@ test "pool relay: dispatch by the manifest (app/etc/app.json, amm.pool/1) — su
     try testing.expect((try book.getKind(a, .pool, relay.idOf(d.deploy))).?.local);
 }
 
-// ================================================================ AddLiquidity through the relay (amm.liquidity/1)
-
-const addliq = @import("add_liquidity");
-
-/// The LP's AddLiquidity as the page builds it, from amm-validator's fixture
-/// (its gen/main.go, checked by the go-sdk interpreter): the funding
-/// transaction spends the LP's fund:3 and pays one exact output (the 20,000
-/// sats added + the 500 sat miner fee - the token input's sat) to the LP plus
-/// change; the add spends the fixture pool (pool_deploy:0), the LP's
-/// 4,950,000 tokens (pool_deploy:2) and that output, writes the pool only
-/// (no change), the LP key rotated to key(12), the validator's slot emptied
-/// here. `mutate` breaks one thing in the add before it is wrapped.
-const AddFx = struct {
-    funding: []const u8,
-    funding_beef: []const u8,
-    add: []const u8,
-    add_beef: []const u8,
-    pool: []const u8,
-    validator: [33]u8,
-    pool_deploy: []const u8,
-};
-
-const AddOpts = struct {
-    /// The pool call's pushes replaced: index → bytes (a whole push).
-    pushes: []const struct { usize, []const u8 } = &.{},
-    /// The validator's slot left as the fixture has it (signed).
-    keep_validator_sig: bool = false,
-    sign_funding: bool = true,
-    /// Input `i`'s unlocking script emptied.
-    unsign_input: ?usize = null,
-    extra_output: bool = false,
-    /// Carry the token input's source (pool_deploy) in the add's BEEF.
-    with_parent: bool = true,
-    with_funding: bool = true,
-    /// Input 1 repointed to fund:0 (in the BEEF): the LP's other input not pool_deploy's.
-    input1_fund: bool = false,
-};
-
-fn emptySlot(a: Allocator, script: []const u8, idx: usize, with: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var pos: usize = 0;
-    var i: usize = 0;
-    while (pos < script.len) : (i += 1) {
-        const p = mandala.brc162.readPush(script, pos).?;
-        try out.appendSlice(a, if (i == idx) with else script[pos..p.next]);
-        pos = p.next;
-    }
-    return out.items;
-}
-
-fn buildAdd(a: Allocator, o: AddOpts) !AddFx {
-    const fund_raw = unhex(a, vec.fund);
-    const pd_raw = unhex(a, vec.pool_deploy);
-    var f = try Transaction.parse(a, unhex(a, addliq.add_funding));
-    if (!o.sign_funding) {
-        const ins = try a.dupe(bsvz.transaction.Input, f.inputs);
-        ins[0].unlocking_script = Script.empty();
-        f.inputs = ins;
-    }
-    const f_raw = try f.serialize(a);
-    var t = try Transaction.parse(a, unhex(a, addliq.add_liquidity_funded));
-    const ins = try a.dupe(bsvz.transaction.Input, t.inputs);
-    ins[2].previous_outpoint.txid = .{ .bytes = w.beef.txidOf(f_raw) };
-    if (o.input1_fund) ins[1].previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(fund_raw) }, .index = 0 };
-    var u = ins[0].unlocking_script.bytes;
-    if (!o.keep_validator_sig) u = try emptySlot(a, u, 2, &.{0});
-    for (o.pushes) |x| u = try emptySlot(a, u, x[0], x[1]);
-    ins[0].unlocking_script = Script.init(u);
-    if (o.unsign_input) |i| ins[i].unlocking_script = Script.empty();
-    t.inputs = ins;
-    if (o.extra_output) {
-        const outs = try a.alloc(bsvz.transaction.Output, t.outputs.len + 1);
-        @memcpy(outs[0..t.outputs.len], t.outputs);
-        outs[t.outputs.len] = f.outputs[1];
-        t.outputs = outs;
-    }
-    const t_raw = try t.serialize(a);
-    var es: std.ArrayList(w.beef.Entry) = .empty;
-    if (o.input1_fund) try es.append(a, rawEntry(fund_raw));
-    if (o.with_parent) try es.append(a, rawEntry(pd_raw));
-    if (o.with_funding) try es.append(a, rawEntry(f_raw));
-    try es.append(a, rawEntry(t_raw));
-    var validator: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&validator, vec.identity);
-    return .{
-        .funding = f_raw,
-        .funding_beef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = &.{}, .entries = try a.dupe(w.beef.Entry, &.{ rawEntry(fund_raw), rawEntry(f_raw) }) }),
-        .add = t_raw,
-        .add_beef = try w.beef.serialize(a, .{ .version = w.beef.V2, .atomic = w.beef.txidOf(t_raw), .bumps = &.{}, .entries = es.items }),
-        .pool = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(pd_raw))}),
-        .validator = validator,
-        .pool_deploy = pd_raw,
-    };
-}
-
-fn expectAddRefusal(c: relay.AddChecked, reason: []const u8, detail_prefix: ?[]const u8) !void {
-    switch (c) {
-        .ok => {
-            std.debug.print("expected {s}, got ok\n", .{reason});
-            return error.TestExpectedRefusal;
-        },
-        .refused => |r| {
-            if (!eql(u8, r.reason, reason)) std.debug.print("expected {s}, got {s} ({s})\n", .{ reason, r.reason, r.detail orelse "" });
-            try testing.expectEqualStrings(reason, r.reason);
-            if (detail_prefix) |dp| {
-                if (!std.mem.startsWith(u8, r.detail orelse "", dp)) std.debug.print("expected detail {s}…, got {s}\n", .{ dp, r.detail orelse "" });
-                try testing.expect(std.mem.startsWith(u8, r.detail orelse "", dp));
-            }
-        },
-    }
-}
-
-var held_pool_deploy: ?[]const u8 = null;
-fn heldTx(_: *anyopaque, _: Allocator, txid: [32]u8) anyerror!?[]const u8 {
-    const raw = held_pool_deploy orelse return null;
-    return if (eql(u8, &w.beef.txidOf(raw), &txid)) raw else null;
-}
-var held_dummy: u8 = 0;
-const no_held: relay.Held = .{ .ctx = &held_dummy };
-
-fn checkAddFx(a: Allocator, d: AddFx) !relay.AddChecked {
-    return relay.checkAdd(a, d.funding_beef, d.add_beef, d.pool, &d.validator, t_expires, t_now, no_held);
-}
-
-test "liquidity relay: an AddLiquidity from the fixtures (the funding pays the sats added + fee exactly; the add spends the pool, the LP's tokens and the funding, the LP's slot signed, the validator's empty) is checked; each refusal" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const d = try buildAdd(a, .{});
-
-    const ok = try checkAddFx(a, d);
-    try testing.expect(ok == .ok);
-    try testing.expectEqual(@as(u64, addliq.add_funded_bsv), ok.ok.call.add_bsv);
-    try testing.expectEqual(@as(u64, addliq.add_tokens), ok.ok.call.add_tokens);
-    try testing.expectEqual(@as(u64, 0), ok.ok.call.change);
-    try testing.expectEqual(@as(u64, addliq.pool5.tokens), ok.ok.continuation.token_reserve);
-    try testing.expectEqual(ok.ok.spent.token_reserve + addliq.add_tokens, ok.ok.continuation.token_reserve);
-    try testing.expectEqual(@as(u64, addliq.pool5.bsv), ok.ok.spent_sats + addliq.add_funded_bsv);
-    try testing.expect(!eql(u8, &ok.ok.spent.lp, &ok.ok.continuation.lp)); // the LP key rotated
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(d.add), &ok.ok.add.txid);
-    // The funding as a raw transaction passes too.
-    try testing.expect(try relay.checkAdd(a, d.funding, d.add_beef, d.pool, &d.validator, t_expires, t_now, no_held) == .ok);
-
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add_beef, d.pool, d.validator[0..32], t_expires, t_now, no_held), "bad_validator", null);
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add_beef, d.pool, &d.validator, t_now, t_now, no_held), "expired", null);
-    try expectAddRefusal(try relay.checkAdd(a, "junk", d.add_beef, d.pool, &d.validator, t_expires, t_now, no_held), "bad_funding", null);
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, "junk", d.pool, &d.validator, t_expires, t_now, no_held), "bad_add", null);
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add, d.pool, &d.validator, t_expires, t_now, no_held), "bad_add", null); // raw: no parents
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add_beef, "pool", &d.validator, t_expires, t_now, no_held), "bad_pool", null);
-    const other_pool = try std.fmt.allocPrint(a, "{s}_1", .{&w.header.toHex(w.beef.txidOf(d.pool_deploy))});
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add_beef, other_pool, &d.validator, t_expires, t_now, no_held), "pool_not_input_0", null);
-    try expectAddRefusal(try relay.checkAdd(a, unhex(a, vec.fund), d.add_beef, d.pool, &d.validator, t_expires, t_now, no_held), "funding_not_spent", null);
-    {
-        const u = try buildAdd(a, .{ .sign_funding = false });
-        try expectAddRefusal(try checkAddFx(a, u), "funding_unsigned", "input 0");
-        try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .unsign_input = 1 })), "add_unsigned", "input 1");
-        try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .unsign_input = 2 })), "add_unsigned", "input 2");
-    }
-    // The call: another method, the validator's slot filled, the LP's empty, bad args.
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 10, &.{0x52} }} })), "not_add_liquidity", null);
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .keep_validator_sig = true })), "signature_slot_not_empty", null);
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 1, &.{0} }} })), "lp_unsigned", null);
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{ .{ 5, &.{0} }, .{ 6, &.{0} } } })), "bad_call", "addBsv + addTokens");
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 3, try pushData(a, "x" ** 33) }} })), "bad_call", "nextLpPubKey");
-    // Parents: the token input's source not carried; the pool's neither carried nor held, then held.
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .with_parent = false })), "missing_parent", "input 1: ");
-    {
-        const h = try buildAdd(a, .{ .with_parent = false, .input1_fund = true });
-        try expectAddRefusal(try checkAddFx(a, h), "missing_parent", "input 0: ");
-        held_pool_deploy = h.pool_deploy;
-        defer held_pool_deploy = null;
-        const r = try relay.checkAdd(a, h.funding_beef, h.add_beef, h.pool, &h.validator, t_expires, t_now, .{ .ctx = &held_dummy, .fn_ = heldTx });
-        try testing.expect(r == .ok);
-        try testing.expectEqual(@as(u64, 5_000_000), r.ok.spent.token_reserve);
-    }
-    // Another validator named; the next validator key not the identity's child for the pool.
-    var other = d.validator;
-    other[5] ^= 1;
-    try expectAddRefusal(try relay.checkAdd(a, d.funding_beef, d.add_beef, d.pool, &other, t_expires, t_now, no_held), "wrong_validator", null);
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 4, try pushData(a, &d.validator) }} })), "wrong_validator_key", null);
-    // The outputs, as the contract writes them: the LP key, the reserves, change, an extra output.
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 3, try pushData(a, &d.validator) }} })), "bad_outputs", "the continuation's LpPubKey");
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 5, try pushNum(a, addliq.add_funded_bsv + 1) }} })), "bad_outputs", "the continuation's BSV reserve");
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 6, try pushNum(a, addliq.add_tokens - 1) }} })), "bad_outputs", "the continuation's TokenReserve");
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .pushes = &.{.{ 8, try pushNum(a, 1000) }} })), "bad_outputs", "no change output");
-    try expectAddRefusal(try checkAddFx(a, try buildAdd(a, .{ .extra_output = true })), "bad_outputs", "outputs past the contract's");
-}
-
-test "liquidity relay: the one BEEF on /amm-validator/1/addLiquidity (the add's as received, the funding merged in when missing), the signed package, and the validator's answer checked against the add (signed last)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const d = try buildAdd(a, .{});
-    const signed = unhex(a, addliq.add_liquidity_funded);
-
-    // signedAdd: the fixture is the request with the validator's signature in its slot; nothing else is.
-    try testing.expect(try relay.signedAdd(a, d.add, signed));
-    try testing.expect(!try relay.signedAdd(a, d.add, d.add)); // the slot still empty
-    try testing.expect(!try relay.signedAdd(a, d.add, unhex(a, vec.swap_bsv_in)));
-    const lp_moved = try buildAdd(a, .{ .keep_validator_sig = true, .pushes = &.{.{ 1, try pushData(a, "s" ** 72) }} });
-    try testing.expect(!try relay.signedAdd(a, d.add, lp_moved.add)); // the LP's slot changed
-
-    // The package: box `addLiquidity`, body {tx: <the add's BEEF, the funding in it>, pool}.
-    const id = relay.addId(a, d.add_beef).?;
-    try testing.expectEqualSlices(u8, &relay.idOf(d.add), &id);
-    const rec: relay.Record = .{ .kind = .liquidity, .id = id, .funding = d.funding_beef, .swap = d.add_beef, .pool = d.pool, .validator = d.validator, .expires = t_expires, .created = t_now, .updated = t_now };
-    const signer = try keySigner(a, relay_priv);
-    const pkg = try scbor.decode(a, try relay.packageFor(a, signer, rec));
-    const m = pkg.get("message").?;
-    const body = scbor.Value.bytesOf(pkg.get("body")).?;
-    try testing.expect((try message.problem(a, m, body)) == null);
-    try testing.expectEqualStrings("addLiquidity", scbor.Value.str(m.get("box")).?);
-    try testing.expectEqualSlices(u8, &d.validator, scbor.Value.bytesOf(m.get("recipient")).?);
-    const req = try cbor.decode(a, body);
-    try testing.expectEqualStrings(d.pool, req.getText("pool").?);
-    const b1 = try w.beef.parse(a, req.getBytes("tx").?);
-    try testing.expectEqual(@as(usize, 3), b1.entries.len); // pool_deploy, the funding, the add
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(d.add), &b1.subject().?);
-    try testing.expect(!eql(u8, &relay.nonceFor(.liquidity, id), &relay.nonceFor(.pool, id)));
-
-    // The add's BEEF without the funding: merged in first (fund, the funding transaction).
-    const nf = try buildAdd(a, .{ .with_funding = false });
-    const p2 = (try checkAddFx(a, nf)).ok;
-    const b2 = try w.beef.parse(a, try relay.deployBeef(a, p2.funding, p2.add));
-    try testing.expectEqual(@as(usize, 4), b2.entries.len);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(nf.funding), &b2.entries[1].txid);
-    try testing.expect(w.beef.parentsFirst(b2));
-}
-
-test "liquidity relay: the record's lifecycle — dial /amm-validator/1/addLiquidity; accepted is the validator's signed add (another transaction, or the add unsigned, fails); refused with the pool's state; timeout; kept in the app's state under `liquidity`" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    const d = try buildAdd(a, .{});
-    const signed = unhex(a, addliq.add_liquidity_funded);
-    const txid_hex = w.header.toHex(w.beef.txidOf(signed));
-    const fresh: relay.Record = .{ .kind = .liquidity, .id = relay.idOf(d.add), .funding = d.funding_beef, .swap = d.add_beef, .pool = d.pool, .validator = d.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
-    const answerWith = struct {
-        fn f(al: Allocator, r: *relay.Record, v: Value) !void {
-            const start = try relay.advance(al, r, .start, t_now, null);
-            try testing.expectEqualStrings(relay.liquidity_protocol, start.emits[0].body.getText("protocol").?);
-            const sent = try relay.advance(al, r, .{ .answer = .{ .opened = 3 } }, t_now, "pkg");
-            try testing.expectEqualStrings("send", sent.emits[0].box);
-            const done = try relay.advance(al, r, .{ .answer = .{ .frame = try frameOf(al, v) } }, t_now + 9, null);
-            try testing.expect(done.done);
-        }
-    }.f;
-
-    {
-        var r = fresh;
-        try answerWith(a, &r, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = true } },
-            .{ .key = "tx", .value = .{ .bytes = signed } },
-            .{ .key = "txid", .value = .{ .text = &txid_hex } },
-        } });
-        try testing.expectEqual(relay.Status.accepted, r.status);
-        try testing.expectEqualSlices(u8, signed, r.tx.?);
-        try testing.expectEqualStrings(&txid_hex, r.txid.?);
-
-        // Kept under `liquidity`; the answer names `add`, the record shape the swap's.
-        var book = try relay.Book.load(a, ms.store(), null);
-        try book.put(a, r);
-        const st = readBack(a, try book.state(a));
-        try testing.expect(st.getCid("liquidity") != null);
-        try testing.expect(st.get("swaps").? == .null and st.get("pools").? == .null);
-        var again = try relay.Book.load(a, ms.store(), st);
-        try testing.expect((try again.get(a, r.id)) == null);
-        try testing.expect((try again.getKind(a, .pool, r.id)) == null);
-        const back = (try again.getKind(a, .liquidity, r.id)).?;
-        const ans = readBack(a, try back.answer(a));
-        for ([_][]const u8{ "id", "status", "funding", "add", "pool", "validator", "expires", "created", "updated", "tx", "txid" }) |k| try testing.expect(ans.get(k) != null);
-        try testing.expectEqualSlices(u8, d.add_beef, ans.getBytes("add").?);
-        try testing.expectEqualStrings("accepted", ans.getText("status").?);
-        try testing.expectEqualStrings(d.pool, ans.getText("pool").?);
-    }
-    // Accepted without a txid: the txid is the signed transaction's.
-    {
-        var r = fresh;
-        try answerWith(a, &r, .{ .map = &.{ .{ .key = "ok", .value = .{ .boolean = true } }, .{ .key = "tx", .value = .{ .bytes = signed } } } });
-        try testing.expectEqual(relay.Status.accepted, r.status);
-        try testing.expectEqualStrings(&txid_hex, r.txid.?);
-    }
-    // An accept naming another transaction, the add unsigned, or a txid not its transaction's: failed.
-    for ([_]Value{
-        .{ .map = &.{ .{ .key = "ok", .value = .{ .boolean = true } }, .{ .key = "tx", .value = .{ .bytes = unhex(a, vec.swap_bsv_in) } } } },
-        .{ .map = &.{ .{ .key = "ok", .value = .{ .boolean = true } }, .{ .key = "tx", .value = .{ .bytes = d.add } } } },
-        .{ .map = &.{ .{ .key = "ok", .value = .{ .boolean = true } }, .{ .key = "tx", .value = .{ .bytes = signed } }, .{ .key = "txid", .value = .{ .text = "ab" ** 32 } } } },
-        .{ .map = &.{.{ .key = "ok", .value = .{ .boolean = true } }} },
-    }) |v| {
-        var r = fresh;
-        try answerWith(a, &r, v);
-        try testing.expectEqual(relay.Status.failed, r.status);
-        try testing.expectEqualStrings("bad_reply", r.reason.?);
-    }
-    // Refused by the validator, with the pool's newest state.
-    {
-        var r = fresh;
-        try answerWith(a, &r, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = false } },
-            .{ .key = "reason", .value = .{ .text = "pool_spent" } },
-            .{ .key = "pool", .value = .{ .map = &.{.{ .key = "outpoint", .value = .{ .text = "cd" ** 32 ++ "_0" } }} } },
-        } });
-        try testing.expectEqual(relay.Status.refused, r.status);
-        try testing.expectEqualStrings("pool_spent", r.reason.?);
-        try testing.expectEqualStrings("cd" ** 32 ++ "_0", r.pool_state.?.getText("outpoint").?);
-        try testing.expect(r.tx == null);
-    }
-    // Timeout as the swap's.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .woke, t_expires, null);
-        try testing.expectEqual(relay.Status.timeout, r.status);
-    }
-}
-
-fn testLiquiditySubmit(c: *app.Call) anyerror!scbor.Value {
-    test_env.seen_writes = c.writes;
-    var dummy: u8 = 0;
-    const env: relay.Env = .{ .book = test_env.book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = test_env.self_peer, .launchFn = testLaunch };
-    return switch (try relay.submitAdd(c.a, env, try fromSdk(c.a, c.args))) {
-        .refused => |r| sk.report(try relay.refusalText(c.a, r)),
-        .launched, .pending, .settled => |r| toSdk(c.a, try r.answer(c.a)),
-    };
-}
-fn testLiquidityStatus(c: *app.Call) anyerror!scbor.Value {
-    test_env.seen_writes = c.writes;
-    return switch (try relay.statusOf(c.a, test_env.book, .liquidity, try fromSdk(c.a, c.args))) {
-        .found => |r| toSdk(c.a, try r.answer(c.a)),
-        .not_found => sk.report("not_found"),
-        .bad_id => sk.report("bad_id"),
-    };
-}
-const liquidity_fns = [_]app.Function{
-    .{ .name = relay.fn_submit, .run = testSubmit },
-    .{ .name = relay.fn_status, .run = testStatus },
-    .{ .name = relay.fn_pool_submit, .run = testPoolSubmit },
-    .{ .name = relay.fn_pool_status, .run = testPoolStatus },
-    .{ .name = relay.fn_liquidity_submit, .run = testLiquiditySubmit },
-    .{ .name = relay.fn_liquidity_status, .run = testLiquidityStatus },
-};
-
-fn liquidityArgs(a: Allocator, d: AddFx, extra: ?cbor.Entry) !scbor.Value {
-    var es: std.ArrayList(cbor.Entry) = .empty;
-    try es.appendSlice(a, &.{
-        .{ .key = "funding", .value = .{ .bytes = d.funding_beef } },
-        .{ .key = "add", .value = .{ .bytes = d.add_beef } },
-        .{ .key = "pool", .value = .{ .text = d.pool } },
-        .{ .key = "validator", .value = .{ .bytes = &d.validator } },
-        .{ .key = "peerId", .value = .{ .text = named_peer } },
-        .{ .key = "expires", .value = .{ .uint = t_expires } },
-    });
-    if (extra) |e| try es.append(a, e);
-    return toSdk(a, .{ .map = es.items });
-}
-
-test "liquidity relay: dispatch by the manifest (app/etc/app.json, amm.liquidity/1) — submit records and launches the add's relay, again answers its record, status reads it (not a swap's or a deploy's); refusals write nothing; a timed-out add is relayed again" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    var book = try relay.Book.load(a, ms.store(), null);
-    test_env = .{ .book = &book };
-    const m = try dagjson.decode(a, manifest_json);
-    const in: scbor.Value = .{ .map = &.{} };
-    const d = try buildAdd(a, .{});
-
-    try testing.expect((try app.declOf(a, m, relay.fn_liquidity_submit)).?.get("writes").?.bool);
-    try testing.expect(!(try app.declOf(a, m, relay.fn_liquidity_status)).?.get("writes").?.bool);
-    try testing.expectEqual(@as(?relay.Kind, .liquidity), relay.Kind.ofSubmit(relay.fn_liquidity_submit));
-    try testing.expectEqualStrings(relay.fn_liquidity_status, relay.Kind.liquidity.statusFn());
-
-    const r1 = try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, d, null), null);
-    try testing.expect(r1 == .ok);
-    try testing.expectEqual(@as(?bool, true), test_env.seen_writes);
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-    try testing.expectEqual(@as(?relay.Kind, .liquidity), test_env.launched_kind);
-    const rec = try fromSdk(a, r1.ok);
-    try testing.expectEqualStrings("pending", rec.getText("status").?);
-    try testing.expectEqualStrings(&relay.idText(relay.idOf(d.add)), rec.getText("id").?);
-    try testing.expectEqualStrings(d.pool, rec.getText("pool").?);
-    _ = try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, d, null), null);
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-
-    var sargs = scbor.MapBuilder.init(a);
-    try sargs.put("id", scbor.string(rec.getText("id").?));
-    const s1 = try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_status, sargs.value(), null);
-    try testing.expect(s1 == .ok);
-    try testing.expectEqual(@as(?bool, false), test_env.seen_writes);
-    try testing.expectEqualStrings("pending", (try fromSdk(a, s1.ok)).getText("status").?);
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_status, sargs.value(), null), .failed, "not_found");
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_pool_status, sargs.value(), null), .failed, "not_found");
-
-    // The declared shape: a deploy's arg is not an add's; the pool is text.
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, d, .{ .key = "deploy", .value = .{ .bytes = "x" } }), null), .@"bad-args", "args.deploy: not in the shape");
-
-    // Refusals: the function's error, nothing recorded or launched.
-    const lpu = try buildAdd(a, .{ .pushes = &.{.{ 1, &.{0} }} });
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, lpu, null), null), .failed, "lp_unsigned");
-    const outs = try buildAdd(a, .{ .extra_output = true });
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, outs, null), null), .failed, "bad_outputs: outputs past the contract's");
-    // Another add (its _changePKH another: no change, so the contract's outputs are the same).
-    const off = try buildAdd(a, .{ .pushes = &.{.{ 7, try pushData(a, &(.{0x11} ** 20)) }} });
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try withPeer(a, try liquidityArgs(a, off, null), null), null), .@"bad-args", "args.peerId: missing");
-    try expectErr(try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try withPeer(a, try liquidityArgs(a, off, null), ""), null), .failed, "bad_peer");
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-    try testing.expect((try book.getKind(a, .liquidity, relay.idOf(lpu.add))) == null);
-    try testing.expect((try book.getKind(a, .liquidity, relay.idOf(off.add))) == null);
-
-    // Timed out: relayed again.
-    var r = (try book.getKind(a, .liquidity, relay.idOf(d.add))).?;
-    r.status = .timeout;
-    try book.put(a, r);
-    _ = try app.run(a, in, relay.app_name, m, &liquidity_fns, relay.fn_liquidity_submit, try liquidityArgs(a, d, null), null);
-    try testing.expectEqual(@as(usize, 2), test_env.launched);
-    try testing.expectEqual(relay.Status.pending, (try book.getKind(a, .liquidity, relay.idOf(d.add))).?.status);
-}
-
 test "market and validator are the engine's (0.6.0, shruggr/skein#120), root's switch (0.6.2, David 2026-10-07): no validate route, no start or stop, no config.amm.ammP2p.market; config.overlay.market / .validator absent, both off until root turns one on" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1889,12 +1503,14 @@ test "the routes, filters and roles (shruggr/skein#143, 0.7.0): no dispatch, rea
     try testing.expect(m.get("dispatch") == null and m.get("reads") == null);
     const gated = m.get("roles").?.get("root").?.array;
     // register, registerLookup, deregisterLookup (skein-overlay 0.11.0); no market / validator
-    // (0.8.1, skein-overlay 0.12.0: always both, no switch).
-    try testing.expectEqual(@as(usize, 3), gated.len);
-    for ([_][]const u8{ "register", "registerLookup", "deregisterLookup" }, gated) |x, g| try testing.expectEqualStrings(x, scbor.Value.str(g).?);
+    // (0.8.1, skein-overlay 0.12.0: always both, no switch); rescind, the validator's (0.9.0).
+    try testing.expectEqual(@as(usize, 4), gated.len);
+    for ([_][]const u8{ "register", "registerLookup", "deregisterLookup", "rescind" }, gated) |x, g| try testing.expectEqualStrings(x, scbor.Value.str(g).?);
     const filters = m.get("filters").?;
     try testing.expectEqualStrings("amm-p2p.serve", scbor.Value.str(filters.get("page")).?);
     try testing.expectEqualStrings("mandala-lookup.tokens", scbor.Value.str(filters.get("tokens")).?);
+    try testing.expectEqualStrings("amm-p2p.requests", scbor.Value.str(filters.get("requests")).?);
+    try testing.expectEqualStrings("amm-p2p.spends", scbor.Value.str(filters.get("spends")).?);
     var seen: u8 = 0;
     for (m.get("routes").?.array) |r| {
         try testing.expect(r.get("sender") == null and r.get("program") == null);
@@ -1921,7 +1537,98 @@ test "the routes, filters and roles (shruggr/skein#143, 0.7.0): no dispatch, rea
             try testing.expectEqualStrings("page", scbor.Value.str(r.get("filters").?.array[0]).?);
             seen |= 8;
         }
+        // 0.9.0: the validator's box (root's rescind), the holders' requests, and two reads.
+        if (std.mem.eql(u8, t, "mailbox") and std.mem.eql(u8, addr, "validator")) {
+            try testing.expectEqualStrings("amm-validator", h.?);
+            seen |= 16;
+        }
+        if (std.mem.eql(u8, t, "mailbox") and std.mem.eql(u8, addr, "requests")) {
+            try testing.expectEqualStrings("amm-p2p", h.?);
+            seen |= 32;
+        }
+        if (std.mem.eql(u8, t, "http") and (std.mem.eql(u8, addr, "/requests") or std.mem.eql(u8, addr, "/spends"))) {
+            try testing.expect(h == null);
+            seen |= if (std.mem.eql(u8, addr, "/requests")) 64 else 128;
+        }
+        // No addLiquidity (0.9.0).
+        try testing.expect(!std.mem.eql(u8, addr, "/amm-validator/1/addLiquidity"));
     }
-    try testing.expectEqual(@as(u8, 15), seen);
+    try testing.expectEqual(@as(u8, 255), seen);
     try testing.expectEqualStrings("amm/amm-p2p", names.own_box);
+}
+
+// ================================================================ the reads and the listing requests (0.9.0)
+
+const reads = @import("src/reads.zig");
+
+test "listing requests (0.9.0): a holder's request is recorded (the latest per token, any id form), listed newest first, less the tokens registered" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const s = ms.store();
+    const t1 = "01" ** 32;
+    const t2 = "02" ** 32;
+    const holder: [33]u8 = .{0x02} ++ .{0x11} ** 32;
+    const other: [33]u8 = .{0x03} ++ .{0x22} ** 32;
+    var rec = try reads.record(a, s, null, t1 ++ "_0", &holder, 100);
+    rec = try reads.record(a, s, rec, t2 ++ ".0", &other, 200);
+    rec = try reads.record(a, s, rec, t1, &other, 300); // the same token again: the latest kept
+    try testing.expectError(error.BadTokenId, reads.record(a, s, rec, "abc", &holder, 400));
+    const all = try reads.list(a, s, rec, &.{});
+    try testing.expectEqual(@as(usize, 2), all.len);
+    try testing.expectEqualStrings(t1 ++ "_0", all[0].token_id);
+    try testing.expectEqual(@as(u64, 300), all[0].at);
+    try testing.expectEqualSlices(u8, &other, all[0].from);
+    try testing.expectEqualStrings(t2 ++ "_0", all[1].token_id);
+    // Registered: settled, not listed.
+    const left = try reads.list(a, s, rec, &.{"tm_mandala_" ++ t1 ++ "_0"});
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqualStrings(t2 ++ "_0", left[0].token_id);
+    const json = try reads.requestsJson(a, left);
+    try testing.expect(std.mem.indexOf(u8, json, "\"tokenId\":\"" ++ t2 ++ "_0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"from\":\"03" ++ "22" ** 32 ++ "\"") != null);
+    try testing.expectEqualStrings(reads.requests_box, reads.requests_head);
+}
+
+test "spends (0.9.0): the chain state of an outpoint — the claim spent (the rescind); a pool followed from the deploy to its current output; closed by Close; unspent" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    var ch = try w.state.State.load(a, ms.store(), null, .regtest);
+    for ([_][]const u8{ vec.fund, vec.token_deploy, vec.pool_deploy, vec.swap_bsv_in, vec.swap_tokens_in }) |h| {
+        const raw = unhex(a, h);
+        _ = try ch.putTx(w.beef.txidOf(raw), raw);
+    }
+    const pd = w.beef.txidOf(unhex(a, vec.pool_deploy));
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+    // Followed: two swaps.
+    const at_deploy = try reads.spendOf(a, &ch, .{ .txid = pd, .vout = 0 });
+    try testing.expectEqual(@as(u32, 2), at_deploy.hops);
+    try testing.expect(!at_deploy.closed);
+    try testing.expectEqualSlices(u8, &s2, &at_deploy.current.?.txid);
+    try testing.expectEqualSlices(u8, &w.beef.txidOf(unhex(a, vec.swap_bsv_in)), &at_deploy.spent_by.?);
+    // The claim: unspent, then spent by the rescind.
+    try testing.expect((try reads.spendOf(a, &ch, .{ .txid = pd, .vout = vec.claim_vout })).spent_by == null);
+    const rs = unhex(a, vec.rescind);
+    _ = try ch.putTx(w.beef.txidOf(rs), rs);
+    const claim = try reads.spendOf(a, &ch, .{ .txid = pd, .vout = vec.claim_vout });
+    try testing.expectEqualSlices(u8, &w.beef.txidOf(rs), &claim.spent_by.?);
+    try testing.expect(claim.current == null); // not a pool
+    // Closed: the pool's last output spent by Close.
+    const cl = unhex(a, vec.close);
+    _ = try ch.putTx(w.beef.txidOf(cl), cl);
+    const after = try reads.spendOf(a, &ch, .{ .txid = pd, .vout = 0 });
+    try testing.expect(after.closed);
+    try testing.expect(after.current == null);
+    const json = try reads.spendJson(a, after);
+    try testing.expect(std.mem.indexOf(u8, json, "\"closed\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"hops\":2") != null);
+    // The query.
+    const q = reads.queryOutpoint("outpoint=" ++ "ab" ** 32 ++ ".4").?;
+    try testing.expectEqual(@as(u32, 4), q.vout);
+    try testing.expect(reads.queryOutpoint("x=1") == null);
 }

@@ -183,18 +183,19 @@ export function poolUtxoFrom(poolOutput: LookupOutput): PoolUtxo {
 }
 
 /**
- * A P2PKH (or Mandala-on-P2PKH) input signed by the wallet: BIP-143
- * ALL|FORKID over the finished transaction, `createSignature` with
- * `hashToDirectlySign` (1sat-sdk's `signP2PKHInputWallet`).
+ * A P2PKH (or Mandala-on-P2PKH) input signed by the wallet: BIP-143 over
+ * the finished transaction under `scope` (ALL|FORKID; a delivered deploy's
+ * SINGLE|FORKID, 0.9.0), `createSignature` with `hashToDirectlySign`
+ * (1sat-sdk's `signP2PKHInputWallet`).
  */
 export async function signP2pkhWithWallet(
   wallet: WalletInterface,
   tx: Transaction,
   inputIndex: number,
   src: { satoshis: number; lockingScript: string; protocolID: WalletProtocol; keyID: string; counterparty: string },
+  scope: number = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID,
 ): Promise<UnlockingScript> {
   const input = tx.inputs[inputIndex]!;
-  const scope = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
   const preimage = TransactionSignature.format({
     sourceTXID: input.sourceTXID!,
     sourceOutputIndex: input.sourceOutputIndex,

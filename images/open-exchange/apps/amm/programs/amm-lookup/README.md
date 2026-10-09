@@ -19,6 +19,12 @@ topic the overlay serves, declared or registered with the engine
 zig build test-amm-lookup    # from the repo root: the checks, the index, the queries, natively
 ```
 
+## 0.9.0: the claim and the listing; the beat (David Case, 2026-10-09)
+
+A pool is **listed** only while both its contract output and its claim output are unspent, and only if the claim verifies (src/pool.zig `verifiedClaim`: one unit of the token after output 0, its payload the pool's ValidatorPubKey's signature over the pool's script and the first token input — the topic's first retained coin, else input 0 — that key `validatorKey(ValidatorIdentity, first token input)`, the claim P2PKH to it). Two more maps: `claims` (`tp ‖ claim outpoint → null`, the live verified claims) and `spentClaims` (a claim a spend consumed, for `rejected`). A deploy's pool is indexed with its claim (`claimFor`); a continuation carries the claim of the pool it spends (in `pools` still: `spent` runs after `admitted`); a deploy with no verified claim is not indexed. `spent` of a claim (the validator's rescind) moves it to `spentClaims`: every pool of that deploy is unlisted; `rejected` gives it back. **Every query answers listed pools only** (`{tokenId}`, `{tokenId, validatorIdentityKey}`; `{tokenId, outpoint}` a pool not listed: `NotListed`).
+
+**The beat** (skein-overlay 0.12): the service's body on `ls_amm-live` is dag-cbor `{tokens: {<assetId>: {<validator identity, hex>: {sats, tokens, pools}}}}`, this skein's per-token, per-validator totals of its listed pools (`beatValue`); fn `beat` answers it at the beacon's declaration (`Spec.beat`), and a hook hands a new one to the engine (`Service.beat`) only when it changed (the last body's record kept in the map `beat`). The engine declares a lookup's beacon for a **registered** service: root registers `ls_amm` (`registerLookup {service: "ls_amm", program: "amm-lookup"}`) beside its manifest declaration.
+
 ## Layout
 
 | file | what |
@@ -64,7 +70,7 @@ order) ‖ vout, big-endian u32:
 
 | map | key → value | |
 |---|---|---|
-| `pools` | `tp ‖ outpoint → record` (a CID link) | an unspent pool output the topic admitted |
+| `pools` | `tp ‖ outpoint → record` (a CID link) | an unspent pool output the topic admitted (0.9.0: with a verified claim; the record names it, `claim`) |
 | `byValidator` | `validatorIdentityKey (33 bytes) ‖ tp ‖ outpoint → null` | a set index for the validator query |
 | `spentPools` | `tp ‖ outpoint → record` (a CID link) | a checked pool a spend consumed, kept for `rejected` to give back and for `{outpoint}` to follow |
 

@@ -3,20 +3,20 @@
 // manager and lookup service, copied from their tagged builds (URL+hash dependencies; nothing is
 // built on the skein), and this repo's own programs:
 //
-//   amm-lookup      ls_amm: the pool liquidity lookup over every token topic served   programs/amm-lookup
-//   amm-validator   the validator: swap, addLiquidity, deploy (libp2p direct calls)       programs/amm-validator
-//   amm-p2p         the relay (amm.swap/1, amm.pool/1,               programs/amm-p2p
-//                   amm.liquidity/1), the app's box and its pages (www/, files.serve)
+//   amm-lookup      ls_amm: the listed pools over every token topic served; the prices beat   programs/amm-lookup
+//   amm-validator   the validator: swap, deploy (libp2p direct calls); the claim; rescind      programs/amm-validator
+//   amm-p2p         the relay (amm.swap/1, amm.pool/1), the listing requests,     programs/amm-p2p
+//                   the reads /requests and /spends, and its pages (www/, files.serve)
 //
 // over the pool library (src/pool.zig: the Pool contract as the overlay sees it, over the
 // `mandala` module's parser and rules) and its generated fixtures (src/fixtures, gen/).
 //
 //   zig build              → zig-out/bin/{amm-lookup,amm-validator,amm-p2p}.wasm
-//   zig build bin          the three, written to bin/, with bin/overlay.wasm (skein-overlay v0.9.2)
-//                          and bin/mandala-{topic,lookup}.wasm (skein-mandala v0.7.5) copied beside
+//   zig build bin          the three, written to bin/, with bin/overlay.wasm (skein-overlay v0.12.1)
+//                          and bin/mandala-{topic,lookup}.wasm (skein-mandala v0.9.2) copied beside
 //   zig build test         the pool library and the three programs' tests, natively
 //
-// The Mandala pages (skein-mandala v0.7.5's www/) are copied into www/mandala/ by
+// The Mandala pages (skein-mandala v0.9.2's www/) are copied into www/mandala/ by
 // scripts/mandala-pages.sh (the tag's tarball by URL and sha256): they are not in the Zig package.
 // The AMM pages are built from web/ui into www/ (scripts/www.sh runs both).
 const std = @import("std");
@@ -169,7 +169,6 @@ pub fn build(b: *std.Build) void {
             .imports = imports(b, nm, r[0]),
         });
         m.addImport("vectors", b.createModule(.{ .root_source_file = b.path("src/fixtures/vectors.zig"), .target = target, .optimize = .Debug }));
-        m.addImport("add_liquidity", b.createModule(.{ .root_source_file = b.path("src/fixtures/add_liquidity.zig"), .target = target, .optimize = .Debug }));
         // The manifest, for the dispatch tests: the functions' declarations as an installed app's are read.
         const wf = b.addWriteFiles();
         _ = wf.addCopyFile(b.path("etc/app.json"), "app.json");

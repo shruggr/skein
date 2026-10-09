@@ -100,17 +100,17 @@ pub fn canonicalNum(p: brc162.Push) ?i64 {
 }
 
 /// pool/Pool.runar.go's methods, in declaration order (its ABI's method
-/// index): Swap = 0 (validator-signed), AddLiquidity = 1 (validator-signed),
-/// RemoveLiquidity = 2 (LP-only, the validator does not sign).
-pub const Method = enum(u2) { swap = 0, add_liquidity = 1, remove_liquidity = 2 };
+/// index): Swap = 0 (validator-signed), Close = 1 (the LP's alone; skein-amm
+/// 0.9.0, David Case 2026-10-09: AddLiquidity and RemoveLiquidity are gone).
+pub const Method = enum(u1) { swap = 0, close = 1 };
 
 /// The method a pool input's unlocking script selects. gen/main.go's
 /// `unlockPool` (mirroring how the Rúnar SDK builds a call) writes the
 /// unlocking script as a sequence of pushes only — the method's args, then
 /// Rúnar's change output and preimage — and pushes the method index last, so
-/// it is the script's final push, minimally encoded (OP_0/OP_1/OP_2 here).
+/// it is the script's final push, minimally encoded (OP_0/OP_1 here).
 /// Null when the script cannot be walked as all pushes, is empty, or its
-/// last push is not 0, 1 or 2.
+/// last push is not 0 or 1.
 pub fn methodOf(script: []const u8) ?Method {
     var pos: usize = 0;
     var last: ?brc162.Push = null;
@@ -122,8 +122,7 @@ pub fn methodOf(script: []const u8) ?Method {
     const v = canonicalNum(last orelse return null) orelse return null;
     return switch (v) {
         0 => .swap,
-        1 => .add_liquidity,
-        2 => .remove_liquidity,
+        1 => .close,
         else => null,
     };
 }
@@ -279,6 +278,80 @@ pub fn validatorKey(a: std.mem.Allocator, identity: [33]u8, txid: [32]u8, vout: 
         .public_key = try bsvz.primitives.ec.PublicKey.fromSec1(&identity),
     }, false);
     return child.toCompressedSec1();
+}
+
+// ---------------------------------------------------------------- the claim (0.9.0)
+
+/// The claim (skein-amm 0.9.0, David Case 2026-10-09). A deploy the LP delivers carries one
+/// token unit no output takes; the validator appends it as the claim: a BRC-162 value output of
+/// ONE unit of the pool's token, P2PKH to the pool's validator key (the key the contract names,
+/// `validatorKey(identity, <the LP's first token input>)`), whose payload is that key's DER
+/// signature over `claimDigest(<the pool output's locking script>, <the first token input>)` —
+/// the deploy's txid cannot be signed: it includes the claim. A pool is listed only while both
+/// its contract output and its claim are unspent and the claim verifies (amm-lookup); the
+/// validator rescinds by spending the claim.
+pub const claim_amount: u64 = 1;
+
+/// sha256(pool locking script ‖ txid (internal byte order) ‖ vout, 4 bytes LE): what the claim
+/// signs. `txid:vout` is the LP's first token input.
+pub fn claimDigest(pool_script: []const u8, txid: [32]u8, vout: u32) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(pool_script);
+    h.update(&txid);
+    var v: [4]u8 = undefined;
+    std.mem.writeInt(u32, &v, vout, .little);
+    h.update(&v);
+    var out: [32]u8 = undefined;
+    h.final(&out);
+    return out;
+}
+
+/// The claim output's locking script: `0x20 <assetId> OP_1 OP_2DROP <sig> OP_DROP` then P2PKH to `pkh`.
+pub fn claimScript(a: std.mem.Allocator, asset_id: [32]u8, sig: []const u8, pkh: [20]u8) ![]u8 {
+    var buf: [10]u8 = undefined;
+    var push: std.ArrayList(u8) = .empty;
+    if (sig.len == 0 or sig.len > 0x4b) return error.BadSignature;
+    try push.append(a, @intCast(sig.len));
+    try push.appendSlice(a, sig);
+    const lock = p2pkh(pkh);
+    return std.mem.concat(a, u8, &.{ &.{0x20}, &asset_id, brc162.pushAmount(&buf, claim_amount), &.{0x6d}, push.items, &.{0x75}, &lock });
+}
+
+/// A claim at an output script: a BRC-162 value output of one unit of `asset_id` with a payload
+/// (the signature) and a plain P2PKH lock. Null when the script is not one.
+pub const Claim = struct { sig: []const u8, pkh: [20]u8 };
+
+pub fn claimOf(script: []const u8, asset_id: [32]u8) ?Claim {
+    const tok = brc162.decode(script) orelse return null;
+    if (tok.role != .value or tok.amount != claim_amount) return null;
+    const id = tok.id orelse return null;
+    if (id.vout != 0 or !std.mem.eql(u8, &id.txid, &asset_id)) return null;
+    const sig = tok.payload orelse return null;
+    const lock = tok.lock;
+    if (lock.len != 25 or lock[0] != 0x76 or lock[1] != 0xa9 or lock[2] != 0x14 or lock[23] != 0x88 or lock[24] != 0xac) return null;
+    return .{ .sig = sig, .pkh = lock[3..23].* };
+}
+
+/// Whether `claim` is `key`'s claim of the pool at `pool_script` whose first token input is
+/// `txid:vout`: locked to `key`'s hash, its payload `key`'s signature of `claimDigest`.
+pub fn claimVerifies(claim: Claim, key: [33]u8, pool_script: []const u8, txid: [32]u8, vout: u32) bool {
+    if (!std.mem.eql(u8, &bsvz.crypto.hash.hash160(&key).bytes, &claim.pkh)) return false;
+    const der = bsvz.crypto.DerSignature.fromDer(claim.sig) catch return false;
+    const pk = bsvz.primitives.ec.PublicKey.fromSec1(&key) catch return false;
+    return pk.verifyDigest(claimDigest(pool_script, txid, vout), der) catch false;
+}
+
+/// The claim of a deploy: `tx` creates the pool `p` at output 0 (script `pool_script`), and its
+/// first token input is `first_txid:first_vout`. → the claim's vout, or null when no output after
+/// 0 is a claim that verifies against the derivation.
+pub fn verifiedClaim(a: std.mem.Allocator, outputs: []const bsvz.transaction.Output, p: Pool, pool_script: []const u8, first_txid: [32]u8, first_vout: u32) !?u32 {
+    const want = try validatorKey(a, p.identity, first_txid, first_vout);
+    if (!std.mem.eql(u8, &want, &p.validator)) return null;
+    for (outputs[1..], 1..) |o, i| {
+        const cl = claimOf(o.locking_script.bytes, p.asset_id) orelse continue;
+        if (claimVerifies(cl, want, pool_script, first_txid, first_vout)) return @intCast(i);
+    }
+    return null;
 }
 
 pub const Violation = enum {
