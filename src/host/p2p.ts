@@ -307,8 +307,16 @@ export async function beaconsOf(store: Pick<Store, "get" | "chains" | "edges">):
   return foldBeacons(await emittedEvents(store, (rec) => { const e = beaconEvent(rec); return "refused" in e ? undefined : e; }));
 }
 
-/** The event records the steps' updates list in `emitted` that `read` takes, in log order (the kernel's fold order, subscriptions.zig). */
-export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>) => T | undefined): Promise<T[]> {
+/**
+ * An emitted event's place in the log (the fold order, subscriptions.zig): the entry its step
+ * processed (`n`, the update's `input`), the step's time (`at`, the update's), its thread (origin),
+ * its place in the thread (`seq`), the event record's place in the update's `emitted` (`i`) and
+ * the record's CID.
+ */
+export interface EmittedAt { n: number; at: number; thread: CID; seq: number; i: number; record: CID }
+
+/** The event records the steps' updates list in `emitted` that `read` takes, in log order (the kernel's fold order, subscriptions.zig); `read` gets each one's place too. */
+export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>, place: EmittedAt) => T | undefined): Promise<T[]> {
   type Obj = Record<string, unknown>;
   const ns = new Map<string, number>();
   const nOf = async (input: unknown): Promise<number> => {
@@ -321,6 +329,7 @@ export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "ed
   const found: Array<{ key: number[]; thread: Uint8Array; e: T }> = [];
   for await (const origin of store.edges.query({ kind: "thread" })) {
     const o = await store.get(origin) as Obj;
+    const thread: CID = origin, threadBytes = origin.bytes;
     let seq = 0;
     for await (const c of store.chains.history(origin)) {
       if (c.equals(origin)) continue;
@@ -331,9 +340,10 @@ export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "ed
         if (!isCid(x)) continue;
         const rec = await store.get(x).catch(() => undefined) as Obj | undefined;
         if (rec?.kind !== "event") continue;
-        const e = read(rec);
+        const n = await nOf(u.input), at = Number(u.at ?? 0);
+        const e = read(rec, { n, at, thread, seq, i, record: x });
         if (e === undefined) continue;
-        found.push({ key: [await nOf(u.input), Number(u.at ?? 0), Number(o.at ?? 0), seq, i], thread: origin.bytes, e });
+        found.push({ key: [n, at, Number(o.at ?? 0), seq, i], thread: threadBytes, e });
       }
     }
   }

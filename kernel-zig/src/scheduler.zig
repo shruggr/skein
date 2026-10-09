@@ -159,8 +159,12 @@ pub const Witness = struct {
 /// CID is the message's id), `body` its body's — or (#65) an event, transport
 /// `event`, `address` its name (`broadcast`, or any other, #119): `message`
 /// the event record's dag-cbor, `body` a broadcast's transaction bytes (empty
-/// for any other event).
-pub const Outgoing = struct { message: []const u8, body: []const u8, transport: []const u8, address: []const u8 };
+/// for any other event). `place` (#148): an event's place in the log — the
+/// entry its step processed (`n`), the update's `seq` in its thread, the
+/// record's index in the update's `emitted` (`i`), the thread's origin —
+/// carried in the notice beside the record, never in it; null for a message.
+pub const Outgoing = struct { message: []const u8, body: []const u8, transport: []const u8, address: []const u8, place: ?Place = null };
+pub const Place = struct { n: i64, seq: i64, i: i64, thread: []const u8 };
 
 /// The peers the runtime calls out to (all optional; replay has none but the witness).
 pub const Peers = struct {
@@ -335,7 +339,7 @@ pub const Runtime = struct {
             if (isBroadcast(m)) {
                 // #65: a broadcast whose transaction the thread still awaits goes out again (a host
                 // keeps a queue; one that lost it posts it again, and Arcade answers a duplicate).
-                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m);
+                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m, origin);
                 continue;
             }
             // #126: an event the thread awaits (a `deadline`, a `fetch`) goes out again: the host
@@ -343,7 +347,7 @@ pub const Runtime = struct {
             // ignores it (hosts dedupe by the record's CID). #119: any other event is handed over
             // once, after its step's commit; a host that needs it again reads it from the log.
             if (isEvent(m)) {
-                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m);
+                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m, origin);
                 continue;
             }
             if (!cidIn(tip.get("awaits"), c)) continue;
@@ -364,8 +368,9 @@ pub const Runtime = struct {
     /// Queue an event for the host (#65, #119): transport "event", address its
     /// name (`broadcast`, or the record's `event`); `message` the record's
     /// dag-cbor, `body` a broadcast's transaction bytes (empty for any other).
-    fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value) !void {
+    fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value, thread: []const u8) !void {
         if (rt.peers.emit == null) return;
+        const place = try rt.placeOf(a, c, thread);
         const bytes = (try rt.store.bytes(a, c)) orelse return;
         const broadcast = isBroadcast(m);
         const tx: []const u8 = if (broadcast) (try rt.store.bytes(a, Value.cidOf(m.get("tx")).?)) orelse return else "";
@@ -375,7 +380,24 @@ pub const Runtime = struct {
             .body = try rt.gpa.dupe(u8, tx),
             .transport = try rt.gpa.dupe(u8, "event"),
             .address = try rt.gpa.dupe(u8, name),
+            .place = if (place) |p| .{ .n = p.n, .seq = p.seq, .i = p.i, .thread = try rt.gpa.dupe(u8, p.thread) } else null,
         });
+    }
+
+    /// #148: where event record `c` is in the log — in the update at `thread`'s tip (the step that
+    /// listed it, or the waiting tip a start hands over again): its input entry's `n`, its `seq`,
+    /// the record's index in its `emitted`. Null when the tip does not list it.
+    fn placeOf(rt: *Runtime, a: std.mem.Allocator, c: []const u8, thread: []const u8) !?Place {
+        const tip = (try rt.tipOf(a, thread)) orelse return null;
+        const emitted = tip.get("emitted") orelse return null;
+        if (emitted != .array) return null;
+        const i = for (emitted.array, 0..) |x, k| {
+            if (std.mem.eql(u8, Value.cidOf(x) orelse continue, c)) break k;
+        } else return null;
+        const seq = Value.intOf(tip.get("seq")) orelse return null;
+        const entry = rt.store.getOpt(a, Value.cidOf(tip.get("input")) orelse return null) orelse return null;
+        const n = Value.intOf(entry.get("n")) orelse return null;
+        return .{ .n = @intCast(n), .seq = @intCast(seq), .i = @intCast(i), .thread = thread };
     }
 
     /// How a message to `to` goes out: its address book entry (`root`). A
@@ -444,6 +466,7 @@ pub const Runtime = struct {
             rt.gpa.free(o.body);
             rt.gpa.free(o.transport);
             rt.gpa.free(o.address);
+            if (o.place) |p| rt.gpa.free(p.thread);
         }
     }
 
@@ -1121,14 +1144,14 @@ pub const Runtime = struct {
     /// the rest handed to the host after the commit. A function of the
     /// update and the state, so replay launches the same threads (and hands
     /// nothing over: it has no host).
-    fn deliver(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, emitted: []const []const u8) !void {
+    fn deliver(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, thread: []const u8, emitted: []const []const u8) !void {
         const root = try rt.store.headTree(a, addressbook.HEAD);
         for (emitted) |mc| {
             if (rt.stopped) return;
             const m = rt.store.getOpt(a, mc) orelse continue;
             if (isBroadcast(m) or isEvent(m)) {
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
-                try rt.handOverEvent(a, mc, m);
+                try rt.handOverEvent(a, mc, m, thread);
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
@@ -2250,7 +2273,7 @@ pub const Runtime = struct {
             if (after_stdout.len > 0 and !rt.stopped) try rt.routeAdmits(a, ctx, after_stdout);
         }
         // What the step emitted goes out (#70).
-        if (after_emitted.len > 0 and !rt.stopped) try rt.deliver(a, ctx, after_emitted);
+        if (after_emitted.len > 0 and !rt.stopped) try rt.deliver(a, ctx, origin, after_emitted);
         for (after_launched) |c| try rt.run(a, c);
         if (after_rested) try rt.rested(a, origin);
     }
@@ -3570,7 +3593,7 @@ pub const Runtime = struct {
             return;
         }
         // Resting on its deadline: the event goes to the host once this is committed (a start hands it over again).
-        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m) catch |err| return shStop(t, err);
+        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m, t.origin) catch |err| return shStop(t, err);
         return error.Park;
     }
 
