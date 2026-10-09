@@ -627,6 +627,8 @@ pub const Runtime = struct {
         ran: std.array_list.Managed(Value),
         beefs: std.array_list.Managed(Value),
         blocks: std.array_list.Managed(Value),
+        /// kernel.pay's (#149): {satoshisPaid, txid, derivationPrefix, derivationSuffix, sender}
+        payment: ?Value = null,
         fuel: u64 = 0,
     };
 
@@ -728,6 +730,7 @@ pub const Runtime = struct {
         if (ch.ran.items.len > 0) try d.put("filters", .{ .array = ch.ran.items });
         if (ch.beefs.items.len > 0) try d.put("beefs", .{ .array = ch.beefs.items });
         if (ch.blocks.items.len > 0) try d.put("blocks", .{ .array = ch.blocks.items });
+        try d.put("payment", ch.payment);
         try d.put("bodies", bodies);
         return d.value();
     }
@@ -809,6 +812,24 @@ pub const Runtime = struct {
             // #135, signed or validated: no principal, and nothing to validate — neither.
             if (doorm.nothingValidated(ch.principal != null, x)) |why| return .{ .kind = "reject", .status = 400, .code = "ERR_BEEF", .reason = why, .fuel = ch.fuel };
             return null;
+        }
+        if (std.mem.eql(u8, name, doorm.PAY)) {
+            // #149: the route's price; ts-stack's payment wire (door.zig pay).
+            if (!std.mem.eql(u8, transport, "http")) return reject(500, "ERR_FILTER", "kernel.pay prices an http request");
+            var first: [16]u8 = undefined;
+            realRandom(rt.peers.io, &first, at);
+            for (&first) |*b| b.* = 33 + b.* % 94;
+            const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
+            switch (try doorm.pay(a, rt.store, w, ch.request, ch.principal, doorm.priceOf(r.value), first)) {
+                .reject => |x| return .{ .kind = "reject", .status = x.status, .code = x.code, .reason = x.reason, .principal = ch.principal, .fuel = ch.fuel },
+                .answer => |x| return .{ .kind = "answer", .status = x.status, .type = "application/json", .headers = x.headers, .body = x.body, .principal = ch.principal, .fuel = ch.fuel },
+                .pass => |x| {
+                    ch.request = x.request;
+                    if (x.beef) |c| try ch.beefs.append(cbor.cidv(c));
+                    ch.payment = x.payment;
+                    return null;
+                },
+            }
         }
         // An app's filter: `<app>.<filter>`, the function the app's record lists under `filters`.
         const dot = std.mem.lastIndexOfScalar(u8, name, '.').?;
@@ -1268,7 +1289,10 @@ pub const Runtime = struct {
     /// request's thread, the one a synchronous client waits on (#66) — and its
     /// first step verifies the package and routes it.
     fn processRequest(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, rc: []const u8, at: i64) !void {
-        _ = at;
+        // #149: a payment kernel.pay admitted is the wallet's to internalize first; refused, the handler does not run.
+        if (ctx.e.get("door")) |d| if (d.get("payment")) |p| if (p == .map) {
+            if (!(try rt.internalizePayment(a, n, ctx, rc, p, at))) return;
+        };
         const origin = (try rt.requestOrigin(a, ctx.cid, ctx.e)) orelse {
             rt.say("#{d} request {s}: no middleware for its transport; recorded, nothing runs", .{ n, short(a, rc) });
             return;
@@ -1276,6 +1300,79 @@ pub const Runtime = struct {
         const t = try rt.store.chainOpen(a, origin);
         rt.say("#{d} {s} request {s} → {s} {s}", .{ n, Value.str(ctx.e.get("transport")).?, short(a, rc), try rt.programName(a, Value.cidOf(origin.get("program")).?), short(a, t) });
         try rt.run(a, t);
+    }
+
+    /// A payment kernel.pay admitted (#149, the entry's `door.payment`): before the request's thread,
+    /// the kernel launches the genesis's wallet program on it — origin {kind: "thread", program:
+    /// <wallet>, args: {body: <{op: "internalize", tx: <the Atomic BEEF>, outputs: [{outputIndex: 0,
+    /// protocol: "wallet payment", paymentRemittance: {derivationPrefix, derivationSuffix,
+    /// senderIdentityKey: <the sender, hex>}}], description}>}, launchedBy: <the entry>, input: <the
+    /// entry>, at, nonce: "payment"} — and runs it now (as the pay step, #130): the wallet is the one
+    /// writer of its records, and checks the BRC-29 derivation. Whether the handler may run: not when
+    /// the wallet already holds the txid (replay: an entry admitted before this one internalized
+    /// it), there is no wallet program, or its step errored (the refusal, on the thread's update).
+    fn internalizePayment(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, rc: []const u8, p: Value, at: i64) !bool {
+        const txid = Value.str(p.get("txid")) orelse "?";
+        const wallet = rt.walletProgram() orelse {
+            rt.say("#{d} payment {s}: the genesis has no wallet program to internalize it; the handler does not run", .{ n, txid });
+            return false;
+        };
+        const req = (try rt.store.get(a, rc)) orelse return error.NotFound;
+        const tx = (try doorm.paymentBeef(a, rt.store, req)) orelse {
+            rt.say("#{d} payment {s}: the request carries no payment header to internalize; the handler does not run", .{ n, txid });
+            return false;
+        };
+        const origin = try paymentOrigin(a, rt.store, wallet, ctx, p, tx, at);
+        const t = try rt.store.chainOpen(a, origin);
+        if (try rt.store.chainTip(a, t)) |tip| if (std.mem.eql(u8, tip, t)) {
+            const d = beefSubject(a, tx) orelse return false;
+            if (try doorm.walletHolds(a, rt.store, d)) {
+                rt.say("#{d} payment {s}: the wallet already holds it (replay); the handler does not run", .{ n, txid });
+                return false;
+            }
+            rt.say("#{d} payment {s}: {d} sats → wallet {s}", .{ n, txid, Value.intOf(p.get("satoshisPaid")) orelse 0, short(a, t) });
+            try rt.run(a, t);
+        };
+        const ups = (try rt.store.chainUpdates(a, t)) orelse return false;
+        if (ups.len == 0) return false;
+        const u = (try rt.store.get(a, ups[0])) orelse return false;
+        if (stateIs(u, "errored") or (!stateIs(u, "finished") and !stateIs(u, "waiting"))) {
+            rt.say("#{d} payment {s}: the wallet refused it; the handler does not run", .{ n, txid });
+            return false;
+        }
+        return true;
+    }
+
+    fn beefSubject(a: std.mem.Allocator, tx: []const u8) ?[32]u8 {
+        const d = @import("beef.zig").parse(a, tx) catch return null;
+        return d.subject;
+    }
+
+    fn paymentOrigin(a: std.mem.Allocator, s: Store, wallet: []const u8, ctx: Ctx, p: Value, tx: []const u8, at: i64) !Value {
+        var rem = cbor.MapBuilder.init(a);
+        try rem.put("derivationPrefix", p.get("derivationPrefix"));
+        try rem.put("derivationSuffix", p.get("derivationSuffix"));
+        try rem.put("senderIdentityKey", cbor.string(try hexOf(a, Value.bytesOf(p.get("sender")) orelse "")));
+        var out = cbor.MapBuilder.init(a);
+        try out.put("outputIndex", cbor.int(0));
+        try out.put("protocol", cbor.string("wallet payment"));
+        try out.put("paymentRemittance", rem.value());
+        var body = cbor.MapBuilder.init(a);
+        try body.put("op", cbor.string("internalize"));
+        try body.put("tx", .{ .bytes = tx });
+        try body.put("outputs", .{ .array = try a.dupe(Value, &.{out.value()}) });
+        try body.put("description", cbor.string("Payment for request"));
+        var args = cbor.MapBuilder.init(a);
+        try args.put("body", cbor.cidv(try s.put(a, body.value())));
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(wallet));
+        try origin.put("args", args.value());
+        try origin.put("launchedBy", cbor.cidv(ctx.cid));
+        try origin.put("input", cbor.cidv(ctx.cid));
+        try origin.put("at", cbor.int(at));
+        try origin.put("nonce", cbor.string("payment"));
+        return origin.value();
     }
 
     /// The thread a request entry launched, if it has been processed (#66: what the host waits on).

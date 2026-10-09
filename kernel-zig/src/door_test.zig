@@ -114,6 +114,20 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     // The bytes come back exactly.
     const back = try door.restore(a, s, got.value, got.beefs);
     try std.testing.expectEqualSlices(u8, wire, Value.bytesOf(back.get("body")).?);
+    // #149: kernel.pay's header text around the pointer record comes back as the text sent.
+    var text = cbor.MapBuilder.init(a);
+    try text.put("kind", cbor.string(door.PAYMENT_TEXT));
+    try text.put("before", cbor.string("{\"derivationPrefix\":\"p\",\"transaction\":\""));
+    try text.put("beef", body);
+    try text.put("after", cbor.string("\",\"derivationSuffix\":\"s\"}"));
+    var hs = cbor.MapBuilder.init(a);
+    try hs.put("x-bsv-payment", text.value());
+    var b64: std.ArrayList(u8) = .empty;
+    try b64.resize(a, std.base64.standard.Encoder.calcSize(wire.len));
+    _ = std.base64.standard.Encoder.encode(b64.items, wire);
+    const sent = try std.mem.concat(a, u8, &.{ "{\"derivationPrefix\":\"p\",\"transaction\":\"", b64.items, "\",\"derivationSuffix\":\"s\"}" });
+    const hback = try door.restore(a, s, hs.value(), got.beefs);
+    try std.testing.expectEqualStrings(sent, Value.str(hback.get("x-bsv-payment")).?);
 
     // Again: the same pointer record, and no block written (each is stored once).
     const before = (try ss.allCids(a)).len;

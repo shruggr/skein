@@ -28,11 +28,20 @@
 //                   a principal (#135: signed or validated — "nothing to
 //                   validate"). A transaction no BUMP proves enters as unproven
 //                   (SPV and status are the chain app's).
+//   kernel.pay      (#149) a route's `price` (sats), after kernel.brc104: ts-stack's
+//                   payment-express-middleware wire. No `X-BSV-Payment` header: an
+//                   answer, 402 with the derivation prefix to pay under (a nonce
+//                   over the signer's HMAC); with one: the nonce verified, the
+//                   Atomic BEEF's first output covering the price, its txid not
+//                   one the wallet holds — passed on with the `payment` block and
+//                   the BEEF behind its pointer record (kernel.beef's path); else
+//                   refused in ts-stack's codes. An unpriced route: passed untouched.
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
 const mst = @import("mst");
 const beef = @import("beef.zig");
+const bitcoin = @import("bitcoin.zig");
 const authfetch = @import("authfetch.zig");
 const signer = @import("signer.zig");
 const secp = @import("secp");
@@ -204,24 +213,20 @@ pub fn filterBeef(a: std.mem.Allocator, s: Store, v: Value) !Filtered {
 }
 
 /// The bytes a package's pointer links stand for, put back (the lossless rule's other half): each
-/// link to a pointer record named in `beefs` replaced by the BEEF it records (beef.zig `encode`).
+/// link to a pointer record named in `beefs` replaced by the BEEF it records (beef.zig `encode`),
+/// and (#149) kernel.pay's payment header — {kind: "x-bsv-payment", before, beef, after} — by its
+/// text, before ‖ base64(the BEEF) ‖ after.
 pub fn restore(a: std.mem.Allocator, s: Store, v: Value, beefs: []const []const u8) !Value {
     switch (v) {
         .cid => |c| {
-            for (beefs) |x| if (std.mem.eql(u8, x, c)) {
-                const rec = (try s.get(a, c)) orelse return error.NotFound;
-                const G = struct {
-                    fn get(ctx: *anyopaque, al: std.mem.Allocator, k: []const u8) anyerror!?[]const u8 {
-                        const st: *const Store = @ptrCast(@alignCast(ctx));
-                        return st.bytes(al, k);
-                    }
-                };
-                var sc = s;
-                return .{ .bytes = try beef.encode(a, rec, .{ .ctx = &sc, .get = G.get }) };
-            };
+            for (beefs) |x| if (std.mem.eql(u8, x, c)) return .{ .bytes = try encodeBeef(a, s, c) };
             return v;
         },
         .map => |m| {
+            if (std.mem.eql(u8, Value.str(v.get("kind")) orelse "", PAYMENT_TEXT)) if (Value.cidOf(v.get("beef"))) |c| for (beefs) |x| if (std.mem.eql(u8, x, c)) {
+                const b64 = try encode64(a, try encodeBeef(a, s, c));
+                return cbor.string(try std.mem.concat(a, u8, &.{ Value.str(v.get("before")) orelse "", b64, Value.str(v.get("after")) orelse "" }));
+            };
             const out = try a.alloc(cbor.Entry, m.len);
             for (m, out) |e, *o| o.* = .{ .key = e.key, .value = try restore(a, s, e.value, beefs) };
             return .{ .map = out };
@@ -345,4 +350,213 @@ pub fn brc104(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, now: i64, 
     const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return failed("Invalid signature in generalMessage");
     if (res.len == 0 or res[0] != 0) return failed("Invalid signature in generalMessage");
     return .{ .pass = .{ .caller = peer, .theirs = sess.theirs, .request_id = request_id } };
+}
+
+// ---------------------------------------------------------------- kernel.pay (#149)
+//
+// The wire is ts-stack's payment-express-middleware (paired with BRC-103/104 auth): a priced route
+// answers a request with no `X-BSV-Payment` header 402 with the derivation prefix to pay under (a
+// nonce the skein's signer verifies later: ts-stack createNonce/verifyNonce over createHmac /
+// verifyHmac); the resend carries {derivationPrefix, derivationSuffix, transaction: <Atomic BEEF,
+// base64>}, a BRC-29 payment in its first output to the skein's identity key from the sender's
+// (the principal kernel.brc104 yielded). The filter writes nothing but the BEEF's blocks: the
+// wallet internalizes the payment when the entry is processed (scheduler.zig processRequest), and
+// checks the BRC-29 derivation there (as ts-stack's wallet does at internalizeAction).
+
+pub const PAY = "kernel.pay";
+pub const PAYMENT_VERSION = "1.0";
+/// The request header the payment comes in (ts-stack's `x-bsv-payment`, any case).
+pub const PAYMENT_HEADER = "x-bsv-payment";
+/// What the header's value becomes in the logged request (the lossless rule): the header text with
+/// the transaction's base64 cut out, and the BEEF's pointer record where it was — {kind, before,
+/// beef: <pointer record>, after}; restored, before ‖ base64(the BEEF) ‖ after.
+pub const PAYMENT_TEXT = "x-bsv-payment";
+/// The wallet's head (programs/wallet): its `actions` map (txid → action) is the replay check.
+pub const WALLET_STATE = "wallet/state";
+const NONCE_PROTOCOL = "server hmac";
+
+/// A route's `price` (sats); 0 when it has none.
+pub fn priceOf(route: Value) u64 {
+    const p = Value.intOf(route.get("price")) orelse return 0;
+    return if (p > 0 and p <= std.math.maxInt(u64)) @intCast(p) else 0;
+}
+
+/// What `kernel.pay` came to: passed on (untouched, for an unpriced route; else the request with
+/// the payment's BEEF behind its pointer record and the `payment` block), the 402 challenge, or a
+/// refusal in ts-stack's codes.
+pub const Pay = union(enum) {
+    pass: struct { request: Value, beef: ?[]const u8 = null, payment: ?Value = null },
+    answer: struct { status: i64, headers: Value, body: []const u8 },
+    reject: Reject,
+};
+
+fn payReject(status: i64, code: []const u8, description: []const u8) Pay {
+    return .{ .reject = .{ .status = status, .code = code, .reason = description } };
+}
+
+const UNAVAILABLE = "Payment processing is temporarily unavailable.";
+const MALFORMED_PAYMENT = "The X-BSV-Payment header is malformed.";
+
+fn encode64(a: std.mem.Allocator, b: []const u8) ![]u8 {
+    const out = try a.alloc(u8, std.base64.standard.Encoder.calcSize(b.len));
+    _ = std.base64.standard.Encoder.encode(out, b);
+    return out;
+}
+
+/// Canonical base64 (ts-stack isCanonicalBase64): non-empty, decodes, and encodes back to itself.
+fn canonical64(a: std.mem.Allocator, s: []const u8) ?[]u8 {
+    if (s.len == 0) return null;
+    const d = std.base64.standard.Decoder;
+    const out = a.alloc(u8, d.calcSizeForSlice(s) catch return null) catch return null;
+    d.decode(out, s) catch return null;
+    const back = encode64(a, out) catch return null;
+    return if (std.mem.eql(u8, back, s)) out else null;
+}
+
+/// ts-stack createNonce: 16 bytes and their HMAC under [2, "server hmac"], key ID the 16 bytes
+/// read as UTF-8, counterparty self; base64 of the 48. `first` printable ASCII (as authfetch's), so
+/// its key ID is the same string on every side.
+pub fn createNonce(a: std.mem.Allocator, w: Signer, first: [16]u8) ![]u8 {
+    const res = try w.call(w.ctx, a, try signer.createHmacFrame(a, NONCE_PROTOCOL, &first, .self, &first));
+    if (res.len != 33 or res[0] != 0) return error.SignerHmac;
+    var raw: [48]u8 = undefined;
+    @memcpy(raw[0..16], &first);
+    @memcpy(raw[16..], res[1..33]);
+    return encode64(a, &raw);
+}
+
+/// ts-stack verifyNonce: canonical base64 of 48 bytes whose last 32 are the HMAC of the first 16
+/// (key ID their WHATWG UTF-8 decoding, the SDK's toUTF8: cbor.utf8Fix), through the signer.
+pub fn verifyNonce(a: std.mem.Allocator, w: Signer, nonce: []const u8) !bool {
+    const raw = canonical64(a, nonce) orelse return false;
+    if (raw.len != 48) return false;
+    const key_id = try cbor.utf8Fix(a, raw[0..16]);
+    const res = w.call(w.ctx, a, try signer.verifyHmacFrame(a, NONCE_PROTOCOL, key_id, .self, raw[0..16], raw[16..48])) catch return false;
+    return res.len > 0 and res[0] == 0;
+}
+
+const StoreCtx = struct {
+    s: Store,
+    fn get(ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8 {
+        const x: *StoreCtx = @ptrCast(@alignCast(ctx));
+        return x.s.bytes(a, cid);
+    }
+};
+
+/// Whether the wallet holds an action for `txid` (its `actions` map, read only): the replay check.
+pub fn walletHolds(a: std.mem.Allocator, s: Store, txid: [32]u8) !bool {
+    const root = (try s.headTree(a, WALLET_STATE)) orelse return false;
+    const v = s.getOpt(a, root) orelse return false;
+    if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", "wallet-state")) return false;
+    const maps = v.get("maps") orelse return false;
+    const actions = Value.cidOf(maps.get("actions")) orelse return false;
+    var sc = StoreCtx{ .s = s };
+    var f = mst.Forest.init(a, .{ .ctx = &sc, .get = StoreCtx.get });
+    return (try f.get(a, actions, &txid)) != null;
+}
+
+fn paymentHeaderIndex(headers: ?Value) ?usize {
+    const hs = headers orelse return null;
+    if (hs != .map) return null;
+    for (hs.map, 0..) |e, i| if (std.ascii.eqlIgnoreCase(e.key, PAYMENT_HEADER)) return i;
+    return null;
+}
+
+fn hexDisplay(a: std.mem.Allocator, txid: [32]u8) ![]u8 {
+    var r = txid;
+    std.mem.reverse(u8, &r);
+    const out = try a.alloc(u8, 64);
+    _ = try std.fmt.bufPrint(out, "{x}", .{&r});
+    return out;
+}
+
+/// kernel.pay (#149) over an http request, `principal` what kernel.brc104 yielded, `price` the
+/// route's, `first` 16 random printable bytes for a challenge's nonce. Nothing is stored unless it
+/// passes with a payment (the BEEF's blocks, through the same path as kernel.beef's).
+pub fn pay(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, principal: ?[]const u8, price: u64, first: [16]u8) !Pay {
+    if (price == 0) return .{ .pass = .{ .request = req } };
+    if (principal == null) return payReject(500, "ERR_SERVER_MISCONFIGURED", "The payment middleware must run after successful Auth middleware.");
+    const sg = w orelse return payReject(503, "ERR_PAYMENT_UNAVAILABLE", UNAVAILABLE);
+    const hs = req.get("headers");
+    const idx = paymentHeaderIndex(hs) orelse {
+        // The challenge: ts-stack's issuePaymentChallenge, exactly.
+        const nonce = createNonce(a, sg, first) catch return payReject(503, "ERR_PAYMENT_UNAVAILABLE", UNAVAILABLE);
+        var h = cbor.MapBuilder.init(a);
+        try h.put("x-bsv-payment-version", cbor.string(PAYMENT_VERSION));
+        try h.put("x-bsv-payment-satoshis-required", cbor.string(try std.fmt.allocPrint(a, "{d}", .{price})));
+        try h.put("x-bsv-payment-derivation-prefix", cbor.string(nonce));
+        const body = try std.fmt.allocPrint(a, "{{\"status\":\"error\",\"code\":\"ERR_PAYMENT_REQUIRED\",\"satoshisRequired\":{d},\"description\":\"A BSV payment is required. Provide the X-BSV-Payment header.\"}}", .{price});
+        return .{ .answer = .{ .status = 402, .headers = h.value(), .body = body } };
+    };
+    const raw = Value.str(hs.?.map[idx].value) orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    if (parsed != .object) return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    const field = struct {
+        fn f(o: std.json.ObjectMap, k: []const u8) ?[]const u8 {
+            const x = o.get(k) orelse return null;
+            return if (x == .string) x.string else null;
+        }
+    }.f;
+    const prefix = field(parsed.object, "derivationPrefix") orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    const suffix = field(parsed.object, "derivationSuffix") orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    const tx64 = field(parsed.object, "transaction") orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    if (canonical64(a, prefix) == null or canonical64(a, suffix) == null) return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    const bytes = canonical64(a, tx64) orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    if (!(try verifyNonce(a, sg, prefix))) return payReject(400, "ERR_INVALID_DERIVATION_PREFIX", "The payment derivation prefix is invalid.");
+    // ts-stack parseAtomicPayment: an Atomic BEEF whose subject's first output carries the price.
+    const invalid = "The payment transaction is invalid or does not cover the required amount.";
+    const d = beef.parse(a, bytes) catch return payReject(400, "ERR_INVALID_PAYMENT", invalid);
+    if (d.form != .atomic) return payReject(400, "ERR_INVALID_PAYMENT", invalid);
+    const subject = d.txs[d.indexOf(d.subject).?];
+    const tx = bitcoin.parseTx(a, subject.raw orelse return payReject(400, "ERR_INVALID_PAYMENT", invalid)) catch return payReject(400, "ERR_INVALID_PAYMENT", invalid);
+    if (tx.outputs.len == 0 or tx.outputs[0].value < price) return payReject(400, "ERR_INVALID_PAYMENT", invalid);
+    // Replay: a txid the wallet already holds.
+    if (try walletHolds(a, s, d.subject)) return payReject(409, "ERR_PAYMENT_REPLAYED", "This payment was already used.");
+    // The header text with the transaction cut out (the lossless rule); the BEEF through kernel.beef's path.
+    const quoted = try std.fmt.allocPrint(a, "\"{s}\"", .{tx64});
+    const at = std.mem.indexOf(u8, raw, quoted) orelse return payReject(400, "ERR_MALFORMED_PAYMENT", MALFORMED_PAYMENT);
+    var walk = Walk{ .a = a, .s = s };
+    const link = try walk.bytes(bytes);
+    if (walk.refused) |why| return payReject(400, "ERR_INVALID_PAYMENT", why);
+    try walk.flush();
+    var text = cbor.MapBuilder.init(a);
+    try text.put("kind", cbor.string(PAYMENT_TEXT));
+    try text.put("before", cbor.string(raw[0 .. at + 1]));
+    try text.put("beef", link);
+    try text.put("after", cbor.string(raw[at + 1 + tx64.len ..]));
+    const headers = try a.dupe(cbor.Entry, hs.?.map);
+    headers[idx].value = text.value();
+    var out = cbor.MapBuilder.init(a);
+    for (req.map) |e| try out.put(e.key, e.value);
+    try out.put("headers", .{ .map = headers });
+    var p = cbor.MapBuilder.init(a);
+    try p.put("satoshisPaid", cbor.int(tx.outputs[0].value));
+    try p.put("txid", cbor.string(try hexDisplay(a, d.subject)));
+    try p.put("derivationPrefix", cbor.string(prefix));
+    try p.put("derivationSuffix", cbor.string(suffix));
+    try p.put("sender", .{ .bytes = principal.? });
+    return .{ .pass = .{ .request = out.value(), .beef = Value.cidOf(link).?, .payment = p.value() } };
+}
+
+/// The payment's Atomic BEEF, from the request as logged (the header's pointer record, encoded
+/// back: beef.zig `encode`); null when the request carries none.
+pub fn paymentBeef(a: std.mem.Allocator, s: Store, req: Value) !?[]u8 {
+    const hs = req.get("headers");
+    const idx = paymentHeaderIndex(hs) orelse return null;
+    const v = hs.?.map[idx].value;
+    if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", PAYMENT_TEXT)) return null;
+    const c = Value.cidOf(v.get("beef")) orelse return null;
+    return try encodeBeef(a, s, c);
+}
+
+fn encodeBeef(a: std.mem.Allocator, s: Store, c: []const u8) ![]u8 {
+    const rec = (try s.get(a, c)) orelse return error.NotFound;
+    const G = struct {
+        fn get(ctx: *anyopaque, al: std.mem.Allocator, k: []const u8) anyerror!?[]const u8 {
+            const st: *const Store = @ptrCast(@alignCast(ctx));
+            return st.bytes(al, k);
+        }
+    };
+    var sc = s;
+    return beef.encode(a, rec, .{ .ctx = &sc, .get = G.get });
 }

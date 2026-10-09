@@ -1,5 +1,5 @@
 // The kernel's own BRC-100 wire frames to the signer (#70): what `emit` signs
-// a message with, and (#126) what `authfetch` signs, HMACs and verifies with. The same framing as a program's (the SDK's lib/brc104.zig
+// a message with, and (#126) what `authfetch` signs, HMACs and verifies with, and (#149) kernel.pay's nonce. The same framing as a program's (the SDK's lib/brc104.zig
 // keyParams): the call code, an empty originator, security level, protocol,
 // key ID, counterparty, privileged false; the answer frame is 0 ‖ payload on
 // success. A frame the kernel makes goes through the step's `wallet` path, so
@@ -53,6 +53,18 @@ fn keyParams(a: std.mem.Allocator, f: *std.array_list.Managed(u8), call: u8, pro
 pub fn createHmacFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, data: []const u8) ![]u8 {
     var f = std.array_list.Managed(u8).init(a);
     try keyParams(a, &f, 13, protocol, key_id, cp);
+    try varint(a, &f, data.len);
+    try f.appendSlice(data);
+    try f.append(0); // seekPermission: false
+    return f.toOwnedSlice();
+}
+
+/// verifyHmac (call 14) at security level 2 (#149: kernel.pay's nonce, ts-stack verifyNonce): the
+/// HMAC (32 bytes), then `data`; the answer frame is 0 when it verifies.
+pub fn verifyHmacFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, data: []const u8, hmac: []const u8) ![]u8 {
+    var f = std.array_list.Managed(u8).init(a);
+    try keyParams(a, &f, 14, protocol, key_id, cp);
+    try f.appendSlice(hmac);
     try varint(a, &f, data.len);
     try f.appendSlice(data);
     try f.append(0); // seekPermission: false
