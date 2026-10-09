@@ -14,8 +14,11 @@
 //                            catalog or a repository (GitHub's versions resolved to a commit), the
 //                            review; the skeins created there (a host skein's)
 //   #/s/<identity>/app/<name>  one app: its routes (transport, address, filters, handler) and its
-//                            roles (root, user and the app's own), each role's holders from the
-//                            kernel's head `grants`, granted and revoked by root (shruggr/skein#143)
+//                            roles, read only (granted on the Permissions tab)
+//   #/s/<identity>/permissions[?app=<name>|?who=<key>]
+//                            its Permissions (shruggr/skein#143): each key the head `grants` names
+//                            with its roles, revoked by root; Grant a role (root only); the roles
+//                            each installed app declares, the functions they gate, their holders
 //   #/s/<identity>/peers     its Contacts (the address book): add by handle, or by key and URL
 //   #/s/<identity>/overview  root, handle, counts, identity
 //   #/s/<identity>/log, /threads, /thread/<cid>, /record/<cid>, /edges/<cid>, /routes, /heads
@@ -702,6 +705,7 @@ async function route() {
     if (page === "") await appsPage(m, sk);
     else if (page === "app") await appPage(m, sk, parts[3] ?? "");
     else if (page === "overview") await overviewPage(m, sk);
+    else if (page === "permissions") await permissionsPage(m, sk, params);
     else if (page === "peers") await contactsPage(m, sk);
     else if (page === "heads") await headsPage(m, sk);
     else if (page === "log") await logPage(m, sk, params);
@@ -891,7 +895,7 @@ function skeinHeader(sk, page) {
         h("h1", {}, sk.loc.handle || short(id)),
         h("a", { class: "url", href: `${sk.loc.url}/` }, sk.loc.url)),
       inspectLink(id)),
-    h("nav", { class: "tabs", "aria-label": "This skein" }, tab("", "Apps"), tab("peers", "Contacts"), tab("overview", "Overview")),
+    h("nav", { class: "tabs", "aria-label": "This skein" }, tab("", "Apps"), tab("peers", "Contacts"), tab("permissions", "Permissions"), tab("overview", "Overview")),
     EXPLORER.includes(page) ? h("nav", { class: "sublinks small", "aria-label": "Inspect" }, sub("log", "log"), sub("threads", "threads"), sub("routes", "routes"), sub("heads", "heads")) : "");
 }
 
@@ -1154,7 +1158,7 @@ async function appsPage(m, sk) {
   }
 }
 
-/** An installed app's card: name, version, description; Roles, Upgrade to the catalog's newer version, Uninstall (asks first). */
+/** An installed app's card: name, version, description; Details (its routes and roles), Upgrade to the catalog's newer version, Uninstall (asks first). */
 function appCard(sk, a, run) {
   const r = a.record;
   const core = IMAGE_APPS.includes(r.name);
@@ -1165,7 +1169,7 @@ function appCard(sk, a, run) {
     h("td", { class: "app-title" }, h("a", { class: "app-name", href: page }, r.name), h("span", { class: "ver" }, r.version), core ? h("span", { class: "tag" }, "from the image") : ""),
     h("td", { class: "app-desc", title: r.description ?? "" }, r.description ?? ""),
     h("td", { class: "actions" },
-      h("a", { class: "btn", href: page }, "Roles"),
+      h("a", { class: "btn", href: page }, "Details"),
       up ? h("button", { type: "button", class: "go", onclick: () => run(up) }, `Upgrade to ${up.version}`) : "",
       core ? "" : confirmAction({
         label: "Uninstall",
@@ -1224,7 +1228,7 @@ async function install(sk, e, ui) {
  * and roles it declares, what it needs and offers — and describe()'s exact
  * lines (#plan). `want`: every route the record asks for (skein's `wiring`).
  * The install grants nothing (#143: you are root); an app role is granted on
- * the app's Roles page. Approve sends it (sendInstall), the wait showing each
+ * the Permissions tab. Approve sends it (sendInstall), the wait showing each
  * step; then the page is read again.
  */
 function reviewCard(sk, plan, view, e, ui, want, wantErr) {
@@ -1274,7 +1278,7 @@ function reviewCard(sk, plan, view, e, ui, want, wantErr) {
   return h("section", { class: "card review", id: "review", "aria-label": title },
     h("h2", { class: "card-h" }, title),
     rec.description ? h("p", { class: "help review-desc", title: rec.description }, rec.description) : "",
-    h("p", { class: "small mut" }, `Resolved against this skein. Approving sends these as messages from you (root). The install grants no role: you are root.`),
+    h("p", { class: "small mut" }, `Resolved against this skein. Approving sends these as messages from you (root). The install grants no role: you are root.${roles.some(([x]) => x !== "root" && x !== "user") ? " Grant its roles on the Permissions tab." : ""}`),
     h("dl", { class: "facts" }, facts),
     h("details", { class: "exact", open: true }, h("summary", {}, "The exact messages"), h("pre", { id: "plan" }, describe(plan).join("\n"))),
     h("div", { class: "actions" }, go, no),
@@ -1344,7 +1348,12 @@ async function appPage(m, sk, name) {
     r.description ? h("p", { class: "help" }, r.description) : "",
     h("dl", { class: "facts" }, facts)));
 
-  m.append(rolesCard(sk, view, r, mine));
+  // Its roles, read only: granting and revoking are on the Permissions tab.
+  m.append(h("section", { class: "card roles", id: "app-roles" },
+    h("div", { class: "card-head" },
+      h("h2", { class: "card-h" }, "Roles"),
+      h("a", { class: "btn", href: `#/s/${id}/permissions?app=${encodeURIComponent(name)}` }, mine ? "Grant and revoke" : "Permissions")),
+    appRolesBlock(sk, view, r, { title: false })));
 
   // Its routes: the table's (with `app` this app), and the ones its manifest asks for that are missing.
   let want = [], wantErr = "";
@@ -1364,81 +1373,309 @@ async function appPage(m, sk, name) {
     list));
 }
 
+// ---------------------------------------------------------------- the Permissions tab (#143)
+
 /**
- * The app's roles (#143): root and user, then the app's own (`<app>.<role>`), each with the
- * functions it gates (the app record's `roles`) and its holders (the head `grants`). Root grants
- * and revokes root and the app's roles; `user` is any signed-in key and is never granted.
+ * Every key the head `grants` names, with the roles it holds (`user` left
+ * out: every signed-in key holds it; it is never granted). You first, then
+ * root's other holders, then the rest, each in the order the head has them.
  */
-function rolesCard(sk, view, record, mine) {
-  const name = record.name;
-  const declared = record.roles ?? {};
-  const gates = (role) => declared[role] ?? [];
-  const own = Object.keys(declared).filter((x) => x !== "root" && x !== "user");
-  const list = h("ul", { class: "plain role-list", id: "app-roles" });
-  const holderList = (full) => {
-    const keys = holdersOf(view.grants, full);
-    const ul = h("ul", { class: "plain role-holders" });
-    for (const k of keys) {
-      const last = full === "root" && keys.length === 1;
-      ul.append(h("li", { class: "role-holder", "data-holder": k }, identicon(k, 20), keyWords(k, view),
-        mine && !last ? confirmAction({
-          label: "Revoke",
-          question: h("span", {}, `Revoke ${full} from `, keyWords(k, view), "?", full === "root" && k === state.me ? " You will no longer manage this skein." : ""),
-          yes: "Revoke",
-          run: (say) => sendGrant(sk, "remove", full, k, say),
-        }) : last ? h("span", { class: "small mut" }, "the only root holder") : ""));
+function principalsOf(grants) {
+  const by = new Map();
+  for (const [role, keys] of Object.entries(grants?.roles ?? {})) {
+    if (role === "user") continue;
+    for (const k of keys ?? []) {
+      const key = keyText(k);
+      if (!by.has(key)) by.set(key, []);
+      if (!by.get(key).includes(role)) by.get(key).push(role);
     }
-    if (!keys.length) ul.append(h("li", { class: "mut small" }, "No one holds it."));
-    return ul;
-  };
-  const roleItem = (full, title, what, grantable) => h("li", { class: "role", "data-role": full },
-    h("div", { class: "role-top" }, h("strong", { class: "role-name" }, title), h("span", { class: "small mut" }, what)),
-    grantable ? holderList(full) : "",
-    grantable && mine ? grantForm(sk, view, full) : "");
-  const fnText = (fns) => (fns.length ? `gates ${fns.join(", ")}` : "");
-  list.append(roleItem("root", "root", ["passes every check: any function, any route, any grant", fnText(gates("root"))].filter(Boolean).join(" · "), true));
-  list.append(roleItem("user", "user", ["any signed-in key (a principal an identity filter named); never granted", fnText(gates("user")) || `gates none of ${name}'s functions`].join(" · "), false));
-  for (const r of own) list.append(roleItem(roleName(name, r), roleName(name, r), fnText(gates(r)) || "gates no function", true));
-  return h("section", { class: "card roles" },
-    h("h2", { class: "card-h" }, "Roles"),
-    h("p", { class: "help" }, mine
-      ? `Who may run ${name}'s gated functions. You hold root: you grant and revoke. A function no role lists is open to whatever its route's filters let through.`
-      : `Who may run ${name}'s gated functions. Only root grants and revokes; your key does not hold root here.`),
-    list);
+  }
+  const order = (a, b) => (a === "root" ? -1 : b === "root" ? 1 : a.localeCompare(b));
+  const rank = (p) => (p.key === state.me ? 0 : p.roles.includes("root") ? 1 : 2);
+  return [...by].map(([key, roles]) => ({ key, roles: roles.sort(order) })).sort((a, b) => rank(a) - rank(b));
 }
 
-/** Grant `role` to a key: yours, a contact's, or one typed; reviewed in place, then the grant message. */
-function grantForm(sk, view, role) {
-  const slug = role.replace(/[^a-z0-9]+/gi, "-");
-  const pick = h("select", { name: "who", id: `grant-who-${slug}`, "aria-label": `Grant ${role} to` },
-    h("option", { value: "" }, "Grant to…"),
-    ...view.addressBook.filter((e) => e.transport !== "local" && isKey(e.key)).map((e) => h("option", { value: e.key }, handleText(e) || short(e.key))),
-    h("option", { value: "key" }, "a key…"));
-  const key = h("input", { type: "text", name: "key", placeholder: "identity key (66 hex)", autocomplete: "off", spellcheck: "false", hidden: true, "aria-label": "Identity key" });
-  const st = h("span", { class: "status small" });
-  const review = h("div", { class: "grant-review" });
-  pick.onchange = () => { key.hidden = pick.value !== "key"; review.replaceChildren(); status(st, ""); };
-  const go = h("button", { type: "submit" }, "Review");
-  return h("form", { class: "row grant-form", "data-grant": role, onsubmit: (ev) => {
+/** The roles an app record declares (its manifest's `roles`): [{role, full, fns}], root and user under their own names. */
+const rolesOf = (record) => {
+  const rank = (r) => (r === "root" ? 0 : r === "user" ? 2 : 1);
+  return Object.entries(record?.roles ?? {}).sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([role, fns]) => ({ role, full: roleName(record.name, role), fns: Array.isArray(fns) ? fns.map(String) : [] }));
+};
+
+/** What a key is called on this page, from what it has already read (no lookup): you, this skein, a contact's handle. */
+function nameOf(key, view) {
+  if (key === state.me) {
+    const x = (state.handles ?? []).find((r) => r.handle && !r.error);
+    return { name: x ? `${x.handle}@${x.domain}` : "", tag: "you" };
+  }
+  if (key === view.identity) return { name: "", tag: "this skein" };
+  const e = view.addressBook.find((x) => x.key === key && x.transport !== "local");
+  return { name: e ? handleText(e) : "", tag: e && !e.handle ? "contact" : "" };
+}
+
+/** A role as a chip: root in rust, an app's role (`amm.validator`) plain. */
+const roleChip = (full, ...kids) => h("span", { class: `chip${full === "root" ? " root" : ""}`, "data-role": full }, h("span", { class: "chip-text" }, full), ...kids);
+
+/** The link from a holder to its row on the Permissions tab: on that page, a scroll to the row. */
+function holderChip(sk, view, key) {
+  const { name, tag } = nameOf(key, view);
+  const a = h("a", { class: "holder", href: `#/s/${sk.loc.identity}/permissions?who=${key}`, "data-holder": key, title: key },
+    identicon(key, 20), h("span", {}, name || tag || short(key, 4)));
+  a.onclick = (ev) => {
+    const row = document.querySelector(`li[data-principal="${key}"]`);
+    if (!row) return;
+    ev.preventDefault();
+    flash(row);
+  };
+  return a;
+}
+
+/** Bring an element into view and mark it for a moment. */
+function flash(el) {
+  el.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+}
+
+/**
+ * One app's roles, as its record declares them: each with the functions it
+ * gates and who holds it (root's holders for `root`, any signed-in key for
+ * `user`, the head `grants` for the app's own). Read only: the chips link to
+ * the holders' rows on the Permissions tab.
+ */
+function appRolesBlock(sk, view, record, { title = true } = {}) {
+  const roles = rolesOf(record);
+  const id = sk.loc.identity;
+  const block = h("div", { class: "app-roles", "data-app-roles": record.name });
+  if (title) {
+    block.append(h("div", { class: "app-roles-head" },
+      h("a", { class: "app-name", href: `#/s/${id}/app/${encodeURIComponent(record.name)}` }, record.name),
+      record.version ? h("span", { class: "ver" }, record.version) : ""));
+  }
+  if (!roles.length) {
+    block.append(h("p", { class: "small mut" }, "No roles: its functions are open to whatever its routes let through."));
+    return block;
+  }
+  block.append(h("ul", { class: "plain role-list" }, roles.map((x) => {
+    const holders = x.role === "user" ? [] : holdersOf(view.grants, x.full);
+    return h("li", { class: "role", "data-role": x.full },
+      h("div", { class: "role-top" }, roleChip(x.full),
+        h("span", { class: "small mut" }, x.fns.length ? `gates ${x.fns.join(", ")}` : "gates no function")),
+      x.role === "user"
+        ? h("div", { class: "holders small mut" }, "Any signed-in key.")
+        : holders.length
+          ? h("div", { class: "holders" }, holders.map((k) => holderChip(sk, view, k)))
+          : h("div", { class: "holders small mut" }, "No one holds it yet."));
+  })));
+  return block;
+}
+
+/**
+ * Revoke `role` from `key`, asked in the row first. The last root holder is
+ * never revoked here (the skein would have no one to grant or install); your
+ * own root is, with a warning.
+ */
+function revokeChip(sk, view, key, role, row, ask) {
+  const { name, tag } = nameOf(key, view);
+  const label = name || tag || short(key, 4);
+  const x = h("button", { type: "button", class: "chip-x", "aria-label": `Revoke ${role} from ${label}`, title: `Revoke ${role}` }, "×");
+  const chip = roleChip(role, x);
+  const last = role === "root" && view.roots.length === 1 && view.roots[0] === key;
+  if (last) {
+    x.setAttribute("aria-disabled", "true");
+    x.title = "The only root holder: not revocable";
+  }
+  x.onclick = () => {
+    for (const c of row.querySelectorAll(".chip.pending")) c.classList.remove("pending");
+    if (last) {
+      ask.replaceChildren(h("p", { class: "bad small", role: "status" },
+        `This key is the only root holder. Grant root to another key first: a skein with no root holder can't be managed from here.`));
+      return;
+    }
+    chip.classList.add("pending");
+    const w = waiter();
+    const st = h("span", { class: "status small" });
+    const go = h("button", { type: "button", class: "danger" }, "Revoke");
+    const no = h("button", { type: "button", class: "quiet" }, "Cancel");
+    no.onclick = () => { chip.classList.remove("pending"); ask.replaceChildren(); x.focus(); };
+    go.onclick = async () => {
+      go.disabled = no.disabled = true;
+      status(st, "");
+      try { await sendGrant(sk, "remove", role, key, w.say); } catch (e) { w.stop(); status(st, errText(e), "bad"); go.disabled = no.disabled = false; }
+    };
+    const own = key === state.me;
+    ask.replaceChildren(h("div", { class: "revoke-ask", "data-revoke": role },
+      h("p", {}, "Revoke ", roleChip(role), " from ", own ? "your key" : label, "?"),
+      own && role === "root" ? h("p", { class: "warn small" }, "This is your key. Without root you can't grant, revoke, install or read this skein's explorer from it. Another root holder can grant it back.") : "",
+      own && role !== "root" ? h("p", { class: "small mut" }, "This is your key.") : "",
+      h("div", { class: "confirm-btns" }, go, no), w.el, st));
+    go.focus();
+  };
+  return chip;
+}
+
+/** One key the grants name: its identicon, its handle if a contact's, the key, its roles (each revocable by root). */
+function personRow(sk, view, p, mine) {
+  const { name, tag } = nameOf(p.key, view);
+  const ask = h("div", { class: "person-ask" });
+  const row = h("li", { class: "person", "data-principal": p.key });
+  const chips = h("div", { class: "person-roles" }, p.roles.map((r) => (mine ? revokeChip(sk, view, p.key, r, row, ask) : roleChip(r))));
+  row.append(
+    identicon(p.key, 40, "avatar-md"),
+    h("div", { class: "person-body" },
+      h("span", { class: "person-name" },
+        name ? h("span", {}, name) : tag ? "" : h("span", { class: "mut" }, "No handle"),
+        tag ? h("span", { class: "tag" }, tag) : ""),
+      h("span", { class: "contact-meta" }, idView(p.key, { label: "identity key" }))),
+    chips, ask);
+  return row;
+}
+
+/**
+ * Grant a role (root only): the key (typed, a contact's, or a handle
+ * resolved at its domain), the role (root, or one an installed app
+ * declares, by app, with what it gates), then the review in place and the
+ * kernel's `grant` message.
+ */
+function grantCard(sk, view, apps) {
+  const contacts = view.addressBook.filter((e) => e.transport !== "local" && isKey(e.key));
+  const who = h("input", { type: "text", name: "who", id: "grant-who", placeholder: "identity key, or name@domain", autocomplete: "off", spellcheck: "false" });
+  const pick = h("select", { id: "grant-contact", name: "contact", "aria-label": "Pick a contact" },
+    h("option", { value: "" }, contacts.length ? "or pick a contact…" : "no contacts yet"),
+    ...contacts.map((e) => h("option", { value: e.key }, handleText(e) || short(e.key, 6))));
+  pick.disabled = !contacts.length;
+  const preview = h("div", { class: "who-preview small", "aria-live": "polite" });
+  const showWho = () => {
+    const t = who.value.trim().toLowerCase();
+    if (isKey(t)) {
+      const { name, tag } = nameOf(t, view);
+      preview.replaceChildren(identicon(t, 20), h("span", {}, name || tag || "a key"), holdersOf(view.grants, "root").includes(t) ? h("span", { class: "tag" }, "holds root") : "");
+    } else if (/^@?[^@\s]+@[^@\s]+$/.test(t)) preview.replaceChildren(h("span", { class: "mut" }, "A handle: resolved at its domain when you press Review."));
+    else preview.replaceChildren();
+  };
+  who.addEventListener("input", () => { pick.value = ""; showWho(); review.replaceChildren(); status(st, ""); });
+  pick.onchange = () => { if (pick.value) who.value = pick.value; showWho(); review.replaceChildren(); status(st, ""); };
+
+  const grantable = apps.map((a) => ({ app: a.record.name, roles: rolesOf(a.record).filter((x) => x.role !== "root" && x.role !== "user") })).filter((g) => g.roles.length);
+  const gatesOf = new Map([["root", "passes every check: any function, any route, any grant"]]);
+  for (const g of grantable) for (const x of g.roles) gatesOf.set(x.full, x.fns.length ? `gates ${x.fns.join(", ")} in ${g.app}` : `gates no function of ${g.app}`);
+  const role = h("select", { id: "grant-role", name: "role" },
+    h("option", { value: "root" }, "root"),
+    ...grantable.map((g) => h("optgroup", { label: g.app }, g.roles.map((x) => h("option", { value: x.full }, `${x.full} · ${x.fns.length ? x.fns.join(", ") : "no function"}`)))));
+  const roleHelp = h("p", { class: "small mut role-help", id: "grant-role-help" });
+  const showRole = () => { roleHelp.textContent = gatesOf.get(role.value) ?? ""; };
+  role.onchange = () => { showRole(); review.replaceChildren(); status(st, ""); };
+  showRole();
+
+  const st = h("div", { class: "status", id: "grant-status" });
+  const w = waiter("grant-wait");
+  const review = h("div", { id: "grant-review" });
+  const go = h("button", { type: "submit", class: "go" }, "Review");
+  const form = h("form", { id: "grant", class: "grant-form", onsubmit: async (ev) => {
     ev.preventDefault();
     status(st, "");
     review.replaceChildren();
-    const k = (pick.value === "key" ? key.value : pick.value).trim().toLowerCase();
-    if (!isKey(k)) return status(st, "the key is 33 bytes in hex (66 digits, 02 or 03 first)", "bad");
-    if (holdersOf(view.grants, role).includes(k)) return status(st, `that key holds ${role} already`, "bad");
-    const w = waiter();
-    const yes = h("button", { type: "button", class: "go" }, `Grant ${role}`);
-    const no = h("button", { type: "button", onclick: () => review.replaceChildren() }, "Cancel");
-    const done = h("div", { class: "status" });
-    yes.onclick = async () => {
-      yes.disabled = no.disabled = true;
-      try { await sendGrant(sk, "add", role, k, w.say); } catch (e) { w.stop(); status(done, errText(e), "bad"); yes.disabled = no.disabled = false; }
-    };
-    review.append(h("div", { class: "confirm-card" },
-      h("p", {}, `Grant ${role} to `, keyWords(k, view), "? Signed by you.", role === "root" ? " Root passes every check: they could manage this skein as you do." : ""),
-      h("pre", {}, `grant ${JSON.stringify({ op: "add", role, principal: k })}`),
-      h("div", { class: "actions" }, yes, no), w.el, done));
-  } }, pick, key, go, st, review);
+    const t = who.value.trim();
+    const r = role.value;
+    let key = t.toLowerCase(), handle = "";
+    go.disabled = true;
+    try {
+      if (!isKey(key)) {
+        const x = /^@?([^@\s]+)@([^@\s]+)$/.exec(t);
+        if (!x) throw new Error("Type an identity key (66 hex digits, 02 or 03 first) or a handle, name@domain.");
+        const [, name, domain] = x;
+        w.say(`Resolving ${name}@${domain}…`);
+        const mf = await manifestOf(domain, await hostInfo());
+        if (!mf.resolve) throw new Error(`${domain} publishes no handle resolver`);
+        const a = await resolveHandle({ resolve: mf.resolve, handle: name });
+        if (!isKey(a.identityKey ?? "")) throw new Error(`${name}@${domain}: the answer carries no identity key`);
+        key = a.identityKey;
+        handle = `${name}@${domain}`;
+        w.stop();
+      }
+      if (holdersOf(view.grants, r).includes(key)) throw new Error(`That key holds ${r} already.`);
+    } catch (e) { w.stop(); status(st, errText(e), "bad"); go.disabled = false; return; }
+    go.disabled = false;
+    review.append(grantReview(sk, view, r, key, handle, gatesOf.get(r) ?? "", () => review.replaceChildren()));
+    review.querySelector("button.go")?.focus();
+  } },
+    h("div", { class: "field" }, h("label", { for: "grant-who" }, "Who"), who, pick, preview),
+    h("div", { class: "field" }, h("label", { for: "grant-role" }, "Role"), role, roleHelp),
+    grantable.length ? "" : h("p", { class: "small mut" }, "No installed app declares a role of its own: root is the only role to grant."),
+    h("div", { class: "actions" }, go),
+    w.el, st);
+  return h("section", { class: "card grant-card", "aria-labelledby": "grant-title" },
+    h("h2", { class: "card-h", id: "grant-title" }, "Grant a role"),
+    h("p", { class: "help" }, "Name a key and a role. You sign one grant message; the skein's head grants records it."),
+    form, review);
+}
+
+/** The review of a grant: "Grant amm.validator to 03ab…cd12?", then Grant (the `grant` message) or Cancel. */
+function grantReview(sk, view, role, key, handle, gates, cancel) {
+  const { name, tag } = nameOf(key, view);
+  const label = handle || name || tag;
+  const w = waiter();
+  const st = h("div", { class: "status" });
+  const yes = h("button", { type: "button", class: "go", id: "grant-yes" }, "Grant");
+  const no = h("button", { type: "button", class: "quiet", onclick: cancel }, "Cancel");
+  yes.onclick = async () => {
+    yes.disabled = no.disabled = true;
+    status(st, "");
+    try { await sendGrant(sk, "add", role, key, w.say); } catch (e) { w.stop(); status(st, errText(e), "bad"); yes.disabled = no.disabled = false; }
+  };
+  return h("div", { class: "confirm-card grant-confirm", "data-grant": role },
+    h("p", { class: "grant-q" }, "Grant ", roleChip(role), " to ", h("span", { class: "nowrap" }, h("strong", { class: label ? "" : "mono" }, label || `${key.slice(0, 4)}…${key.slice(-4)}`), "?")),
+    h("div", { class: "grant-who" }, identicon(key, 28), idView(key, { label: "identity key" })),
+    role === "root"
+      ? h("p", { class: "warn small" }, "root passes every check: this key could install, uninstall, grant and revoke as you do.")
+      : gates ? h("p", { class: "small mut" }, `It ${gates}.`) : "",
+    h("details", { class: "exact" }, h("summary", {}, "The exact message"), h("pre", {}, `grant ${JSON.stringify({ op: "add", role, principal: key })}`)),
+    h("div", { class: "confirm-btns" }, yes, no), w.el, st);
+}
+
+async function permissionsPage(m, sk, params) {
+  const got = await readSkein(m, sk);
+  if (!got) return;
+  const { view, apps } = got;
+  const mine = isRoot(view);
+  const people = principalsOf(view.grants);
+
+  m.append(h("div", { class: "perm-intro" },
+    h("p", { class: "lead" }, "root passes every check. user is any signed-in key and is never granted. An app's own roles gate the functions it lists; only their holders run them."),
+    mine ? "" : h("p", { class: "notice-line", id: "grants-readonly" }, "Read only: only root can grant or revoke, and your key holds no root here.")));
+
+  // People and keys: one row per key the head `grants` names.
+  const list = h("ul", { class: "plain people-list", id: "grants-people" }, people.map((p) => personRow(sk, view, p, mine)));
+  const peopleCard = h("section", { class: "card people", "aria-labelledby": "people-title" },
+    h("div", { class: "people-head" },
+      h("h2", { class: "card-h", id: "people-title" }, "People and keys"),
+      h("p", { class: "small mut" }, `${people.length} ${people.length === 1 ? "key holds" : "keys hold"} a role here${mine ? ". × revokes one, after you confirm." : "."}`)),
+    people.length ? list : h("p", { class: "mut people-empty", id: "grants-people" }, "No grants: this skein has not been claimed."));
+
+  // Roles, by app: what each installed app declares, and who holds it.
+  const declared = new Set(["root", "user", ...apps.flatMap((a) => rolesOf(a.record).map((x) => x.full))]);
+  const stray = [...new Set(people.flatMap((p) => p.roles))].filter((r) => !declared.has(r));
+  const rolesCard = h("section", { class: "card roles-card", id: "roles-by-app", "aria-labelledby": "roles-title" },
+    h("h2", { class: "card-h", id: "roles-title" }, "Roles, by app"),
+    h("p", { class: "help" }, "Each installed app's manifest names its roles and the functions each gates. A function no role lists is open to whatever its route's filters let through."),
+    // Apps that declare roles first, then the rest.
+    [...apps].sort((a, b) => Number(!rolesOf(a.record).length) - Number(!rolesOf(b.record).length)).map((a) => appRolesBlock(sk, view, a.record)),
+    stray.length ? h("div", { class: "app-roles", "data-app-roles": "" },
+      h("div", { class: "app-roles-head" }, h("span", { class: "app-name" }, "Not declared by an installed app")),
+      h("p", { class: "small mut" }, "Granted, but no installed app names these roles (an uninstall leaves its grants)."),
+      h("ul", { class: "plain role-list" }, stray.map((r) => h("li", { class: "role", "data-role": r },
+        h("div", { class: "role-top" }, roleChip(r)),
+        h("div", { class: "holders" }, holdersOf(view.grants, r).map((k) => holderChip(sk, view, k))))))) : "");
+
+  // Wide: people and roles on the left, Grant beside them; narrow: people, Grant, roles.
+  m.append(h("div", { class: `perm-layout${mine ? "" : " readonly"}` }, peopleCard, mine ? h("div", { class: "perm-side" }, grantCard(sk, view, apps)) : "", rolesCard));
+
+  // ?app=<name> or ?who=<key>: that block or row brought into view.
+  const target = params.get("who")
+    ? document.querySelector(`li[data-principal="${CSS.escape(params.get("who"))}"]`)
+    : params.get("app") ? document.querySelector(`[data-app-roles="${CSS.escape(params.get("app"))}"]`) : null;
+  if (target) requestAnimationFrame(() => flash(target));
 }
 
 // ---------------------------------------------------------------- the Overview tab
@@ -1457,7 +1694,7 @@ async function overviewPage(m, sk) {
   const kids = view.heads.filter((x) => x.name.startsWith("onboard/instances/"));
   const tile = (label, value, sub, extra = {}) => h("div", { class: "card tile", ...extra }, h("span", { class: "tile-label" }, label), h("span", { class: "tile-value" }, value), sub ? h("span", { class: "tile-sub" }, sub) : "");
   m.append(h("section", { class: "tiles", id: "tiles" },
-    tile("Root", mine ? (view.roots.length > 1 ? `you and ${view.roots.length - 1} more` : "you") : view.roots.length ? idView(view.roots[0], { n: 4, label: "root's key" }) : "not claimed", mine ? "your key holds root" : view.roots.length ? `${view.roots.length === 1 ? "another key" : `${view.roots.length} keys`}` : "its first claim is root", { "data-tile": "root" }),
+    tile("Root", mine ? (view.roots.length > 1 ? `you and ${view.roots.length - 1} more` : "you") : view.roots.length ? idView(view.roots[0], { n: 4, label: "root's key" }) : "not claimed", h("span", {}, mine ? "your key holds root" : view.roots.length ? `${view.roots.length === 1 ? "another key" : `${view.roots.length} keys`}` : "its first claim is root", " · ", h("a", { href: `#/s/${id}/permissions` }, "Permissions")), { "data-tile": "root" }),
     handle ? tile("Handle", `${handle.handle}@${handle.domain}`, "its mailbox runs here", { "data-tile": "handle" }) : "",
     tile("Apps", String(apps.length), h("a", { href: `#/s/${id}` }, "Manage apps"), { "data-tile": "apps" }),
     tile("Contacts", String(people.length), h("a", { href: `#/s/${id}/peers` }, "Address book"), { "data-tile": "contacts" }),
@@ -1469,7 +1706,7 @@ async function overviewPage(m, sk) {
     h("dl", { class: "facts" },
       ...fact("Identity key", idView(view.identity || id, { label: "identity key" })),
       ...fact("URL", h("a", { class: "url", href: `${sk.url}/` }, sk.url)),
-      ...(view.roots.length ? fact("Root", h("ul", { class: "plain" }, view.roots.map((k) => h("li", {}, keyWords(k, view))))) : []),
+      ...(view.roots.length ? fact("Root", h("ul", { class: "plain" }, view.roots.map((k) => h("li", {}, keyWords(k, view)))), h("a", { class: "small", href: `#/s/${id}/permissions` }, "Every grant, on Permissions")) : []),
       ...fact("Heads", h("a", { href: `#/s/${id}/heads` }, `${view.heads.length} heads`)),
       ...fact("Routes", h("a", { href: `#/s/${id}/routes` }, `${view.dispatch.length} routes`)))));
 }

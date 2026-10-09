@@ -1,6 +1,6 @@
 {
   "name": "skein-site",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "private": true,
   "description": "The management site of a skein, as an app (www/ served by its route handler): create a skein, list yours from the host, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
   "type": "module",

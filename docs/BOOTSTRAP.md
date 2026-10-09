@@ -48,7 +48,7 @@ images/default/
   etc/apps.json                           the apps installed at birth (#141) and the owner's read at `/`
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  apps/chain/, apps/git/, apps/site/      shruggr/skein-chain v0.4.0, skein-git v0.1.3, skein-site v0.7.7: each the tag's git tree
+  apps/chain/, apps/git/, apps/site/      shruggr/skein-chain v0.4.0, skein-git v0.1.3, skein-site v0.10.0: each the tag's git tree
   chain/headers/<first>, chain/tip        the chain part (#132): not in the repo — the host adds it (below)
 ```
 

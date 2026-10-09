@@ -170,6 +170,7 @@ main>.back{margin-bottom:-4px}
 .tag{display:inline-flex;align-items:center;font-size:11px;line-height:1.4;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:1px 8px;white-space:nowrap;font-family:var(--body);font-weight:400}
 .tag.new{color:var(--acc);border-color:var(--outline)}
 .mono{font-family:var(--mono)}
+.nowrap{white-space:nowrap}
 
 /* the task: the clone's steps, its error, the review */
 .task{display:flex;flex-direction:column;gap:8px}
@@ -242,16 +243,68 @@ button.danger:hover{border-color:var(--bad);background:rgba(242,135,122,.1);colo
 .perm-list>li .row-line{flex:1 1 20em}
 .perm-list>li.missing .row-where{color:var(--fg2)}
 .card>.perm-list{margin-top:6px}
-/* Roles (#143): each role, what it gates, its holders, Grant */
-.role-list{margin:6px 0 0;display:flex;flex-direction:column}
-.role-list>li.role{margin:0;display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:1px solid var(--line)}
-.role-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
-.role-name{font-family:var(--mono);font-weight:600}
-.role-holders{margin:0;display:flex;flex-direction:column;gap:6px;font-size:14px}
-.role-holder{margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
-.grant-form{flex-wrap:wrap;gap:8px}
-.grant-form select,.grant-form input{min-width:0;flex:1 1 12em}
-.grant-review{flex:1 1 100%}
+/* Permissions (#143): people and keys, grant a role, roles by app */
+.chip{display:inline-flex;align-items:center;gap:2px;font-family:var(--mono);font-size:12px;line-height:1.4;color:var(--fg2);background:var(--ground);border:1px solid var(--outline);border-radius:12px;padding:2px 10px;white-space:nowrap;vertical-align:middle}
+.chip.root{background:var(--rust);border-color:var(--rust);color:var(--fg)}
+.chip:has(.chip-x){padding-right:2px}
+.chip.pending{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
+.chip-x{min-height:26px;min-width:26px;padding:0;border:0;border-radius:50%;font:400 16px/1 var(--body);color:inherit;background:none;opacity:.75}
+.chip-x:hover{border:0;opacity:1;background:rgba(236,233,225,.12);color:var(--fg)}
+.chip-x[aria-disabled=true]{opacity:.35;cursor:not-allowed}
+.chip-x[aria-disabled=true]:hover{background:none}
+.perm-intro{display:flex;flex-direction:column;gap:10px}
+.perm-intro .lead{font-size:14px}
+.notice-line{margin:0;border:1px dashed var(--dash);border-radius:8px;padding:10px 14px;font-size:14px;color:var(--fg2)}
+.perm-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,360px);grid-template-rows:auto 1fr;gap:20px;align-items:start}
+.perm-layout>.people,.perm-layout>.roles-card{grid-column:1}
+.perm-side{grid-column:2;grid-row:1/span 2;position:sticky;top:16px;min-width:0}
+.perm-layout.readonly{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
+.people{padding:0;overflow:hidden}
+.people-head{padding:18px 20px 14px}
+.people-head p{margin:6px 0 0}
+.people-empty{padding:0 20px 18px;margin:0}
+.people-list{margin:0}
+.people-list>li.person{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:6px 14px;align-items:center;padding:14px 20px;border-top:1px solid var(--line);margin:0}
+.person-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.person-name{font-weight:600;display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
+.person-roles{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.person-ask{grid-column:2/-1}
+.person-ask:empty{display:none}
+.revoke-ask{display:flex;flex-direction:column;gap:8px;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.revoke-ask p{margin:0;font-size:14px}
+.warn{color:var(--wait)}
+li.person.flash,.app-roles.flash{animation:flash 1.8s ease-out}
+@keyframes flash{0%,30%{background:rgba(152,162,218,.16)}100%{background:transparent}}
+@media (prefers-reduced-motion:reduce){li.person.flash,.app-roles.flash{animation:none;outline:2px solid var(--acc);outline-offset:-2px}}
+.grant-card{display:flex;flex-direction:column;gap:12px}
+.grant-form{display:flex;flex-direction:column;gap:14px}
+.grant-form .field{gap:8px}
+.grant-form .actions{margin-top:0}
+.who-preview{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--fg2);min-height:0}
+.who-preview:empty{display:none}
+.role-help{margin:0}
+.role-help:empty{display:none}
+.grant-confirm{margin-top:0;border-color:var(--outline)}
+.grant-q{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;font-size:15px!important}
+.grant-q .mono{font-size:14px}
+.grant-who{display:flex;align-items:center;gap:8px;min-width:0}
+.grant-who .avatar{width:28px;height:28px}
+.grant-confirm details.exact pre{white-space:pre-wrap}
+.roles-card{display:flex;flex-direction:column;gap:12px}
+.app-roles{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:8px;border-radius:4px}
+.app-roles-head{display:flex;align-items:baseline;gap:10px}
+.app-roles-head .app-name{font-size:18px}
+.app-roles .role-list{margin:0;display:flex;flex-direction:column;gap:10px}
+.app-roles .role-list>li.role{margin:0;display:flex;flex-direction:column;gap:6px}
+.role-top{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}
+.holders{display:flex;flex-wrap:wrap;gap:6px;padding-left:2px}
+a.holder{display:inline-flex;align-items:center;gap:6px;min-height:28px;border:1px solid var(--line);border-radius:14px;padding:2px 10px 2px 3px;font-size:13px;color:var(--fg2);text-decoration:none;max-width:100%}
+a.holder:hover{color:var(--fg);border-color:var(--outline)}
+a.holder .avatar{width:20px;height:20px}
+a.holder span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap}
+.card.roles{display:flex;flex-direction:column;gap:10px}
+.card.roles .app-roles{border-top:0;padding-top:0}
 #routes th{text-align:left;font-weight:600;color:var(--fg2)}
 .add-row{display:flex;flex-direction:column;gap:12px}
 .form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:14px 18px}
@@ -328,6 +381,8 @@ main.landing+footer{border-top:0}
 @media (max-width:860px){
   .how-grid{grid-template-columns:minmax(0,1fr);gap:32px}
   .two-col{grid-template-columns:minmax(0,1fr)}
+  .perm-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:none}
+  .perm-side{grid-column:1;grid-row:auto;position:static}
 }
 
 /* ---- phone width */
@@ -354,4 +409,9 @@ main.landing+footer{border-top:0}
   .contact-list>li.contact>.confirm{grid-column:2}
   details.services{padding:6px 16px}
   .contacts-empty{padding:0 16px 16px}
+  .card.people{padding:0}
+  .people-head{padding:16px 16px 12px}
+  .people-empty{padding:0 16px 16px}
+  .people-list>li.person{padding:14px 16px;grid-template-columns:auto minmax(0,1fr)}
+  .person-roles{grid-column:2;justify-content:flex-start}
 }
