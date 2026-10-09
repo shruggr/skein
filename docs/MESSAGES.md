@@ -666,7 +666,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | `liveness` (#138) | `{kind: "event", event: "liveness", app, topic, window}` | its liveness tool: the node subscribes `topic` without admitting its messages and keeps the verified beacon beats newer than `window` ms, the latest per sender, served at `GET /<app>/.live/<topic>` — "Liveness (#138)", below |
   | `unliveness` (#138) | `{kind: "event", event: "unliveness", app, topic}` | `app`'s liveness on `topic` ends: its set is gone, the node leaves the topic when nothing else takes it |
-  | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
+  | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing but a log line — and, like every event, it reaches the pages subscribed to it: "Event streams (#148)", below |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
   fields}`: `app` is the kernel's, the `app` of the emitting program's record
@@ -1425,6 +1425,34 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   An unsigned read: no entry, nothing logged; metered as a read (bytes
   served, billing.ts). A runtime without the tool records the events and
   nothing happens. Beats are unbilled for now (#130).
+- **Event streams (#148).** A page follows its app's emitted events live,
+  served by the host on the instance's origin, beside the liveness read
+  (src/host/events.ts), no program in between:
+
+      GET /<app>/.events?event=<name>&topic=<t1>&topic=<t2>…     (http://<handle>.localhost:<port>/… or /@<handle>/…)
+      200 text/event-stream, one message per event record:
+          id: <n>.<seq>.<i>.<thread>    the event's place in the log: the entry its step processed, the
+                                        step's place in its thread, the record's place in `emitted`, the
+                                        thread's origin (one entry can step several threads)
+          event: <name>
+          data: <the record as DAG-JSON>   (as the explorer renders it: a link {"/": cid}, bytes {"/": {"bytes": b64}})
+      400 without `event` (one name) or a `topic` (repeated, one per topic); a Last-Event-ID that is no place
+      404 when <app> is not installed
+
+  Generic: any name an app's programs emit (a price is one more event).
+  Sent: only `<app>`'s events (the record's `app`, the kernel's) of that
+  name whose `topic` is one of those asked. On connect, without
+  Last-Event-ID, first the **current value** — the last such event per
+  topic, in log order — then each as its step is committed (the kernel
+  hands every event over after the commit; the host folds the log from the
+  last one it followed and sends what is new). With Last-Event-ID (an
+  EventSource's reconnect): every such event after that place, folded from
+  the log, then live; a place not in the log resumes after its entry. No
+  new logged state: the stream reads what the log records; an unsigned
+  read, no entry; each message metered as a read. The open streams are one
+  registry per instance, in memory: an app's close at its uninstall (no row
+  of it left), all of an instance's when it stops and when the host shuts
+  down. Beats are not events and are not served here.
 - **What the node subscribes** (#72, #77, #119). The instance's node takes
   the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's
