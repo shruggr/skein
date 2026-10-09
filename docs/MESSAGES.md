@@ -1443,9 +1443,11 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   Sent: only `<app>`'s events (the record's `app`, the kernel's) of that
   name whose `topic` is one of those asked. On connect, without
   Last-Event-ID, first the **current value** — the last such event per
-  topic, in log order — then each as its step is committed (the kernel
-  hands every event over after the commit; the host folds the log from the
-  last one it followed and sends what is new). With Last-Event-ID (an
+  topic, in log order — then each as its step is committed: the kernel
+  hands every event over after the commit with its place in the log beside
+  the record (the `emit` notice's `place: {n, seq, i, thread}`; the record
+  is unchanged), and the host sends it at once, its id made from that, no
+  log read; one handed over again (a start) is not sent again. With Last-Event-ID (an
   EventSource's reconnect): every such event after that place, folded from
   the log, then live; a place not in the log resumes after its entry. No
   new logged state: the stream reads what the log records; an unsigned
