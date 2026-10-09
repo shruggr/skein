@@ -24,7 +24,7 @@ pub const modules = [_]Module{
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreifbr44kbggt6g5nsownbdhticimoz47kqxzzyoyrcvvsmqd36yvq4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreicakz7f6hjd6jh2ldecvaw3duqib2fsziuco7mebmuicugtxdf5zq" },
+    .{ .name = "frontdoor", .cid = "bafkreidsab4vl7wecca56g5idca6nnk7ikd6o6rptbbb5rmkunm6qicxni" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreifaksuagkwqclhbja7nkuwnxmlkfpv2lsqr2zvbod76qvia2mfdmq" },
 };
