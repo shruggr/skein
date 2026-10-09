@@ -20,7 +20,7 @@
 //                                     of (#113), each with the request that adopts it — for the owner's wallet to send
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
-//   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
+//   skein-host add <handle> --image <default | open-exchange | dir | tree-cid [--from store.db] | outpoint>
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
@@ -171,7 +171,7 @@ const USAGE = `usage:
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
-  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
+  skein-host add <handle> --image <default | open-exchange | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
@@ -223,7 +223,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
           const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
             // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
-            const src = v.image === "default" ? await router.image.source() : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
+            // #147: `open-exchange`, images/open-exchange merged over it (as the host image is).
+            const src = v.image === "default" || v.image === "open-exchange" ? await router.image.source({ image: v.image }) : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
             env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein claim --instance ${handle})" : ""}`);
           } catch (e) {

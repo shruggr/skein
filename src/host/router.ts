@@ -917,7 +917,7 @@ export class Router {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
+    if (o.image !== undefined && o.image !== "default" && o.image !== "open-exchange" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default and open-exchange images and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
@@ -933,7 +933,7 @@ export class Router {
       await this.image.ready; // #132: born with the chain as the host holds it
       // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
       // operator's key, `appConfig` merged.
-      await this.bootRow(handle, await this.image.source({ host: o.host }), { image: true, manager: o.host, ...(o.host ? { owner, ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : {}) });
+      await this.bootRow(handle, await this.image.source({ host: o.host, ...(o.image ? { image: o.image } : {}) }), { image: true, manager: o.host, ...(o.host ? { owner, ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
@@ -952,7 +952,7 @@ export class Router {
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
       const tip = this.image.tip();
-      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);
