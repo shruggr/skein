@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+zig-pkg/
+node_modules/
+*.tsbuildinfo
+*.local
+.dev.log

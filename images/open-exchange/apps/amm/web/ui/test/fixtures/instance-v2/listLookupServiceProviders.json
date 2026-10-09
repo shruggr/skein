@@ -1,0 +1,1 @@
+{"ls_amm_948b532f1de8f7bb148f77da824544fe47b02079e7514d5b6a42856651c5214c":{"name":"ls_amm_948b532f1de8f7bb148f77da824544fe47b02079e7514d5b6a42856651c5214c","shortDescription":"AMM pool liquidity ls_amm_<txid>: the live pools of the token topic tm_<txid> that pass the pool checks (output 0, prefix equals state), in the matching engine's PoolState shape."}}

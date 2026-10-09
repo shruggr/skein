@@ -115,7 +115,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "create", { handle: "carol", owner: "nope" });
   assert.match(String(a[0]?.body.error), /owner: not an identity key/);
   a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /the default image and mailbox instances/);
+  assert.match(String(a[0]?.body.error), /the default and open-exchange images and mailbox instances/);
   assert.equal(h.db.get("carol"), undefined);
   a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
   assert.match(String(a[0]?.body.error), /domain .*a host name/);

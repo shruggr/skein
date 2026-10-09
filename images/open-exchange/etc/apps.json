@@ -1,0 +1,33 @@
+{
+  "install": [
+    "apps/amm"
+  ],
+  "routes": [
+    {
+      "transport": "http",
+      "address": "/submit",
+      "filters": [
+        "kernel.beef"
+      ],
+      "program": "amm.overlay",
+      "fn": "submit"
+    },
+    {
+      "transport": "http",
+      "address": "/lookup",
+      "filters": [
+        "amm.lookup"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/",
+      "prefix": true,
+      "filters": [
+        "amm.page"
+      ],
+      "root": "www",
+      "index": "index.html"
+    }
+  ]
+}

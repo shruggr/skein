@@ -1,0 +1,34 @@
+.{
+    .name = .skein_amm,
+    .version = "0.8.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x4bfa15430693c422,
+    .dependencies = .{
+        // The overlay engine (its bin/overlay.wasm is copied into bin/) and the topic and lookup
+        // contracts; the SDK (chain, wallet, app, sk, cbor, dagjson, message) comes through it.
+        .skein_overlay = .{
+            .url = "https://github.com/shruggr/skein-overlay/archive/refs/tags/v0.11.0.tar.gz",
+            .hash = "skein_overlay-0.11.0-IMuNgV2DHQDxPUuRJ_l7ZGagZclrXSkIvn8ICA2ADywN",
+        },
+        // The Mandala components: the `mandala` module (the BRC-162 / BRC-161 parsers, the BSV-21
+        // rules, topic names) and the built bin/mandala-topic.wasm, bin/mandala-lookup.wasm, copied
+        // into bin/. (Its pages, www/, are outside the package's paths: scripts/mandala-pages.sh
+        // copies them from the same tag's tarball by URL and sha256.)
+        .skein_mandala = .{
+            .url = "https://github.com/shruggr/skein-mandala/archive/refs/tags/v0.9.0.tar.gz",
+            .hash = "skein_mandala-0.9.0-_DlbUpQPHQBajLQG2VO0iatCQ6j9r7mGI_2oCIDz0abW",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "programs",
+        "test.zig",
+        "bin",
+        "etc",
+        "www",
+        "docs",
+        "README.md",
+    },
+}
