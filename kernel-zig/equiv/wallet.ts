@@ -21,7 +21,9 @@
 // thread steps), MINED with the merkle path makes it `proven` (the thread
 // finishes); the payee internalizes it and is answered the same way. A
 // rejected broadcast (Arcade's 400) gives the inputs back; a draft
-// (signAndProcess: false) is signed by signAction. Settlement (#37): A, then
+// (signAndProcess: false) is signed by signAction; a caller's input (#93: a
+// coin the caller holds, unlockingScriptLength 108) with the wallet's funding
+// is a signable draft the caller signs its own input of. Settlement (#37): A, then
 // B spending A's change; a DOUBLE_SPEND_ATTEMPTED for A rejects A at the
 // chain app, which rejects B too (input-rejected): both threads are answered
 // `rejected`, their coins vanish, A's input is spendable again — computed
@@ -117,6 +119,8 @@ const feedHeader = async (raw: Uint8Array) => {
 
 const ownerKey = new PrivateKey("2222", 16);
 const ownerId = ownerKey.toPublicKey().toString();
+/** #93: the caller's own key, for a coin the wallet does not hold. */
+const callerKey = new PrivateKey("7777", 16);
 const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) }, {
   ownerKey,
@@ -258,6 +262,8 @@ try {
   const fund = new Transaction();
   fund.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
   fund.addOutput({ lockingScript: new P2PKH().lock(ownerKey.toPublicKey().toHash()), satoshis: 50_000 });
+  // #93: a coin the caller holds and unlocks itself (not the wallet's), spent below as a caller's input.
+  fund.addOutput({ lockingScript: new P2PKH().lock(callerKey.toPublicKey().toHash()), satoshis: 3_000 });
   const fundTxid = fund.id("hex");
   fund.merklePath = new MerklePath(101, [[{ offset: 0, hash: fundTxid, txid: true }]]);
   const headers: Uint8Array[] = [];
@@ -357,6 +363,31 @@ try {
     posted: arcade.posts.some((p) => FakeArcade.txOf(p).id("hex") === r.result.txid),
   };
 
+  // #93: a caller's input — the caller's coin (fund:1, its source in inputBEEF), its unlock 108 bytes declared, no script:
+  // a signable draft with the wallet's funding after it; the caller signs its own input, signAction puts the script on
+  // input 0 and signs the wallet's.
+  r = await owned({
+    op: "createAction", description: "caller input", inputBEEF: new Uint8Array(fund.toBEEF()),
+    inputs: [{ outpoint: `${fundTxid}.1`, unlockingScriptLength: 108, inputDescription: "the caller's coin" }],
+    outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 4_000 }],
+  });
+  const callerDraft = { reference: r.result.reference as CID, awaiting: r.result.awaiting, emitted: r.update.emitted?.length ?? 0 };
+  const unsigned = Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]);
+  const callerUnlock = await new P2PKH().unlock(callerKey).sign(unsigned, 0);
+  r = await owned({ op: "signAction", reference: callerDraft.reference, spends: { "0": { unlockingScript: new Uint8Array(callerUnlock.toBinary()) } } });
+  await answered("the caller-input action accepted", r.thread, (x) => x.outcome === "accepted");
+  const ct = Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]);
+  const ours = ct.inputs.slice(1).map((i) => i.unlockingScript!.chunks);
+  report.callerInput = {
+    draft: CID.asCID(callerDraft.reference) !== null && callerDraft.awaiting === undefined && callerDraft.emitted === 0,
+    unsignedHasNoScripts: unsigned.inputs.every((i) => !i.unlockingScript || i.unlockingScript.toBinary().length === 0),
+    input0: [ct.inputs[0]!.sourceTXID ?? ct.inputs[0]!.sourceTransaction?.id("hex"), ct.inputs[0]!.sourceOutputIndex].join(".") === `${fundTxid}.1`,
+    callerScript: Buffer.from(ct.inputs[0]!.unlockingScript!.toBinary()).equals(Buffer.from(callerUnlock.toBinary())),
+    walletFunded: ct.inputs.length >= 2 && ours.every((c) => c.length === 2 && c[1]!.data?.length === 33),
+    scriptsVerify: await ct.verify("scripts only"),
+    awaiting: r.result.awaiting,
+  };
+
   report.settlement = await settlementScenario(new Uint8Array(someone), { h102: prev, spend: spendTxid });
   // The wallet's head is under its own name; the chain's is the chain app's.
   report.heads = [!!(await k.call("head", "wallet/state")), !!(await k.call("head", "chain/state")), !(await k.call("head", "wallet"))];
@@ -397,6 +428,7 @@ check(eq(report.payeeList, [[true, 10000, true, "proven"]]), `the payee's list: 
 check(eq(report.rejected, { outcome: "rejected", reason: "REJECTED", state: "finished" }) && report.afterReject === report.total, `a rejected broadcast (Arcade's 400): answered rejected; the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
 const d = (report.draft ?? {}) as Record<string, unknown>;
 check(d.hasReference === true && d.draftNotIngested === true && d.awaiting === true && d.scriptsVerify === true && d.posted === true, `a draft (signAndProcess: false) is not ingested; signAction signs it, ingests it, the chain app broadcasts it (${JSON.stringify(d)})`);
+check(eq(report.callerInput, { draft: true, unsignedHasNoScripts: true, input0: true, callerScript: true, walletFunded: true, scriptsVerify: true, awaiting: true }), `#93: a caller's input (unlockingScriptLength 108) with the wallet's funding: a signable draft; signAction with the caller's spend for input 0 — the caller's script at input 0, the wallet's P2PKH on its own; scripts verify (${JSON.stringify(report.callerInput)})`);
 const st = (report.settlement ?? {}) as Record<string, unknown>;
 check(eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): A, then B spending A's change, both ingested and awaited (${JSON.stringify([st.awaiting, st.bSpendsA])})`);
 check(eq(st.rejected, { a: ["DOUBLE_SPEND_ATTEMPTED", "finished"], b: ["input-rejected", "finished"] }), `a DOUBLE_SPEND_ATTEMPTED for A: the chain app rejects A and B (it spends A); both threads are answered rejected and finish (${JSON.stringify(st.rejected)})`);
