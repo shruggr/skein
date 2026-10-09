@@ -39,6 +39,13 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   (01e68b4), shruggr/skein-git v0.2.0 (01e804a), shruggr/skein-site v0.9.0
   (b41f5d5) — each the same git tree as that tag's commit. images/host's
   `apps/onboard/`: shruggr/skein-onboard v0.4.0 (189b7c2).
+  images/open-exchange's (#147) `apps/overlay/`: shruggr/skein-overlay
+  v0.11.0 (5d58a0c), and `apps/amm/`: shruggr/skein-amm v0.8.0 (1fc8aa7,
+  carrying skein-mandala v0.9.0). To move a pin, replace the directory
+  with the new tag's tree (`git -C ../skein-amm archive <tag> | tar -x -C
+  images/open-exchange/apps/amm` into an emptied directory) and the version
+  in src/host/boot.test.ts. (images/host and images/open-exchange have no
+  README of their own: a file in both merged images must be the same blob.)
 - `chain/` (#132): **not in the repo** — the host adds it. The image a
   host boots skeins from is this directory with the whole header chain at
   `chain/headers/<first>` (2016 raw headers a block) and `chain/tip`, grown

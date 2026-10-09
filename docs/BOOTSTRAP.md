@@ -123,6 +123,36 @@ host.env does not reach into it; to change the onboarding app's config, the
 operator installs the same tree again with `--config` (`skein install
 images/host/apps/onboard --instance host --config <file.json>`).
 
+### The Open Exchange image (#147)
+
+`images/open-exchange` merged over `images/default`, as the host image is:
+the default image's three apps and two more, installed at birth in this
+order — `apps/overlay/` (shruggr/skein-overlay v0.11.0, the overlay engine
+as a standalone app) and `apps/amm/` (shruggr/skein-amm v0.8.0, which
+carries skein-mandala v0.9.0) — each the tag's git tree. Its
+`etc/apps.json` names root's own routes:
+
+- `POST /submit` → the engine app's submit handler: `{transport: "http",
+  address: "/submit", filters: ["kernel.beef"], program: "overlay.overlay",
+  fn: "submit"}`. A root route's handler may name `<app>.<role>`, an app
+  installed at birth above it (as `skein routes add` takes it): the loader
+  resolves it to that app's program record.
+- `POST /lookup` → the engine's lookup filter: the read route
+  `{transport: "http", address: "/lookup", filters: ["overlay.lookup"]}`.
+- `/` → the amm app's landing: the read route `{transport: "http",
+  address: "/", prefix: true, filters: ["amm.page"], root: "www", index:
+  "index.html"}`. It replaces the default image's `/` (the site): in the
+  merge, a root route of the part at the same transport, address and
+  prefix as one of the base's replaces it. The site stays at its own app
+  path, `/site/`.
+
+The @bsv/sdk clients take a bare origin as an overlay host and post to
+`<origin>/submit` and `<origin>/lookup` (skein-overlay docs/OVERLAY.md
+"Root routes"); the engine's own `/overlay/submit` and `/overlay/lookup`
+stay. Nothing registers at runtime. The discovery topic `tm_mandala` is
+registered by root's `register` message after the birth (skein-amm
+README: "registered by `register` alone"); the image does not do it.
+
 ### The image's chain part (#132)
 
 **The image carries the whole header chain**, and grows with every header
