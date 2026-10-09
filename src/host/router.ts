@@ -42,7 +42,8 @@
 //                                         served by the host, no program: `id` the event's place in the log
 //                                         (<n>.<seq>.<i>.<thread>), `event` its name, `data` the record as DAG-JSON.
 //                                         First the last one per topic (or, with Last-Event-ID, every one after
-//                                         it, folded from the log), then each as its step is committed. 400 without
+//                                         it, folded from the log), then each as handed over (its place in the
+//                                         kernel's notice: no log read). 400 without
 //                                         `event` or a `topic`; 404 when the app is not installed. Unsigned,
 //                                         nothing logged; each message metered as a read. Closed at the app's
 //                                         uninstall and when the instance stops
@@ -441,7 +442,6 @@ export class Router {
     const p2p = this.p2p;
     this.events = new EventStreams({
       open: (h) => { const row = this.o.db.get(h); return row && existsSync(row.store) ? openStoreFile(row.store, { readOnly: true }) : undefined; },
-      log: (s, l) => this.say(s, l),
     });
     this.providers = new Providers({
       keyOf,
@@ -451,7 +451,7 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
-      emitted: (h) => this.events.emitted(h),
+      emitted: (h, rec, place) => this.events.emitted(h, rec, place),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
       manager: {

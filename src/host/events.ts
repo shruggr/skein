@@ -1,8 +1,8 @@
 // An app's emitted events, served live to its page (#148). Any program of an
 // app emits events ({kind: "event", event, app, topic, …}, log.zig
 // eventRecord, #119); the kernel lists each on its step's update (`emitted`)
-// and, once the step is committed, hands it to the host (providers.ts: the
-// `emitted` hook, for every event whatever its name). This module serves
+// and, once the step is committed, hands it to the host with its place in the
+// log (providers.ts: the `emitted` hook, for every event whatever its name). This module serves
 // them on the instance's origin, the host's own route (no program, no entry,
 // nothing logged, unsigned — a read like /.live, #138, #143):
 //
@@ -34,18 +34,22 @@
 //   - without: the current value — the LAST matching event per requested
 //     topic (one per topic that has one), in log order — then live.
 //
-// Live: each event the kernel hands over triggers a fold of the instance's log
-// from the last one followed (updates no older than its time), coalesced, one
-// per instance; what is new is sent to every open subscription it matches.
-// Nothing is kept but the open subscriptions and that position: one registry
-// per instance, in memory. An app's subscriptions close at its uninstall (no
-// row of it left in the dispatch table), all of an instance's when it stops
-// (the instance manager, a reclaim) and when the host shuts down.
+// Live: the kernel's `emit` notice carries each event's place in the log
+// beside the record (`place`: {n, seq, i, thread}; the record is unchanged),
+// so a live event is sent as it is handed over, its id made from the notice,
+// with no log read; the log is read only for a new subscription's first
+// messages (Last-Event-ID, or the current value). An id handed over again (a
+// start re-offers what a waiting thread awaits) is not sent again. Nothing is
+// kept but the open subscriptions and the ids lately sent: one registry per
+// instance, in memory. An app's subscriptions close at its uninstall (no row
+// of it left in the dispatch table), all of an instance's when it stops (the
+// instance manager, a reclaim) and when the host shuts down.
 //
 // Beats (#138) are not events: not served here (GET /<app>/.live/<topic>).
 
 import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
+import type { CID } from "multiformats/cid";
 import type { Store } from "../runtime/store.ts";
 import { emittedEvents } from "./p2p.ts";
 
@@ -57,8 +61,6 @@ export interface Delivered {
   /** Its place: `<n>.<seq>.<i>.<thread>`. */
   id: string;
   n: number;
-  /** The step's time (ms). */
-  at: number;
   event: string;
   app: string;
   topic: string;
@@ -92,16 +94,13 @@ export function sseMessage(d: Delivered): string {
   return `id: ${d.id}\nevent: ${d.event}\ndata: ${d.data}\n\n`;
 }
 
-/** Every event record in the log (or, with `since`, in the updates no older than it), in log order, as delivered. */
-export async function foldEvents(store: EventStore, since?: number): Promise<Delivered[]> {
-  const places = await emittedEvents(store, (rec, p) => {
-    if (typeof rec.event !== "string" || typeof rec.app !== "string" || typeof rec.topic !== "string") return undefined;
-    return { p, event: rec.event, app: rec.app, topic: rec.topic };
-  }, since);
+/** Every event record a stream serves in the log, in log order, as delivered (resume and the current value). */
+export async function foldEvents(store: EventStore): Promise<Delivered[]> {
+  const places = await emittedEvents(store, (rec, p) => typeof rec.event === "string" && typeof rec.app === "string" && typeof rec.topic === "string" ? p : undefined);
   const out: Delivered[] = [];
-  for (const { p, event, app, topic } of places) {
-    const data = new TextDecoder().decode(dagJson.encode(dagCbor.decode(await store.bytes(p.record))));
-    out.push({ id: `${p.n}.${p.seq}.${p.i}.${p.thread}`, n: p.n, at: p.at, event, app, topic, data });
+  for (const p of places) {
+    const d = deliveredOf(dagCbor.decode(await store.bytes(p.record)), p);
+    if (d) out.push(d);
   }
   return out;
 }
@@ -122,25 +121,34 @@ export function backlog(all: Delivered[], q: EventsQuery): Delivered[] {
   return all.filter((d) => ids.has(d.id));
 }
 
-/** An open subscription: what it asked for, where its messages go, how it is closed. */
-interface Sub { q: EventsQuery; send(d: Delivered): void; close(): void; live: boolean }
+/** An event's place in the log, as the kernel's `emit` notice carries it beside the record (#148). */
+export interface Place { n: number; seq: number; i: number; thread: CID }
 
-/** Where the follow stands per instance: the newest step time folded, and the events at that time already sent. */
-interface Followed { at: number; ids: Set<string> }
+/** The id of the event at `p`: `<n>.<seq>.<i>.<thread>` — the fold's (foldEvents), free from the notice. */
+export const idOf = (p: Place): string => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+
+/** A handed-over event as delivered, or undefined when it is not one a stream serves (no app, no topic). */
+export function deliveredOf(rec: Record<string, unknown>, p: Place): Delivered | undefined {
+  if (rec.kind !== "event" || typeof rec.event !== "string" || typeof rec.app !== "string" || typeof rec.topic !== "string") return undefined;
+  return { id: idOf(p), n: p.n, event: rec.event, app: rec.app, topic: rec.topic, data: new TextDecoder().decode(dagJson.encode(rec)) };
+}
+
+/** An open subscription: what it asked for, where its messages go, how it is closed; what came live while its backlog was read. */
+interface Sub { q: EventsQuery; send(d: Delivered): void; close(): void; held?: Delivered[] }
 
 export interface EventStreamsOptions {
   /** The instance's store, read-only (undefined: none). */
   open(handle: string): EventStore | undefined;
-  log?(handle: string, line: string): void;
 }
+
+/** How many ids sent an instance remembers (a start hands an awaited event over again). */
+const SENT_MAX = 10_000;
 
 /** The registry of open subscriptions, per instance (#148). */
 export class EventStreams {
   private subs = new Map<string, Set<Sub>>();
-  private followed = new Map<string, Followed>();
-  /** Per instance: the folds, one after another; `again` when an event came during one. */
-  private chain = new Map<string, Promise<void>>();
-  private again = new Set<string>();
+  /** Per instance: the ids handed over lately, in order: one handed over again is not sent again. */
+  private sent = new Map<string, Set<string>>();
   private readonly o: EventStreamsOptions;
   constructor(o: EventStreamsOptions) { this.o = o; }
 
@@ -152,33 +160,47 @@ export class EventStreams {
 
   /**
    * Open a subscription for `handle`: its backlog folded from the log and sent, then each new
-   * matching event as it is handed over. `send` writes one event; `close` ends the stream (the
-   * host's: an uninstall, the instance stopping). The returned function forgets it (the client went).
+   * matching event as it is handed over (what came during the fold, after it, once). `send` writes
+   * one event; `close` ends the stream (the host's: an uninstall, the instance stopping). The
+   * returned function forgets it (the client went).
    */
   async subscribe(handle: string, q: EventsQuery, send: (d: Delivered) => void, close: () => void): Promise<() => void> {
-    const sub: Sub = { q, send, close, live: false };
+    const sub: Sub = { q, send, close, held: [] };
     let set = this.subs.get(handle);
     if (!set) this.subs.set(handle, set = new Set());
     set.add(sub);
-    const forget = () => { const s = this.subs.get(handle); s?.delete(sub); if (s && !s.size) { this.subs.delete(handle); this.followed.delete(handle); } };
+    const forget = () => this.remove(handle, sub);
     try {
-      await this.serial(handle, async () => {
-        const events = await this.fold(handle);
-        // The fold doubles as a follow: what the live ones have not had yet goes to them first.
-        this.advance(handle, events);
-        if (!set!.has(sub)) return; // gone meanwhile
-        for (const d of backlog(events, q)) sub.send(d);
-        sub.live = true;
-      });
+      const s = this.o.open(handle);
+      let all: Delivered[] = [];
+      if (s) try { all = await foldEvents(s); } finally { s.close(); }
+      const first = backlog(all, q);
+      const had = new Set(first.map((d) => d.id));
+      const held = sub.held!;
+      delete sub.held;
+      if (!set.has(sub)) return forget; // gone meanwhile
+      for (const d of first) sub.send(d);
+      for (const d of held) if (!had.has(d.id)) sub.send(d);
     } catch (e) { forget(); throw e; }
     return forget;
   }
 
-  /** An event was handed over for `handle` (after its step's commit): fold from where the follow stands. */
-  emitted(handle: string): void {
-    if (!this.open(handle)) return;
-    if (this.chain.has(handle)) { this.again.add(handle); return; }
-    void this.serial(handle, () => this.follow(handle)).catch((e) => this.o.log?.(handle, `events: not followed: ${(e as Error).message}`));
+  /**
+   * An event handed over for `handle` (after its step's commit), with its place in the log: sent
+   * as it is to each open subscription it matches — no log read. One handed over again (a start
+   * re-offers what a waiting thread awaits) is not sent again.
+   */
+  emitted(handle: string, rec: Record<string, unknown>, place: Place): void {
+    const subs = this.subs.get(handle);
+    if (!subs?.size) return;
+    const d = deliveredOf(rec, place);
+    if (!d) return;
+    let sent = this.sent.get(handle);
+    if (!sent) this.sent.set(handle, sent = new Set());
+    if (sent.has(d.id)) return;
+    sent.add(d.id);
+    if (sent.size > SENT_MAX) sent.delete(sent.values().next().value!);
+    for (const s of subs) if (takes(s.q, d)) { if (s.held) s.held.push(d); else s.send(d); }
   }
 
   /** The apps `handle` has installed now (rows in its dispatch table): the others' subscriptions close. */
@@ -189,52 +211,19 @@ export class EventStreams {
   /** Close every subscription of `handle` (it stops). */
   drop(handle: string): void {
     for (const s of [...this.subs.get(handle) ?? []]) this.end(handle, s);
-    this.followed.delete(handle);
   }
 
   /** Close them all (the host shuts down). */
   stop(): void { for (const h of [...this.subs.keys()]) this.drop(h); }
 
-  private end(handle: string, s: Sub): void {
+  private remove(handle: string, s: Sub): void {
     const set = this.subs.get(handle);
     set?.delete(s);
-    if (set && !set.size) { this.subs.delete(handle); this.followed.delete(handle); }
+    if (set && !set.size) { this.subs.delete(handle); this.sent.delete(handle); }
+  }
+
+  private end(handle: string, s: Sub): void {
+    this.remove(handle, s);
     try { s.close(); } catch { /* the client's socket is gone already */ }
-  }
-
-  /** Run `f` after what `handle` is folding now; one at a time per instance. */
-  private serial(handle: string, f: () => Promise<void>): Promise<void> {
-    const run = (this.chain.get(handle) ?? Promise.resolve()).then(f);
-    const tail: Promise<void> = run.catch(() => {}).then(() => { // a failure is the caller's to report
-      if (this.chain.get(handle) === tail) this.chain.delete(handle);
-      if (this.again.delete(handle)) this.emitted(handle);
-    });
-    this.chain.set(handle, tail);
-    return run;
-  }
-
-  /** The instance's events folded (since `since`), its store opened and closed around it. */
-  private async fold(handle: string, since?: number): Promise<Delivered[]> {
-    const s = this.o.open(handle);
-    if (!s) return [];
-    try { return await foldEvents(s, since); } finally { s.close(); }
-  }
-
-  /** Follow: the events since where the follow stands, the new ones sent. */
-  private async follow(handle: string): Promise<void> {
-    if (!this.open(handle)) return;
-    const f = this.followed.get(handle);
-    this.advance(handle, await this.fold(handle, f && Number.isFinite(f.at) ? f.at : undefined));
-  }
-
-  /** Of `events` (in log order), those the follow has not had yet: sent to the live subscriptions they match; the follow moves past them. */
-  private advance(handle: string, events: Delivered[]): void {
-    const f = this.followed.get(handle);
-    const fresh = f ? events.filter((d) => d.at > f.at || (d.at === f.at && !f.ids.has(d.id))) : [];
-    const top = events.reduce((m, d) => Math.max(m, d.at), f?.at ?? -Infinity);
-    const ids = new Set(f && f.at === top ? f.ids : []);
-    for (const d of events) if (d.at === top) ids.add(d.id);
-    if (this.open(handle)) this.followed.set(handle, { at: top, ids });
-    for (const d of fresh) for (const s of this.subs.get(handle) ?? []) if (s.live && takes(s.q, d)) s.send(d);
   }
 }

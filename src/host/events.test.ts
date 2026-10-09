@@ -14,7 +14,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RawBox } from "../client/raw.ts";
 import { installApp, uninstallApp } from "../testapps.ts";
-import { backlog, eventsQuery, placeOf, type Delivered } from "./events.ts";
+import { CID } from "multiformats/cid";
+import { backlog, EventStreams, eventsQuery, placeOf, type Delivered } from "./events.ts";
 import { SseStream, type SseEvent } from "./feeds.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { testHost, until } from "./testhost.ts";
@@ -32,7 +33,7 @@ test("events: the query (event, topic repeated, Last-Event-ID) and what is sent 
   assert.equal((q("event=price&topic=a", "7.2.0.bafyabc") as { after: string }).after, "7.2.0.bafyabc");
   assert.deepEqual(placeOf("7.2.1.bafyabc"), { n: 7, seq: 2, i: 1, thread: "bafyabc" });
 
-  const ev = (n: number, app: string, event: string, topic: string, i = 0): Delivered => ({ id: `${n}.1.${i}.bafyt${n}`, n, at: n, event, app, topic, data: JSON.stringify({ n, topic }) });
+  const ev = (n: number, app: string, event: string, topic: string, i = 0): Delivered => ({ id: `${n}.1.${i}.bafyt${n}`, n, event, app, topic, data: JSON.stringify({ n, topic }) });
   const all = [ev(1, "amm", "price", "a"), ev(2, "amm", "price", "b"), ev(3, "amm", "price", "a"), ev(4, "other", "price", "a"), ev(5, "amm", "volume", "a"), ev(6, "amm", "price", "c"), ev(7, "amm", "price", "b"), ev(7, "amm", "price", "a", 1)];
   const ids = (ds: Delivered[]) => ds.map((d) => d.id);
   const base = { app: "amm", event: "price", topics: ["a", "b"] };
@@ -40,6 +41,27 @@ test("events: the query (event, topic repeated, Last-Event-ID) and what is sent 
   assert.deepEqual(ids(backlog(all, { ...base, topics: ["z"] })), [], "a topic with none: nothing");
   assert.deepEqual(ids(backlog(all, { ...base, after: "2.1.0.bafyt2" })), ["3.1.0.bafyt3", "7.1.0.bafyt7", "7.1.1.bafyt7"], "after the place: every one that matches");
   assert.deepEqual(ids(backlog(all, { ...base, after: "5.9.9.bafygone" })), ["7.1.0.bafyt7", "7.1.1.bafyt7"], "a place not in the log: the later entries'");
+});
+
+test("events: a live event is sent from the notice, its id from its place — no log read; one handed over again not sent again; one during the backlog after it", async () => {
+  let opens = 0;
+  const streams = new EventStreams({ open: () => { opens++; return undefined; } });
+  const thread = CID.parse("bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
+  const rec = (topic: string, value: number) => ({ kind: "event", event: "price", app: "amm", topic, value });
+  const got: string[] = [];
+  const q = { app: "amm", event: "price", topics: ["a"] };
+  const p = streams.subscribe("x", q, (d) => got.push(`${d.id} ${d.data}`), () => {});
+  streams.emitted("x", rec("a", 1), { n: 5, seq: 2, i: 0, thread }); // while the backlog is read
+  await p;
+  streams.emitted("x", rec("a", 2), { n: 6, seq: 3, i: 0, thread });
+  streams.emitted("x", rec("a", 2), { n: 6, seq: 3, i: 0, thread }); // handed over again (a start)
+  streams.emitted("x", rec("b", 3), { n: 7, seq: 4, i: 0, thread });
+  streams.emitted("x", { ...rec("a", 4), app: "other" }, { n: 7, seq: 4, i: 1, thread });
+  assert.equal(opens, 1, "the log opened once, for the backlog");
+  assert.deepEqual(got, [
+    `5.2.0.${thread} {"app":"amm","event":"price","kind":"event","topic":"a","value":1}`,
+    `6.3.0.${thread} {"app":"amm","event":"price","kind":"event","topic":"a","value":2}`,
+  ]);
 });
 
 /** app-demo's module as app `name` (its box takes the owner's messages). */
@@ -115,6 +137,13 @@ test("events: GET /<app>/.events — the current value per topic, then live; onl
   assert.deepEqual(vals(got), ["tok2=2", "tok1=3", "tok1=4", "tok2=6"], "as each step is committed; another app's, another name's, another topic's not sent");
   const ids = got.map((g) => g.id);
   assert.equal(new Set(ids).size, ids.length, "each id once");
+
+  // A new subscription's current values (folded from the log) carry the ids the live ones had.
+  const again: Got[] = [];
+  const sa = opened(again, "event=price&topic=tok1&topic=tok2");
+  await until("the current values again", () => again.length >= 2 || undefined);
+  assert.deepEqual(again.map((g) => g.id), [got[2]!.id, got[3]!.id], "a live id is the log's id");
+  await sa.stop();
 
   // Another app's stream: its own events only.
   const gotB: Got[] = [];
