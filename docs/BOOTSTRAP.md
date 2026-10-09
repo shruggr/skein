@@ -126,19 +126,21 @@ images/host/apps/onboard --instance host --config <file.json>`).
 ### The Open Exchange image (#147)
 
 `images/open-exchange` merged over `images/default`, as the host image is:
-the default image's three apps and two more, installed at birth in this
-order — `apps/overlay/` (shruggr/skein-overlay v0.11.0, the overlay engine
-as a standalone app) and `apps/amm/` (shruggr/skein-amm v0.8.0, which
-carries skein-mandala v0.9.0) — each the tag's git tree. Its
-`etc/apps.json` names root's own routes:
+the default image's three apps and `apps/amm/` (shruggr/skein-amm v0.8.0,
+the tag's git tree), installed at birth after them. amm carries
+skein-mandala v0.9.0 and its own overlay engine (`bin/overlay.wasm`,
+skein-overlay 0.11.0's build), so tonight the image has **one engine, amm's**.
+The standalone engine app (shruggr/skein-overlay) returns when the engine
+leaves amm: amm and mandala then register into it (decided 2026-10-08);
+amm 0.8.0 is not there yet. Its `etc/apps.json` names root's own routes:
 
-- `POST /submit` → the engine app's submit handler: `{transport: "http",
-  address: "/submit", filters: ["kernel.beef"], program: "overlay.overlay",
+- `POST /submit` → amm's engine's submit handler: `{transport: "http",
+  address: "/submit", filters: ["kernel.beef"], program: "amm.overlay",
   fn: "submit"}`. A root route's handler may name `<app>.<role>`, an app
   installed at birth above it (as `skein routes add` takes it): the loader
   resolves it to that app's program record.
 - `POST /lookup` → the engine's lookup filter: the read route
-  `{transport: "http", address: "/lookup", filters: ["overlay.lookup"]}`.
+  `{transport: "http", address: "/lookup", filters: ["amm.lookup"]}`.
 - `/` → the amm app's landing: the read route `{transport: "http",
   address: "/", prefix: true, filters: ["amm.page"], root: "www", index:
   "index.html"}`. It replaces the default image's `/` (the site): in the
@@ -148,10 +150,15 @@ carries skein-mandala v0.9.0) — each the tag's git tree. Its
 
 The @bsv/sdk clients take a bare origin as an overlay host and post to
 `<origin>/submit` and `<origin>/lookup` (skein-overlay docs/OVERLAY.md
-"Root routes"); the engine's own `/overlay/submit` and `/overlay/lookup`
-stay. Nothing registers at runtime. The discovery topic `tm_mandala` is
-registered by root's `register` message after the birth (skein-amm
-README: "registered by `register` alone"); the image does not do it.
+"Root routes"); amm's own `/amm/submit` and `/amm/lookup` stay. Nothing
+registers at runtime. The discovery topic `tm_mandala` is registered by
+root's `register` message after the birth (skein-amm README: "registered
+by `register` alone"); the image does not do it.
+
+A user skein is made from it by name: `skein-host add <handle> --image
+open-exchange`, or a creation with `image: "open-exchange"` (the
+manager's `create`; src/host/image-chain.ts `source({image})`), with the
+chain part added as to the default image, unclaimed as from the default.
 
 ### The image's chain part (#132)
 
