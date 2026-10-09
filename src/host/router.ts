@@ -36,6 +36,17 @@
 //                                         JSON [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer
 //                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
 //                                         Unsigned, nothing logged; metered as a read (billing.ts)
+//   GET  /<app>/.events?event=<name>&topic=<t>[&topic=<t2>…]
+//                                         at an instance's origin (#148): a Server-Sent Events stream of the app's
+//                                         emitted events of that name whose `topic` is one of those (events.ts),
+//                                         served by the host, no program: `id` the event's place in the log
+//                                         (<n>.<seq>.<i>.<thread>), `event` its name, `data` the record as DAG-JSON.
+//                                         First the last one per topic (or, with Last-Event-ID, every one after
+//                                         it, folded from the log), then each as handed over (its place in the
+//                                         kernel's notice: no log read). 400 without
+//                                         `event` or a `topic`; 404 when the app is not installed. Unsigned,
+//                                         nothing logged; each message metered as a read. Closed at the app's
+//                                         uninstall and when the instance stops
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
@@ -121,6 +132,7 @@ import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Gen
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { DoorAnswered, Kernel } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
+import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
 import { beaconEvent, beaconsOf, DEFAULT_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
@@ -223,6 +235,10 @@ export interface RouterResponse { status: number; headers: Record<string, string
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
+/** #148: an app's event stream, at an instance's origin. */
+const EVENTS_ROUTE = /^\/([^/]+)\/\.events$/;
+/** The apps a dispatch table names (an app with no row left is uninstalled). */
+const appsOf = (rows: DispatchRow[]): Set<string> => new Set(rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
 export { HANDLE };
 /** Handles no instance may take on this host (H3), besides the router origin's own first label (Router.reserved): `id` (the router's own in production) and `host` (the host skein's). */
 export const RESERVED_HANDLES = new Set(["id", "host"]);
@@ -331,6 +347,8 @@ export class Router {
   readonly p2p?: P2PHost;
   /** The host's providers (#70): what carries the instances' messages out. */
   readonly providers: Providers;
+  /** #148: the pages' subscriptions to their apps' emitted events (GET /<app>/.events), per instance. */
+  readonly events: EventStreams;
   /** The certifier (#100, #113): signs the BRC-169 handle certificates, for the host skein's onboarding app (the `certifier` provider). */
   readonly certifier: ProtoWallet;
   readonly loaded = new Map<string, Loaded>();
@@ -422,6 +440,9 @@ export class Router {
     // The certifier key is the certifier provider's (signer.ts certifierKey: providerKey("certifier")).
     this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
+    this.events = new EventStreams({
+      open: (h) => { const row = this.o.db.get(h); return row && existsSync(row.store) ? openStoreFile(row.store, { readOnly: true }) : undefined; },
+    });
     this.providers = new Providers({
       keyOf,
       append: (h, pkg) => this.appendLocal(h, pkg),
@@ -430,6 +451,7 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
+      emitted: (h, rec, place) => this.events.emitted(h, rec, place),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
       manager: {
@@ -554,6 +576,7 @@ export class Router {
     if (this.control) closed.push(closeControl(this.control.server, this.control.path));
     this.control = undefined;
     this.providers.stop();
+    this.events.stop();
     await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
@@ -989,6 +1012,7 @@ export class Router {
     await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
+    this.events.drop(handle);
     this.say("router", `${handle}: stopped by the instance manager`);
     return { handle, stopped: true };
   }
@@ -1043,7 +1067,7 @@ export class Router {
    * handled and unhandled) or stopped. A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
-    if ((!this.p2p && !this.o.headersFeed) || l.kernel.gone) return;
+    if ((!this.p2p && !this.o.headersFeed && !this.events.open(l.row.handle)) || l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
@@ -1051,10 +1075,12 @@ export class Router {
     l.dispatchTip = key;
     l.rows = d.rows;
     this.followHeaders(l.row.handle, d.rows);
+    // #148: an uninstalled app's event streams close.
+    if (this.events.open(l.row.handle)) this.events.keep(l.row.handle, appsOf(d.rows));
     // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
     // removes every row naming the app and leaves its heads).
     if (l.beacons.length || l.live.length) {
-      const apps = new Set(d.rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
+      const apps = appsOf(d.rows);
       l.beacons = l.beacons.filter((b) => apps.has(b.app));
       l.live = l.live.filter((x) => apps.has(x.app)); // #138: and its liveness
     }
@@ -1159,6 +1185,42 @@ export class Router {
     const r = json(200, beats.map((b) => ({ sender: b.sender, at: b.at, body: Buffer.from(b.body).toString("base64"), from: b.from })));
     this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: r.body.length });
     return r;
+  }
+
+  /**
+   * GET /<app>/.events at an instance's origin (#148, events.ts): the app's emitted events of the
+   * asked name and topics as a Server-Sent Events stream — the backlog folded from the log, then each
+   * as it is handed over — held open until the client goes, the app is uninstalled or the instance
+   * stops. The host's own (no program, no entry, nothing logged); each message metered as a read.
+   */
+  private async eventStream(handle: string, route: string, app: string, url: URL, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
+    const answer = (r: RouterResponse) => { if (!res.headersSent) { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); } };
+    try {
+      const last = req.headers["last-event-id"];
+      const q = eventsQuery(app, url.searchParams, Array.isArray(last) ? last[0] : last);
+      if ("problem" in q) return answer(json(400, { status: "error", code: "ERR_BAD_REQUEST", description: q.problem }));
+      if (this.stopped) return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: "the host is shutting down" }));
+      let l: Loaded;
+      try { l = await this.hydrate(handle); } catch (e) { return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message })); }
+      const closed = this.closed(handle);
+      if (closed) return answer(json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed }));
+      if (!appsOf((await l.kernel.dispatch()).rows).has(app)) return answer(json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no app ${app} installed here` }));
+      res.writeHead(200, { ...cors, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      res.flushHeaders();
+      let forget: (() => void) | undefined;
+      let gone = false;
+      res.on("close", () => { gone = true; forget?.(); });
+      const send = (d: Delivered) => {
+        const m = sseMessage(d);
+        res.write(m);
+        this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: Buffer.byteLength(m) });
+      };
+      forget = await this.events.subscribe(handle, q, send, () => res.end());
+      if (gone) forget();
+    } catch (e) {
+      this.say(handle, `events: ${(e as Error).message}`);
+      if (res.headersSent) res.end(); else answer(json(500, { status: "error", code: "ERR_INTERNAL", description: (e as Error).message }));
+    }
   }
 
   /**
@@ -1390,6 +1452,7 @@ export class Router {
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
     await this.p2p?.declare(handle, undefined).catch(() => {});
+    this.events.drop(handle);
     this.cron.forget(handle);
     this.views.delete(handle);
     this.periods.delete(handle);
@@ -1466,6 +1529,8 @@ export class Router {
       // #138: the liveness tool's read, the host's own (no program).
       const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(t.route) : null;
       if (live) return await this.held(this.liveRead(t.handle, t.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
+      // #148: a stream, served on a socket only (handler).
+      if (req.method === "GET" && EVENTS_ROUTE.test(t.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
       return await this.held(this.forward(t.handle, t.route, url, req));
     }
     const path = url.pathname;
@@ -1569,6 +1634,13 @@ export class Router {
         "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*", "access-control-expose-headers": "*",
       };
       if (req.method === "OPTIONS") { res.writeHead(200, cors).end(); return; }
+      // #148: an event stream is held open, not buffered.
+      if (req.method === "GET") {
+        const url = new URL(`http://${req.headers.host ?? `127.0.0.1:${this.port}`}${req.url ?? "/"}`);
+        const t = this.target(url);
+        const m = t ? EVENTS_ROUTE.exec(t.route) : null;
+        if (t && m) { void this.eventStream(t.handle, t.route, decodeURIComponent(m[1]!), url, req, res, cors); return; }
+      }
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {

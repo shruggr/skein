@@ -262,6 +262,12 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   in memory; the host serves the set at `GET /<app>/.live/<topic>` on the
   instance's origin (no program, no entry). A runtime without it records
   the events and nothing happens.
+- **The event streams** (#148, `src/host/events.ts`): a page subscribes to
+  its app's emitted events at `GET /<app>/.events?event=<name>&topic=<t>…`
+  on the instance's origin, a Server-Sent Events stream — the last event per
+  topic (or, with Last-Event-ID, every one after it), folded from the log,
+  then each as its step is committed; each message's id is the event's
+  place in the log. No program, no entry, nothing new logged.
 - **authfetch's bytes** (#126): the kernel asks the host for one HTTP
   exchange at a time (the serve frame `http`); the router carries it (its
   own URLs in process), and signs and checks nothing — the kernel did.

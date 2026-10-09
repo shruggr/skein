@@ -541,7 +541,10 @@ ProtoWallet, the signer) and `http` (#126: one exchange for authfetch,
 committed message for a `local` or `libp2p` recipient, which the host's
 providers carry out — or, transport `event`, an event: a broadcast for the
 host's broadcaster, #65; a `deadline` or `fetch` intention for its waker or
-HTTP proxy, #126; a subscription or a beacon for its libp2p node) and
+HTTP proxy, #126; a subscription or a beacon for its libp2p node; an event
+also carries `place: {n, seq, i, thread}` beside the record, #148: the entry
+its step processed, the update's seq, its index in `emitted`, the thread —
+the record itself is unchanged) and
 `stop`. There is no `send` and no
 `resolve` (#40): an instance delivers its mailbox messages itself, by its
 delivery threads. The host starts the process when a message or a
