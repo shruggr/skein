@@ -87,8 +87,8 @@ chain of routes
 
 ```
 {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
- filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"],
- program?: <program record CID> | "kernel", fn?, app?, …settings}
+ filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"],
+ program?: <program record CID> | "kernel", fn?, app?, price?: <sats> (#149: kernel.pay's), …settings}
 ```
 
 — a box (`mailbox`: messages; `event`: the host's wiring, never a message),
@@ -172,7 +172,14 @@ are apart. Every HTTP request goes to the kernel's door
    (every BEEF in the body decoded and every BUMP checked against the chain
    app's headers; the bytes replaced by the pointer record; a BUMP that does
    not check 400; no BEEF and no principal before it 400 "nothing to
-   validate" — signed or validated), and an app's own (`<app>.<filter>`, a
+   validate" — signed or validated), `kernel.pay` (#149, after
+   `kernel.brc104`: the route's `price` on ts-stack's payment wire — no
+   `X-BSV-Payment` header: 402 with `x-bsv-payment-version`,
+   `x-bsv-payment-satoshis-required`, `x-bsv-payment-derivation-prefix`;
+   a payment whose nonce verifies, whose Atomic BEEF's first output covers
+   the price and whose txid the wallet does not hold: passed with the
+   `payment` block; else 400/409 in ts-stack's codes; docs/APPS.md "The
+   kernel's own filters"), and an app's own (`<app>.<filter>`, a
    call in the deterministic profile). Each passes the request on (with a
    principal, with blocks it stored), rejects it, or answers it. A route
    lists only what it names: `["kernel.brc104"]` signed only;
@@ -190,9 +197,12 @@ are apart. Every HTTP request goes to the kernel's door
    write **no entry**: the host answers at once — signed on the request's
    session when the request is signed and its session verifies (the front
    door's fn `respond`, a call), plain otherwise. What passes is the entry
-   — `door: {principal?, verified?, filters, beefs?, blocks?}` — and the
+   — `door: {principal?, verified?, filters, beefs?, blocks?, payment?}` —
+   and (#149) a `payment` first goes to the wallet program, which the
+   kernel launches on the entry to internalize it (refused: the handler
+   does not run, and no answer comes); then the
    front door's step on it runs the route's handler (its `caller` the
-   principal) and signs its answer on the session when the request is
+   principal, its `payment` kernel.pay's) and signs its answer on the session when the request is
    signed (#135: a signed request gets a signed answer, BRC-104 §6.4,
    whatever the route's filters). The handshake (`/.well-known/auth`) is a
    route of its own to the front door's `handshake`, no filters.
@@ -288,7 +298,8 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
   headers:     {name: value}   names lower-cased, x-bsv-auth-* included
   body:        bytes | <cid>  as received; #121: on a row whose `filter` is `beef`, the BEEF's pointer record (docs/VM.md "The door")
   contentType: text            the media type alone
-  session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes (no payload when a filter replaced the body: reconstructible)
+  session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes (no payload when a filter replaced the body or a header: reconstructible)
+  payment?:    {satoshisPaid, txid, derivationPrefix, derivationSuffix, sender: bytes(33)}   #149: what kernel.pay admitted (the wallet internalized it before this call)
   match:       the dispatch row that matched, as the table holds it (`address`, `prefix: true` for a prefix row;
                a handler's own settings: static's root, index; the install's app). #79: no pre-#77 keys
   request:     <cid>           the request record: the package as received (its entry is `step.entry`)
@@ -394,7 +405,14 @@ sent, which is what the front door verifies.
 
 ```
 entry    {kind: "log", prev, n, time, genesis | request+transport (+ door | refused, #121) | mail | event+box}
-door     {verified?, filter?, beefs?: [<pointer record>], bodies?: [{of, is}]}       the door's admission (docs/VM.md "The door")
+door     {verified?, filter?, beefs?: [<pointer record>], bodies?: [{of, is}], payment?}   the door's admission (docs/VM.md "The door")
+payment  {satoshisPaid, txid: <hex>, derivationPrefix, derivationSuffix, sender: bytes(33)}   #149: kernel.pay's; the request's
+         x-bsv-payment header logged as {kind: "x-bsv-payment", before, beef: <pointer record>, after} (the text
+         with the transaction's base64 cut out; restored: before ‖ base64(the BEEF) ‖ after). Processing the entry
+         launches the wallet program first: origin {kind: "thread", program: <wallet>, args: {body: {op:
+         "internalize", tx, outputs: [{outputIndex: 0, protocol: "wallet payment", paymentRemittance}],
+         description}}, launchedBy: <the entry>, input: <the entry>, at, nonce: "payment"}; the request's
+         thread runs only when that step did not error
 refused  {stage: "middleware" | "filter", reason, status, code?}                   a refusal at the door: stored, nothing runs
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
