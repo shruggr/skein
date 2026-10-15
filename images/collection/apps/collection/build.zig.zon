@@ -1,0 +1,29 @@
+.{
+    .name = .skein_collection,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x322505e1482baed1,
+    .dependencies = .{
+        // The topic and lookup contracts and the engine; the SDK (chain, sk, cbor) comes through it.
+        .skein_overlay = .{
+            .url = "https://github.com/shruggr/skein-overlay/archive/refs/tags/v0.13.0.tar.gz",
+            .hash = "skein_overlay-0.13.0-IMuNgacFHwDGbU_3hJu7Sl4HVPhy94dc6-XtlpuKwc8d",
+        },
+        // The 1Sat parsers: inscription, MAP, SIGMA, OrdLock v2, the ordinal rule.
+        .skein_1sat = .{
+            .url = "https://github.com/shruggr/skein-1sat/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "skein_1sat-0.1.0-sSbrUWSQAADQ-JhpkweKnw92bYXuF77aMSQEgO9JcoN-",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test.zig",
+        "testdata",
+        "bin",
+        "etc",
+        "docs",
+        "README.md",
+    },
+}

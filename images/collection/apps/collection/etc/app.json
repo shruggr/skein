@@ -1,0 +1,119 @@
+{
+  "kind": "app",
+  "name": "collection",
+  "version": "0.1.0",
+  "programs": {
+    "overlay": "bin/overlay.wasm",
+    "collection-topic": "bin/collection-topic.wasm",
+    "collection-lookup": "bin/collection-lookup.wasm"
+  },
+  "config": {
+    "overlay": {}
+  },
+  "requires": [
+    "chain/1"
+  ],
+  "filters": {
+    "listTopicManagers": "overlay.listTopicManagers",
+    "listLookupServiceProviders": "overlay.listLookupServiceProviders",
+    "topicDocumentation": "overlay.topicDocumentation",
+    "lookupDocumentation": "overlay.lookupDocumentation",
+    "holds": "overlay.holds",
+    "items": "collection-lookup.items",
+    "history": "collection-lookup.history",
+    "listings": "collection-lookup.listings",
+    "sales": "collection-lookup.sales"
+  },
+  "roles": {
+    "root": [
+      "register",
+      "registerLookup",
+      "deregisterLookup"
+    ]
+  },
+  "routes": [
+    {
+      "address": "register",
+      "handler": "overlay.register"
+    },
+    {
+      "address": "submit",
+      "filters": [
+        "kernel.beef"
+      ],
+      "handler": "overlay.submit"
+    },
+    {
+      "transport": "libp2p",
+      "address": "/skein/overlay/beef/1.0.0",
+      "filters": [
+        "kernel.beef"
+      ],
+      "handler": "overlay.submit"
+    },
+    {
+      "transport": "http",
+      "address": "/listTopicManagers",
+      "filters": [
+        "listTopicManagers"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/listLookupServiceProviders",
+      "filters": [
+        "listLookupServiceProviders"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/getDocumentationForTopicManager",
+      "filters": [
+        "topicDocumentation"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/getDocumentationForLookupServiceProvider",
+      "filters": [
+        "lookupDocumentation"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/holds",
+      "filters": [
+        "holds"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/collection/items",
+      "filters": [
+        "items"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/collection/history",
+      "filters": [
+        "history"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/collection/listings",
+      "filters": [
+        "listings"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/collection/sales",
+      "filters": [
+        "sales"
+      ]
+    }
+  ],
+  "description": "1Sat collections (shruggr/skein#151): the overlay engine (shruggr/skein-overlay 0.13.0, required: chain/1) with the collection topic manager (collection-topic) and lookup (collection-lookup). The manifest declares no topics and no lookups: root registers them in the box <app>/register (handler overlay.register, gated by roles: {root: [register, registerLookup, deregisterLookup]}): {fn: \"register\", args: {topic: \"tm_col_<txid>_<vout>\", program: \"collection-topic\"}} for a collection (its mint outpoint, the txid in display order), or {topic: \"tm_1sat_collection\"} for every collection mint; and {fn: \"registerLookup\", args: {service: \"ls_collection\", program: \"collection-lookup\"}} once. tm_col_<id> admits the collection's mint, its item mints signed by the collection's issuer, and every later output holding an admitted output's satoshi by the ordinal rule, naming the funding parents that fix the satoshi's offset as ancillary txids. ls_collection keeps its index under <app>/ls_collection and answers four reads, as BRC-24 queries ({find: \"items\" | \"listings\" | \"sales\", collection} or {find: \"history\", origin}, limit?, skip?) and as read routes /<app>/collection/items, /history, /listings, /sales (anyone, nothing logged): a collection's items with their current outpoint and owner, an item's chain of custody, open OrdLock v2 listings, and listing spends (purchase or cancel), newest first."
+}

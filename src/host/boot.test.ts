@@ -197,6 +197,31 @@ test("#147: the Open Exchange image (images/open-exchange over images/default) i
   assert.ok(!rows.some((r) => r.app === undefined && r.filters?.includes("site.get")), "no root route to the site");
 });
 
+test("#151: the collection image (images/collection over images/default) installs chain, git, site and collection (its engine with it); no root route but the site's /; nothing registered", async () => {
+  const base = await dirSource(join(import.meta.dirname, "../../images/default"));
+  const own = await dirSource(join(import.meta.dirname, "../../images/collection"));
+  const merged = new MemBlocks();
+  const src = anyOf(merged, base.objects, own.objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
+  const root = await mergeImages(src, base.root, own.root, merged);
+  const s = await readSystemTree(src, root);
+  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site", "apps/collection"]);
+  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
+  const c = { identity: key(), handle: "a", domain: "localhost" };
+  const sys = resolveSystem(c, programs, s.config, root, s.dispatch);
+  const kept = new Map<string, Uint8Array>();
+  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
+  const born = await installAtBirth(target, src, s, sys, c);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.6.0", "git 0.2.0", "site 0.10.0", "collection 0.1.0"]);
+  assert.deepEqual(Object.keys(born.heads).sort(), ["chain/app", "collection/app", "git/app", "site/app"], "no collection/topics or collection/lookups: the image registers nothing");
+  const rows = born.rows as Array<Record<string, any>>;
+  assert.deepEqual(rows.filter((r) => r.app === undefined).map(showRow), ["root http / prefix [site.get]"], "root's own routes: the management site alone");
+  const col = dagCbor.decode(kept.get(born.heads["collection/app"]!.toString())!) as Record<string, any>;
+  assert.deepEqual(Object.keys(col.programs).sort(), ["collection-lookup", "collection-topic", "overlay"]);
+  for (const r of ["/collection/submit", "/collection/lookup", "/collection/collection/items", "/collection/collection/history", "/collection/collection/listings", "/collection/collection/sales"]) {
+    assert.ok(rows.some((x) => x.app === "collection" && x.address === r), `collection's ${r}`);
+  }
+});
+
 const showRow = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
 
 test("#147: skein-host add <handle> --image open-exchange — the row boots unclaimed with chain, git, site and amm and the three root routes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
