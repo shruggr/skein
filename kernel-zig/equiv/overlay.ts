@@ -97,12 +97,18 @@ const submitFetch = signedSubmitter(ephemeralWallet(key("8888")));
 // functions answer: anyone, signed or not, no entry. A filter is `<app>.<filter>`, the function an app record
 // declares: a system tree has no app record for its genesis-wired engine, so root writes one (objects + head
 // overlay/app: its programs the genesis's, its filters) and its read routes (dispatch), as an install would.
+// skein-overlay 0.11.0: a read route naming no app is the app its filter names (config.zig `filterApp`), and that
+// app record's config.overlay replaces the genesis defaults there: the record carries the genesis's topics and
+// lookups, and their programs' roles.
+const DEFAULTS = { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) };
 const OVERLAY_READS: Array<[string, string]> = [["/lookup", "lookup"], ["/listTopicManagers", "listTopicManagers"], ["/listLookupServiceProviders", "listLookupServiceProviders"], ["/getDocumentationForTopicManager", "topicDocumentation"], ["/getDocumentationForLookupServiceProvider", "lookupDocumentation"]];
 async function addReads(r: Router, h: string): Promise<void> {
   const l = await r.hydrate(h);
   const g = await l.kernel.genesis() as { programs: Record<string, CID>; tree: CID };
   const app = encode({
-    kind: "app", name: "overlay", version: "0.12.1", programs: { overlay: g.programs.overlay! }, provides: [], requires: [], routes: [], tree: g.tree,
+    kind: "app", name: "overlay", version: "0.12.1", programs: { overlay: g.programs.overlay!, "topic-demo": g.programs["topic-demo"]!, "lookup-demo": g.programs["lookup-demo"]! },
+    provides: [], requires: [], routes: [], tree: g.tree,
+    config: { overlay: { topics: JSON.parse(DEFAULTS.overlayTopics) as unknown, lookups: JSON.parse(DEFAULTS.overlayLookups) as unknown } },
     filters: Object.fromEntries(OVERLAY_READS.map(([, fn]) => [fn, `overlay.${fn}`])),
   } as never);
   const box = new RawBox(ephemeralWallet(key("2222")), r.originOf(h));
@@ -141,7 +147,7 @@ writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, des
 writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, description: "Demo token lookup: {topic}, {scriptHash, topic?}, {txid, outputIndex, topic}." }));
 // #77, #79: genesis-wired programs write what `scopes` name: the engine and its lookup service `overlay/…` (the
 // engine's app is its program's name), the chain app the stock `chain/`.
-const config = () => JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) }, scopes: { overlay: ["overlay/"], "lookup-demo": ["overlay/"] } });
+const config = () => JSON.stringify({ defaults: DEFAULTS, scopes: { overlay: ["overlay/"], "lookup-demo": ["overlay/"] } });
 writeFileSync(join(sys, "etc/config.json"), config());
 const http = (address: string, fn: string) => ({ transport: "http", address, program: "overlay", fn });
 const ROWS = [
