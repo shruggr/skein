@@ -1,11 +1,13 @@
-// The collection image (shruggr/skein#151) end to end on regtest: a skein
-// booted from images/collection (images/default with shruggr/skein-collection
-// installed at birth, its engine with it) registers nothing; its owner claims
-// it, and root registers one collection's topic tm_col_<txid>_<vout> and the
-// lookup ls_collection in the box collection/register. Then, each
-// transaction mined in a block of its own (a header event in box chain, the
-// chain app's answer `proven` at ingest) and posted as Atomic BEEF to
-// POST /collection/submit (BRC-22):
+// The collection app (shruggr/skein#151) end to end on regtest: a skein
+// booted from the default image, claimed by its owner, who installs the chain
+// app (src/testapps.ts CHAIN_APP) and shruggr/skein-collection (its engine
+// with it; $SKEIN_COLLECTION_DIR, else the commit pinned below) by message
+// (#152: an image carries no apps; the collection app's own image/ names
+// it). Nothing is registered until root registers one collection's topic
+// tm_col_<txid>_<vout> and the lookup ls_collection in the box
+// collection/register. Then, each transaction mined in a block of its own (a
+// header event in box chain, the chain app's answer `proven` at ingest) and
+// posted with its parents as BEEF to POST /collection/submit (BRC-22):
 //
 //   - the collection's mint (a 1-sat inscription, MAP type=ord
 //     subType=collection, a SIGMA by the issuer, signed as 1sat-sdk signs):
@@ -23,8 +25,7 @@
 // /history, /listings, /sales) and as BRC-24 (/collection/lookup, service
 // ls_collection): the item, its owner, its chain of custody (mint, transfer,
 // listing, sale), the open listing and then none, the sale with its block's
-// time. `skein-host add --image collection` boots the same image. The
-// skein's store replays to itself exactly.
+// time. The skein's store replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/collection.ts
 
@@ -36,11 +37,15 @@ import { BSM, MerklePath, PrivateKey, Script, Transaction, UnlockingScript, Util
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { planClaim } from "../../src/client/admin.ts";
-import { main } from "../../src/host/cli.ts";
-import { sendPlan } from "../../src/testapps.ts";
+import { appCheckout, CHAIN_APP, ownerCli, sendPlan, type PinnedApp } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+/** shruggr/skein-collection v0.1.1. */
+const COLLECTION_APP: PinnedApp = {
+  name: "collection", repo: "https://github.com/shruggr/skein-collection",
+  rev: process.env.SKEIN_COLLECTION_REV ?? "b2184a9f9e0821e8f0df81acc3e21b4e4b54c479", dir: process.env.SKEIN_COLLECTION_DIR,
+};
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 
@@ -120,8 +125,7 @@ try {
   h.mailbox("david", h.ownerId);
   await h.router.start();
   const handle = "col";
-  h.db.add(handle, { store: join(h.home, "instances", handle, "runtime.db"), identity: h.keyOf(handle).toPublicKey().toString() });
-  const booted = await h.router.bootRow(handle, await h.router.image.source({ image: "collection" }), { image: true });
+  const booted = await h.image(handle);
   store = h.db.get(handle)!.store;
   const identity = h.db.get(handle)!.identity!;
   const k = async () => (await h.router.hydrate(handle)).kernel;
@@ -131,17 +135,17 @@ try {
   };
   const origin = h.origin(handle);
 
-  // ------------------------------------------------ the image: chain, git, site, collection; nothing registered
-  const app = await record("collection/app");
-  check(booted.programs.length > 0 && app?.kind === "app" && app.version === "0.1.0", `booted from the collection image: collection/app is skein-collection ${app?.version}`);
-  for (const n of ["chain/app", "git/app", "site/app"]) check(!!(await record(n)), `${n}: installed at birth`);
-  check(!(await record("collection/topics")) && !(await record("collection/lookups")), "the image registers nothing: no collection/topics, no collection/lookups");
-  const siteAt = await fetch(`${origin}/`);
-  check(siteAt.status === 200, `GET /: the management site, root's only route (${siteAt.status})`);
-
-  // ------------------------------------------------ the claim, then root's registrations
+  // ------------------------------------------------ the claim; the chain app and the collection app by message
   await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, handle, planClaim(identity, { messagebox: h.origin("david") }));
   const root = new RawBox(h.owner, `${h.base}/@${handle}`);
+  const host = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
+  for (const a of [CHAIN_APP, COLLECTION_APP]) {
+    const r = await ownerCli(host, ["install", appCheckout(a), "--instance", handle]);
+    check(r.code === 0, `skein install ${a.name} into the claimed skein (booted from the default image, ${booted.programs.length} programs): exit ${r.code} ${r.err.join(" ").slice(0, 200)}`);
+  }
+  const app = await record("collection/app");
+  check(app?.kind === "app" && app.version === "0.1.1" && Object.keys(app.programs as object).sort().join(",") === "collection-lookup,collection-topic,overlay", `collection/app is skein-collection ${app?.version}, its engine with it (programs ${Object.keys((app?.programs as object) ?? {}).join(", ")})`);
+  check(!(await record("collection/topics")) && !(await record("collection/lookups")), "the install registers nothing: no collection/topics, no collection/lookups");
 
   // The chain: block 1 is [coinbase, fund]; Alice's six 10 000-sat outputs.
   const issuer = PrivateKey.fromRandom();
@@ -288,10 +292,6 @@ try {
   const ll = await lookup({ find: "listings", collection: collId });
   check(ll.status === 200 && ll.outputs.length === 0, `POST /collection/lookup {find: listings}: none (${ll.outputs.length})`);
 
-  // ------------------------------------------------ skein-host add --image collection
-  const out: string[] = [], err: string[] = [];
-  const code = await main(["add", "fresh", "--image", "collection"], { vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => err.push(l) });
-  check(code === 0 && out.some((l) => /booted from the image .* no owner: claim it/.test(l)), `skein-host add fresh --image collection: exit ${code} ${[...out, ...err].join(" ").slice(0, 200)}`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

@@ -55,6 +55,12 @@ export const SITE_APP: PinnedApp = {
   rev: process.env.SKEIN_SITE_REV ?? "3913f1927e401a43861150583ffa5342b1cc28f3", dir: process.env.SKEIN_SITE_DIR,
 };
 
+/** shruggr/skein-chain (#78): the chain app, `chain/1`; v0.6.0 (#146), the version the equivs pin. */
+export const CHAIN_APP: PinnedApp = {
+  name: "chain", repo: "https://github.com/shruggr/skein-chain",
+  rev: process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59", dir: process.env.SKEIN_CHAIN_DIR,
+};
+
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */
 export function appCheckout(app: PinnedApp): string {
   if (app.dir) return app.dir;

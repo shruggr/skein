@@ -160,30 +160,6 @@ open-exchange`, or a creation with `image: "open-exchange"` (the
 manager's `create`; src/host/image-chain.ts `source({image})`), with the
 chain part added as to the default image, unclaimed as from the default.
 
-### The collection image (#151)
-
-`images/collection` merged over `images/default`, as the Open Exchange image
-is: the default image's three apps and `apps/collection/`
-(shruggr/skein-collection v0.1.0, the tag's git tree), installed at birth
-after them. The collection app carries its own engine (`bin/overlay.wasm`,
-skein-overlay 0.13.0's build): the engine runs only the programs its own
-app names, so the topic and lookup programs and the engine are one app. Its
-`etc/apps.json` installs that app and names no root route: root's `/` stays
-the management site.
-
-It is the user image: it registers nothing. The app's manifest declares no
-topics and no lookups; once claimed, root registers each collection it
-follows and the lookup in the box `collection/register`:
-`{fn: "register", args: {topic: "tm_col_<txid>_<vout>", program:
-"collection-topic"}}` and `{fn: "registerLookup", args: {service:
-"ls_collection", program: "collection-lookup"}}`. Submissions go to
-`POST /collection/submit`; the reads are `/collection/lookup` and
-`/collection/collection/items`, `/history`, `/listings`, `/sales`.
-
-A user skein is made from it by name: `skein-host add <handle> --image
-collection`, or a creation with `image: "collection"`, unclaimed as from
-the default. `kernel-zig/equiv/collection.ts` runs it end to end.
-
 ### The image's chain part (#132)
 
 **The image carries the whole header chain**, and grows with every header
@@ -649,7 +625,7 @@ skein-host system <dir>                                   the default system tre
 skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
-skein-host add <h> --image <default | open-exchange | collection | dir | tree-cid [--from store.db]>  an image: no root, the claim route (#89)
+skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no root, the claim route (#89)
 skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 ```
 
