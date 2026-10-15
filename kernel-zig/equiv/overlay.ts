@@ -75,9 +75,9 @@ import { signedSubmitter } from "../../src/testapps.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "ccaee43c1d7d74554f76f2eead38cd84f0aa379a"; // v0.10.0 (#143)
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "e1211e10f7a1ed128a0d416c13a8433f33dc6151"; // v0.12.1
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));
@@ -102,7 +102,7 @@ async function addReads(r: Router, h: string): Promise<void> {
   const l = await r.hydrate(h);
   const g = await l.kernel.genesis() as { programs: Record<string, CID>; tree: CID };
   const app = encode({
-    kind: "app", name: "overlay", version: "0.10.0", programs: { overlay: g.programs.overlay! }, provides: [], requires: [], routes: [], tree: g.tree,
+    kind: "app", name: "overlay", version: "0.12.1", programs: { overlay: g.programs.overlay! }, provides: [], requires: [], routes: [], tree: g.tree,
     filters: Object.fromEntries(OVERLAY_READS.map(([, fn]) => [fn, `overlay.${fn}`])),
   } as never);
   const box = new RawBox(ephemeralWallet(key("2222")), r.originOf(h));

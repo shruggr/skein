@@ -72,9 +72,9 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "ccaee43c1d7d74554f76f2eead38cd84f0aa379a";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "e1211e10f7a1ed128a0d416c13a8433f33dc6151";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));
@@ -251,7 +251,7 @@ try {
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.10.0" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.10.0), with config.overlay; no alias head `overlay`");
+  check(app?.kind === "app" && app.version === "0.12.1" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.10.0), with config.overlay; no alias head `overlay`");
   const httpT = rowsT.filter((r) => r.transport === "http").map((r) => String(r.address)).sort();
   check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "event overlay", "mailbox overlay", "mailbox overlay/submit", "mailbox overlay/register"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)) && JSON.stringify(httpT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider", "/overlay/getDocumentationForTopicManager", "/overlay/listLookupServiceProviders", "/overlay/listTopicManagers", "/overlay/lookup", "/overlay/submit"]), `the route table has the derived routes; its http routes /submit and the five reads: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const readsT = rowsT.filter((r) => r.transport === "http" && r.program === undefined).map((r) => `${r.address} ${(r.filters as string[]).join(",")}`).sort();

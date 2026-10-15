@@ -35,9 +35,9 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   image (`images/host` merged over this one, with the onboarding app), its
   genesis's `root` the operator's key (docs/BOOTSTRAP.md, "The host image
   and the host skein").
-- `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.5.0
-  (01e68b4), shruggr/skein-git v0.2.0 (01e804a), shruggr/skein-site v0.9.0
-  (b41f5d5) — each the same git tree as that tag's commit. images/host's
+- `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.6.0
+  (00f29a2), shruggr/skein-git v0.2.0 (01e804a), shruggr/skein-site v0.10.0
+  (3913f19) — each the same git tree as that tag's commit. images/host's
   `apps/onboard/`: shruggr/skein-onboard v0.4.0 (189b7c2).
   images/open-exchange's (#147) `apps/amm/`: shruggr/skein-amm v0.9.1
   (37ab1cb, Open Exchange, carrying skein-mandala v0.9.2 and its own engine, skein-overlay
