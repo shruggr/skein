@@ -55,6 +55,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { ownerCli } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
+import { isBeefEnvelope, isBeefRecord } from "../../src/runtime/beef.ts";
 import { decode, encode } from "../../src/runtime/cid.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
 import { MODULES, rawCid, WALLET as WALLET_P1 } from "../../src/runtime/programs.ts";
@@ -443,7 +444,8 @@ check(eq(report.edges, { sameRoot: true, spends: true }), `#42: the TS reader de
 if (db) {
   // #121: the wallet's ingest messages carry the BEEF's bytes; the chain app's mailbox route names `filters: ["kernel.beef"]` (#143),
   // so the kernel's door decoded each before its `local` entry was written: the message record untouched (its id,
-  // what the chain app's answers name), the body the door put for it (`door.bodies`) carrying the pointer record.
+  // what the chain app's answers name), the body the door put for it (`door.bodies`) carrying the envelope (#146)
+  // where the bytes were, linking the pointer record.
   const d = new DatabaseSync(db, { readOnly: true });
   const blocks = new Map<string, Uint8Array>();
   try { for (const row of d.prepare("SELECT cid, bytes FROM blocks").iterate() as Iterable<{ cid: Uint8Array; bytes: Uint8Array }>) blocks.set(CID.decode(row.cid).toString(), row.bytes); } finally { d.close(); }
@@ -457,11 +459,12 @@ if (db) {
     for (const p of e.door.bodies) {
       const body = blocks.get(String(p.is));
       const v = body ? decode(body) as { fn?: string; args?: { beef?: unknown } } : undefined;
-      if (v?.fn === "ingest" && CID.asCID(v.args?.beef)) linked++;
+      const pointer = isBeefEnvelope(v?.args?.beef) ? blocks.get(String(CID.asCID(v.args.beef.beef))) : undefined;
+      if (v?.fn === "ingest" && pointer && isBeefRecord(decode(pointer))) linked++;
       if (v?.args?.beef instanceof Uint8Array) bytesInBody++;
     }
   }
-  check(filtered > 0 && linked === filtered && bytesInBody === 0, `#121: the wallet's ingests went through the door: ${filtered} local entries filtered (kernel.beef), each message's body put with the pointer record's CID in place of the bytes (${linked}), none with bytes`);
+  check(filtered > 0 && linked === filtered && bytesInBody === 0, `#121: the wallet's ingests went through the door: ${filtered} local entries filtered (kernel.beef), each message's body put with the envelope linking the pointer record in place of the bytes (#146: ${linked}), none with bytes`);
   const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db, payeeDb], { encoding: "utf8" });
   process.stdout.write(r.stdout);
   if (r.status !== 0) process.stdout.write(r.stderr);

@@ -14,7 +14,8 @@
 //     tm_demo, -admit, -proof, and the app's own box `overlay` from `event`
 //     and from `$self`; no grants, no chain/status/submit box (the chain app's);
 //   - the instance's libp2p node starts with the installed topics, live;
-//   - the second router publishes a token on tm_demo: the installed overlay
+//   - the second router publishes a token on tm_demo (skein-overlay 0.12.0's
+//     `submit` message, dag-cbor {kind: "submit", beef}): the installed overlay
 //     judges it with the manifest's topic manager, hands it to the chain app
 //     (which broadcasts it), admits it on the chain app's answer (Arcade's
 //     word); /overlay/lookup finds it; an HTTP /overlay/submit answers the
@@ -34,11 +35,11 @@
 //     the one `chain/state`;
 //   - register / deregister (skein-overlay 0.7.0, #119, #128): the stock
 //     manifest's owner row is the box overlay2/register; the owner's
-//     register {topic: tm_reg, program: topic-demo} yields the three
-//     subscriptions (tm_reg → overlay.submit with filter beef, -admit → peerAdmit, -proof →
-//     peerProof) and overlay2/topics; the node subscribes them; a token
-//     published on tm_reg is delivered by the subscription (no row);
-//     deregister unsubscribes the three and the node leaves them;
+//     register {topic: tm_reg, program: topic-demo} yields the two
+//     subscriptions of skein-overlay 0.12.0 (tm_reg → overlay.submit, -proof →
+//     peerProof; no door filter, no -admit) and overlay2/topics; the node
+//     subscribes them; a token published on tm_reg is delivered by the
+//     subscription (no row); deregister unsubscribes them and the node leaves;
 //   - a reinstall of `overlay` with a changed config.overlay (a third topic,
 //     tm_three) is read at the next step: the node subscribes it, a token
 //     published on it is judged under it;
@@ -285,6 +286,8 @@ try {
     const r = await res.json() as { outputs: Array<{ beef: number[]; outputIndex: number }> };
     return r.outputs.map((o) => `${Transaction.fromBEEF(o.beef).id("hex")}:${o.outputIndex}`);
   };
+  // skein-overlay 0.12.0: a submission on <topic> is the dag-cbor message {kind: "submit", beef}.
+  const submitMessage = (t: Transaction) => dagCbor.encode({ kind: "submit", beef: new Uint8Array(t.toBEEF()) });
   const meshed = async (topic: string) => {
     await until(`the publisher sees the instance on ${topic}`, () => subscribers(rB, "pub", topic) > 0 || undefined);
     await sleep(1200); // a heartbeat: the instance in the publisher's mesh
@@ -294,7 +297,7 @@ try {
   const t1 = token(0);
   await t1.sign();
   await meshed("tm_demo");
-  await rB.p2p!.publish("pub", "tm_demo", new Uint8Array(t1.toBEEF()));
+  await rB.p2p!.publish("pub", "tm_demo", submitMessage(t1));
   const found1 = await until("the gossiped token is admitted and found", async () => { await rA.settled(); const l = await lookup("tm_demo"); return l.includes(`${t1.id("hex")}:0`) ? l : undefined; }, 30_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!found1, `a token published on tm_demo by the other router: judged by the manifest's topic manager, admitted on the chain app's answer (Arcade's word), found by /overlay/lookup (ls_demo) (${found1?.join(", ")})`);
   check(arcade.posts.some((b) => FakeArcade.txOf(b).id("hex") === t1.id("hex")), "the chain app broadcast it (the host's Arcade got it)");
@@ -419,8 +422,8 @@ try {
   await toBox({ fn: "register", args: { topic: "tm_reg", program: "topic-demo" } });
   const subsReg = await folded();
   const regSet = await record("overlay2/topics") as { kind?: string; topics?: Array<{ topic: string; program: string }> } | undefined;
-  const sReg = await until("the node subscribes tm_reg", () => { const s = served(); return s && ["tm_reg", "tm_reg-admit", "tm_reg-proof"].every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch(() => undefined);
-  check(subsReg === "tm_reg overlay.submit (filter beef); tm_reg-admit overlay.peerAdmit; tm_reg-proof overlay.peerProof" && regSet?.kind === "overlay-topics" && JSON.stringify(regSet.topics) === '[{"topic":"tm_reg","program":"topic-demo"}]' && !!sReg, `the owner's register {topic: tm_reg, program: topic-demo} in box overlay2: three subscriptions (${subsReg}), overlay2/topics ${JSON.stringify(regSet?.topics)}, the node subscribes them (${sReg?.topics.filter((t) => t.startsWith("tm_reg")).join(", ")})`);
+  const sReg = await until("the node subscribes tm_reg", () => { const s = served(); return s && ["tm_reg", "tm_reg-proof"].every((t) => s.topics.includes(t)) && !s.topics.includes("tm_reg-admit") ? s : undefined; }, 10_000).catch(() => undefined);
+  check(subsReg === "tm_reg overlay.submit; tm_reg-proof overlay.peerProof" && regSet?.kind === "overlay-topics" && JSON.stringify(regSet.topics) === '[{"topic":"tm_reg","program":"topic-demo"}]' && !!sReg, `the owner's register {topic: tm_reg, program: topic-demo} in box overlay2: two subscriptions, no door filter, no -admit (skein-overlay 0.12.0: ${subsReg}), overlay2/topics ${JSON.stringify(regSet?.topics)}, the node subscribes them (${sReg?.topics.filter((t) => t.startsWith("tm_reg")).join(", ")})`);
   // Every funding output is spent by now: this token spends t3's change.
   const tR = new Transaction();
   tR.addInput({ sourceTransaction: t3, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
@@ -429,7 +432,7 @@ try {
   await tR.sign();
   const stateBefore = String(await headOf("overlay2/state"));
   await meshed("tm_reg");
-  await rB.p2p!.publish("pub", "tm_reg", new Uint8Array(tR.toBEEF()));
+  await rB.p2p!.publish("pub", "tm_reg", submitMessage(tR));
   const moved = await until("overlay2 takes the token on tm_reg", async () => { await rA.settled(); return String(await headOf("overlay2/state")) !== stateBefore || undefined; }, 20_000).catch(() => false);
   const listedR = Object.keys(await (await fetch(`${rA.originOf("ov")}/overlay2/listTopicManagers`)).json() as Record<string, unknown>).sort();
   check(!!moved && JSON.stringify(listedR) === '["tm_reg","tm_two"]', `the kernel delivers tm_reg by the subscription, no row: a token published there moves overlay2/state; /overlay2/listTopicManagers ${JSON.stringify(listedR)}`);
@@ -456,7 +459,7 @@ try {
   const t4 = token(3);
   await t4.sign();
   await meshed("tm_three");
-  await rB.p2p!.publish("pub", "tm_three", new Uint8Array(t4.toBEEF()));
+  await rB.p2p!.publish("pub", "tm_three", submitMessage(t4));
   const found4 = await until("the token on tm_three is admitted and found", async () => { await rA.settled(); const l = await lookup("tm_three"); return l.includes(`${t4.id("hex")}:0`) ? l : undefined; }, 30_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!found4 && !found4.includes(`${t1.id("hex")}:0`), `a token published on tm_three: judged under tm_three (the new config), found by a lookup on tm_three (${found4?.join(", ")})`);
 

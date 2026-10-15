@@ -60,7 +60,7 @@ import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { DatabaseSync } from "node:sqlite";
 import { dirSource } from "../../src/host/boot.ts";
-import { beefOf, isBeefRecord, type BeefRecord } from "../../src/runtime/beef.ts";
+import { isBeefEnvelope, isBeefRecord, wireOf, type BeefEnvelope, type BeefRecord } from "../../src/runtime/beef.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
@@ -157,10 +157,11 @@ const ROWS = [
   { transport: "http", address: "/sendMessage", filters: ["kernel.brc104"], program: "messagebox", fn: "sendMessage" },
   // The overlay-express wire contract: /submit validated by kernel.beef (signed or not, #135); the lookup, listings
   // and documentation are read routes (addReads).
-  // #121: the submit routes name kernel.beef: the handler gets the BEEF's pointer record, never its bytes.
+  // #121, #146: the submit routes name kernel.beef: the handler gets the BEEF's envelope, never its bytes.
   { ...http("/submit", "submit"), filters: ["kernel.beef"] },
-  // #57: the same submit fn on a GossipSub topic.
-  { transport: "libp2p", address: "tm_demo", program: "overlay", fn: "submit", filters: ["kernel.beef"] },
+  // #57, skein-overlay 0.12.0: the same submit fn on a GossipSub topic, no door filter (the BEEF is inside the
+  // dag-cbor body {kind: "submit", beef}, where the door does not look; the engine checks it).
+  { transport: "libp2p", address: "tm_demo", program: "overlay", fn: "submit" },
 ];
 writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(ROWS));
 writeFileSync(join(sys, "README.md"), "An overlay node: tm_demo and ls_demo, and the chain app.\n");
@@ -222,7 +223,7 @@ async function headMap(k: K, head: string, name: string): Promise<Map<string, un
   const st = await k.store.get(c) as unknown as { maps: Record<string, CID | null> };
   return new Map(await walkMap(k, st.maps[name]));
 }
-/** The `beef` of every chain-app ingest message an instance's steps emitted (#121: a pointer record's CID, or bytes). */
+/** The `beef` of every chain-app ingest message an instance's steps emitted (#146: the door's envelope, or bytes). */
 async function ingestBeefs(file: string): Promise<unknown[]> {
   const v = openStoreFile(file, { readOnly: true });
   const out: unknown[] = [];
@@ -241,6 +242,21 @@ async function ingestBeefs(file: string): Promise<unknown[]> {
     }
   } finally { await v.close(); }
   return out;
+}
+/** The pointer record a door's envelope links (#146: the envelope sits where the bytes were), or null. */
+const pointerOf = (v: unknown): CID | null => isBeefEnvelope(v) ? CID.asCID(v.beef) : null;
+/**
+ * The wire bytes a block names: a dag-cbor envelope (#146) through its pointer record and blocks (beef.ts
+ * wireOf), else the block's own bytes (the raw block a submission's bytes were kept as).
+ */
+async function wireAt(file: string, c: CID): Promise<Uint8Array> {
+  const v = openStoreFile(file, { readOnly: true });
+  try {
+    const b = await v.bytes(c);
+    const e = c.code === 0x71 ? dagCbor.decode(b) : undefined;
+    if (!isBeefEnvelope(e)) return b;
+    return await wireOf(e, dagCbor.decode(await v.bytes(CID.asCID(e.beef)!)) as BeefRecord, async (x) => await v.bytes(x));
+  } finally { await v.close(); }
 }
 /** Each transaction as the chain state and the overlay say: [proven, unproven with its broadcast registered (or pending in the overlay), rejected]. */
 async function settledIn(k: K, txids: string[]) {
@@ -418,10 +434,15 @@ try {
   report.posted1 = posted(t1.id("hex")).map((b) => Buffer.from(b).equals(Buffer.from(t1.toEF())));
 
   await router.settled();
-  // #121: the door. The submit row names `filter: "beef"`: before the request's entry was written the kernel
+  const plainOf = (v: unknown): unknown => v instanceof Uint8Array ? Buffer.from(v).toString("hex")
+    : v instanceof CID || (v && typeof v === "object" && (v as { asCID?: unknown }).asCID === v) ? String(v)
+    : Array.isArray(v) ? v.map(plainOf)
+    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([x, y]) => [x, plainOf(y)])) : v;
+  // #121, #146: the door. The submit row names `kernel.beef`: before the request's entry was written the kernel
   // decoded the BEEF, checked its BUMP against chain/state, stored its transactions as bitcoin-tx blocks, and put
-  // the pointer record where the bytes were. Its entry carries `door`; no block in the store holds the BEEF's
-  // bytes (a grep of every block); the chain app ingested it from the record's CID; the bytes come back exactly.
+  // the envelope where the bytes were, linking the pointer record. Its entry carries `door`; no block in the store
+  // holds the BEEF's bytes (a grep of every block); the chain app ingested it from the envelope; the bytes come
+  // back exactly.
   {
     const k = await kO();
     const wire = sentBeefs[0]!;
@@ -432,31 +453,31 @@ try {
       if (rec.route === "/submit") { submitEntry = await k.store.get(e.cid) as unknown as typeof submitEntry; break; }
     }
     const rec = submitEntry ? await k.store.get(submitEntry.request) as unknown as { body: unknown } : undefined;
-    const pointer = CID.asCID(rec?.body);
+    const envelope = isBeefEnvelope(rec?.body) ? rec.body as BeefEnvelope : undefined;
+    const pointer = pointerOf(envelope);
     const v = openStoreFile(db, { readOnly: true });
     try {
       const d = new DatabaseSync(db, { readOnly: true });
       let holding = 0, total = 0;
       try { for (const row of d.prepare("SELECT bytes FROM blocks").iterate() as Iterable<{ bytes: Uint8Array }>) { total++; if (Buffer.from(row.bytes).indexOf(Buffer.from(wire)) >= 0) holding++; } } finally { d.close(); }
       const pr = pointer ? await k.store.get(pointer) as unknown as BeefRecord : undefined;
-      const back = pr && isBeefRecord(pr) ? await beefOf(pr, async (c) => await v.bytes(c)) : undefined;
+      const back = envelope && pr && isBeefRecord(pr) ? await wireOf(envelope, pr, async (c) => await v.bytes(c)) : undefined;
       const txs = await headMap(k, "chain/state", "txs");
       report.door121 = {
-        filter: (submitEntry?.door as { filters?: string[] } | undefined)?.filters?.[0], linked: !!pointer && (submitEntry?.door?.beefs ?? []).some((c) => c.equals(pointer)), kind: pr?.kind,
+        filter: (submitEntry?.door as { filters?: string[] } | undefined)?.filters?.[0], form: envelope?.form, linked: !!pointer && (submitEntry?.door?.beefs ?? []).some((c) => c.equals(pointer)), kind: pr?.kind,
         grep: [holding, total > 0], identical: !!back && Buffer.from(back).equals(Buffer.from(wire)),
         txBlocks: pr ? await Promise.all(pr.txs.map(async (c) => Buffer.from(await v.bytes(c)).toString("hex").length > 0)) : [],
         pointer: String(pointer),
         ingested: txs.has(internal(t1.id("hex")).toString("hex")),
-        ingests: (await ingestBeefs(db)).map((b) => b instanceof Uint8Array ? "bytes" : pointer && CID.asCID(b)?.equals(pointer) ? "the pointer" : String(b)),
+        ingests: (await ingestBeefs(db)).map((b) => b instanceof Uint8Array ? "bytes" : pointer && pointerOf(b)?.equals(pointer) ? "the envelope" : JSON.stringify(plainOf(b))),
       };
     } finally { await v.close(); }
   }
-  const plainOf = (v: unknown): unknown => v instanceof Uint8Array ? Buffer.from(v).toString("hex")
-    : v instanceof CID || (v && typeof v === "object" && (v as { asCID?: unknown }).asCID === v) ? String(v)
-    : Array.isArray(v) ? v.map(plainOf)
-    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([x, y]) => [x, plainOf(y)])) : v;
   // What an instance persisted for the token: every record in its overlay's `applied` and `admitted` maps, the
-  // lookup service's head. The records carry their step's time (`at`, `admittedAt`): set aside, and shown.
+  // lookup service's head. The records carry their step's time (`at`, `admittedAt`): set aside, and shown. An
+  // `applied` record's `beef` names the submission as handed — the door's envelope as a block (HTTP), or the raw
+  // block of a gossip message's bytes (skein-overlay 0.12.0) — so it is compared as the wire bytes it gives back.
+  const files: Record<string, string> = { overlay: db, gossip: gossipDb };
   const persisted = async (h: string) => {
     const k = (await router.hydrate(h)).kernel;
     const times: unknown[] = [];
@@ -465,6 +486,8 @@ try {
       for (const [kk, rec] of await headMap(k, "overlay/state", name)) {
         const { at, admittedAt, ...r } = await k.store.get(rec as CID) as unknown as Record<string, unknown>;
         times.push(at ?? admittedAt);
+        const beef = CID.asCID(r.beef);
+        if (beef) r.beef = createHash("sha256").update(await wireAt(files[h]!, beef)).digest("hex");
         out.push([kk, plainOf(r)]);
       }
       return out;
@@ -472,9 +495,10 @@ try {
     return { applied: await records("applied"), admitted: await records("admitted"), lookup: String(await k.call("head", "overlay/ls_demo")), times };
   };
 
-  // #57: the same transaction as a GossipSub message on the second instance's `libp2p:tm_demo` route.
+  // #57: the same transaction as a GossipSub message on the second instance's `libp2p:tm_demo` route: skein-overlay
+  // 0.12.0's `submit` message, dag-cbor {kind: "submit", beef}.
   const publisher = key("4444");
-  const body = new Uint8Array(t1.toBEEF());
+  const body = dagCbor.encode({ kind: "submit", beef: new Uint8Array(t1.toBEEF()) });
   const seqno = new Uint8Array(8);
   new DataView(seqno.buffer).setBigUint64(0, 1n, false);
   const peer = peerIdOf(publisher).toMultihash().bytes;
@@ -519,10 +543,11 @@ try {
   void _hl; void _gl;
   report.gossip = {
     verdict: g1.verdict, appended, boxes, posts: posted(t1.id("hex")).length, applied: httpState.applied.length, admitted: httpState.admitted.length,
+    wire: (gossipState.applied as Array<[string, { beef?: string }]>).map(([, r]) => r.beef === createHash("sha256").update(Buffer.from(t1.toBEEF())).digest("hex")),
     same: eq(httpRecs, gossipRecs), times: [httpTimes, gossipTimes], ...(eq(httpRecs, gossipRecs) ? {} : { httpState, gossipState }),
   };
-  // #121: one instance took T1 over HTTP, the other over GossipSub, each through its door (a pointer record): the
-  // stock resolver gets the same bytes from both.
+  // #121: one instance took T1 over HTTP (through its door: an envelope), the other over GossipSub (the bytes in
+  // the message): the stock resolver gets the same bytes from both.
   const lookupRaw = async (h: string) => JSON.stringify(await new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [router.originOf(h)] } }).query({ service: "ls_demo", query: { topic: "tm_demo" } }));
   report.lookupSame = [await lookupRaw("overlay") === await lookupRaw("gossip"), (await lookupRaw("overlay")).length > 2];
   // Redelivered: recorded as received, ignored (the front door's `unique` map), nothing else changed.
@@ -574,7 +599,7 @@ try {
     const k = await kO();
     const last = (await entriesSince("overlay", 0)).filter((e) => e.transport === "http").at(-1)!;
     const body = (await k.store.get(last.request!) as unknown as { body: unknown }).body;
-    report.dupeBlocks = { bitcoinAndRaw: [held0, heldBlocks()], samePointer: !!CID.asCID(body) && (report.door121 as { pointer?: string }).pointer === String(body), delivered: eq(dupeHttp, STEAK) };
+    report.dupeBlocks = { bitcoinAndRaw: [held0, heldBlocks()], samePointer: !!pointerOf(body) && (report.door121 as { pointer?: string }).pointer === String(pointerOf(body)), delivered: eq(dupeHttp, STEAK) };
   }
   // The same dupe by message (0.7.3): answered `admitted` from the state at once, the STEAK of the topics it serves.
   {
@@ -949,10 +974,11 @@ await noarcRouter.stop();
 noarcHostDb.close();
 
 // ---------------------------------------------------------------- #74: the standard overlay gossip
-// Three instances on three routers, each with a libp2p node: A (`ga`, with the host's Arcade, so a status
-// provider) and B (`gb`, no Arcade: its chain app answers only at the proof) subscribe `tm_demo` and
-// `tm_demo-proof`; C (`gc`) subscribes only `tm_demo-admit`. Every tree routes the three inbound topics to the
-// overlay (`submit`, `peerAdmit`, `peerProof`).
+// skein-overlay 0.12.0: `tm_demo` is one mesh for two kinds of dag-cbor message, {kind: "submit", beef} and
+// {kind: "admit", txid, topics}; `tm_demo-proof` carries the proofs. Three instances on three routers, each with
+// a libp2p node: A (`ga`, with the host's Arcade, so a status provider) and B (`gb`, no Arcade: its chain app
+// answers only at the proof) subscribe `tm_demo` and `tm_demo-proof`; C (`gc`, no Arcade) subscribes only
+// `tm_demo`, so no proof reaches it. Every tree routes the inbound topics to the overlay (`submit`, `peerProof`).
 const freePort = () => new Promise<number>((resolve, reject) => {
   const s = createServer();
   s.once("error", reject);
@@ -967,11 +993,10 @@ const gossipTree = (dir: string, topics: string[]) => {
   const c = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8")) as Record<string, unknown>;
   writeFileSync(join(dir, "etc/config.json"), JSON.stringify({ ...c, libp2p: { topics } }));
   writeFileSync(join(dir, "etc/dispatch.json"), JSON.stringify([...ROWS,
-    { transport: "libp2p", address: "tm_demo-admit", program: "overlay", fn: "peerAdmit" },
     { transport: "libp2p", address: "tm_demo-proof", program: "overlay", fn: "peerProof" }]));
 };
 gossipTree(join(home, "system-gossip-ab"), ["tm_demo", "tm_demo-proof"]);
-gossipTree(join(home, "system-gossip-c"), ["tm_demo-admit"]);
+gossipTree(join(home, "system-gossip-c"), ["tm_demo"]);
 const g: Partial<Record<GH, { hdb: HostDb; r: Router }>> = {};
 const arcade74 = await FakeArcade.start();
 const gr = (h: GH) => g[h]!.r;
@@ -1005,8 +1030,7 @@ try {
   const subscribers = (h: GH, topic: string) => ((gr(h).p2p?.node(h)?.services as { pubsub: { getSubscribers(t: string): unknown[] } } | undefined)?.pubsub.getSubscribers(topic).length ?? 0);
   for (const h of G) await gr(h).hydrate(h);
   await until("the three nodes see each other's topics", async () => (
-    subscribers("ga", "tm_demo") > 0 && subscribers("ga", "tm_demo-proof") > 0
-    && subscribers("ga", "tm_demo-admit") > 0 && subscribers("gb", "tm_demo-admit") > 0) || undefined);
+    subscribers("ga", "tm_demo") > 1 && subscribers("gb", "tm_demo") > 1 && subscribers("ga", "tm_demo-proof") > 0) || undefined);
 
   const kOf = async (h: GH) => (await gr(h).hydrate(h)).kernel;
   const peerAdmits = async (h: GH) => {
@@ -1035,7 +1059,8 @@ try {
   const disp = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
   const blockCid = (raw: Uint8Array) => String(CID.createV1(0xb0, Digest.create(0x56, sha256d(raw))));
   const peerKeyHex = (h: GH) => p2pSigner.peerKey(h).toPublicKey().toString();
-  // Published messages: the libp2p provider's `publish` answers are recorded; count the overlay's emits by topic.
+  // Published messages: the libp2p provider's `publish` answers are recorded; the overlay's emits by topic, and
+  // on `tm_demo` by the message's kind.
   const publishedBy = async (h: GH) => {
     const v = openStoreFile(gDb[h], { readOnly: true });
     const out: string[] = [];
@@ -1047,7 +1072,8 @@ try {
           for (const e of up.emitted ?? []) {
             const m = await v.get(e) as unknown as { kind?: string; box?: string; body?: CID };
             if (m.kind !== "mail" || m.box !== "publish" || !m.body) continue;
-            out.push(String((await v.get(m.body) as unknown as { topic: string }).topic));
+            const p = await v.get(m.body) as unknown as { topic: string; body: Uint8Array };
+            out.push(p.topic === "tm_demo" ? `${p.topic}:${(dagCbor.decode(p.body) as { kind?: string }).kind}` : p.topic);
           }
         }
       }
@@ -1076,8 +1102,8 @@ try {
   const pendingOf = async (h: GH) => headMap(await kOf(h), "overlay/state", "pending");
   const proofsOf = async (h: GH) => headMap(await kOf(h), "chain/state", "proofs");
 
-  // (1) A submission over HTTP to A: admitted on its chain app's `accepted` (Arcade's RECEIVED) → A publishes the
-  // BEEF as received on `tm_demo` and its verdict on `tm_demo-admit`.
+  // (1) A submission over HTTP to A: admitted on its chain app's `accepted` (Arcade's RECEIVED) → A publishes on
+  // `tm_demo` the BEEF as received (`submit`) and its verdict (`admit`).
   const sub = await submitFetch(`${gr("ga").originOf("ga")}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(gTok.toBEEF()) });
   report.g74submit = [sub.status, await sub.json().catch(() => undefined), await until("A admits", async () => { await gr("ga").settled(); return await steakOf(gDb.ga, gTokId); }).catch(() => undefined)];
   // B gets the raw submission by gossip, judges it, hands it to its chain app and waits: no status provider, so
@@ -1085,14 +1111,15 @@ try {
   await until("B holds the gossiped submission, pending", async () => (await pendingOf("gb")).has(gKey) || undefined);
   await settleAll();
   report.g74bPending = { pending: (await pendingOf("gb")).has(gKey), applied: (await appliedOf("gb")).size, proven: (await proofsOf("gb")).has(gKey) };
-  // C, on `tm_demo-admit` only, records A's verdict: a peer-admit record under overlay/gossip, nothing admitted.
+  // C, on `tm_demo` only, records A's verdict: a peer-admit record under overlay/gossip; A's `submit` waits on C's
+  // chain app (no status provider, no proof): nothing admitted.
   await until("C records A's admit", async () => (await peerAdmits("gc")).length > 0 || undefined);
   report.g74cFirst = (await peerAdmits("gc")).map((r) => [r.kind, r.topic, r.txid === gTokId, r.from === peerKeyHex("ga"), r.outputsToAdmit, r.coinsToRetain]);
 
   // (2) The proof: block 2 mines the token; the header to all three, the proof event to A only. A's chain app proves it
   // and answers A's watch: A publishes `tm_demo-proof`. B's peerProof route checks the BUMP against its own chain
   // state and admits it as the chain app's `proof` event (with `via`): B's chain app proves it, answers B's submission
-  // `proven` (via): admitted at the proof, `-proof` not published again; B publishes its own `tm_demo-admit`.
+  // `proven` (via): admitted at the proof, `-proof` not published again; B publishes its own `admit` on `tm_demo`.
   const f2 = "f2".repeat(32);
   const gh2 = mine(sha256d(gh1), sha256d(Buffer.concat([internal(f2), internal(gTokId)])), 1_790_020_600);
   await header({ raw: gh2 });
@@ -1126,36 +1153,45 @@ try {
   await settleAll();
   report.g74badProof = [bad.verdict, bad.reason, (await logLenOf("gb")) - bLen0, eq([await headOf("gb", "overlay/state"), await headOf("gb", "chain/state")], bState0), (await proofBlock("gb")) === blockCid(gh2)];
 
-  // (4) Late duplicates on `tm_demo`: the same BEEF from another publisher is "already judged"; A's own message
-  // redelivered past the seen-cache is the same record, already admitted: nothing runs at all.
+  // (4) Late duplicates on `tm_demo`: the same BEEF in another publisher's `submit` is "already judged"; A's own
+  // message redelivered past the seen-cache is the same record, already admitted: nothing runs at all. A raw BEEF
+  // (the wire before 0.12.0) is no message of either kind: ignored.
   const bLen1 = await logLenOf("gb");
-  const late = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo", new Uint8Array(gTok.toBEEF()), 2n));
+  const late = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo", dagCbor.encode({ kind: "submit", beef: new Uint8Array(gTok.toBEEF()) }), 2n));
+  await settleAll();
+  const raw = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo", new Uint8Array(gTok.toBEEF()), 3n));
   await settleAll();
   const kb = await kOf("gb");
-  let original: { topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array | CID } | undefined;
+  // A message's body as logged: its bytes (a large one may be a raw block of its own).
+  const bodyOf = async (b: Uint8Array | CID) => {
+    if (b instanceof Uint8Array) return b;
+    const v = openStoreFile(gDb.gb, { readOnly: true });
+    try { return await v.bytes(CID.asCID(b)!); } finally { await v.close(); }
+  };
+  let original: { topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array } | undefined;
   for (let c = await kb.tip(); c;) {
     const e = await kb.store.get(c) as unknown as { request?: CID; transport?: string; prev?: CID };
     if (e.request && e.transport === "libp2p") {
       const rec = await kb.store.get(e.request) as unknown as { kind: string; topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array | CID };
-      if (rec.kind === "p2p" && rec.topic === "tm_demo" && Buffer.from(rec.from).equals(Buffer.from(peerIdOf(p2pSigner.peerKey("ga")).toMultihash().bytes))) original = rec;
+      if (rec.kind === "p2p" && rec.topic === "tm_demo" && Buffer.from(rec.from).equals(Buffer.from(peerIdOf(p2pSigner.peerKey("ga")).toMultihash().bytes))) {
+        const body = await bodyOf(rec.body);
+        let kind: unknown;
+        try { kind = (dagCbor.decode(body) as { kind?: unknown }).kind; } catch { kind = undefined; }
+        if (kind === "submit") original = { ...rec, body };
+      }
     }
     c = e.prev;
   }
-  // #121: B's log holds A's message with the BEEF replaced by its pointer record; the bytes come back exactly
-  // (beef.ts beefOf, the encoder beside the door's decoder) — the gossip round trip: what B logged reconstructs to
-  // what A was sent over HTTP — and they are what the redelivery carries, whose GossipSub signature (over the
-  // bytes) the door checks again.
-  let restored: Uint8Array | undefined;
-  const pointerB = original ? CID.asCID(original.body) : null;
-  if (pointerB) {
-    const v = openStoreFile(gDb.gb, { readOnly: true });
-    try { restored = await beefOf(await kb.store.get(pointerB) as unknown as BeefRecord, async (c) => await v.bytes(c)); } finally { await v.close(); }
-  }
-  report.g74roundTrip = [!!pointerB, !!restored && Buffer.from(restored).equals(Buffer.from(gTok.toBEEF()))];
-  const again = original && restored ? await gr("gb").p2pInbound("gb", { transport: "libp2p", topic: original.topic, from: original.from, seqno: original.seqno, signature: original.signature, body: restored }) : undefined;
+  // #121, #146: A received the BEEF over HTTP through its door (an envelope) and published the exact bytes back
+  // (wireOf) inside its `submit` message, which the door does not open: B's log holds A's message as received, its
+  // `beef` the bytes A was sent — the gossip round trip — and the redelivery carries them, under A's GossipSub
+  // signature, which the door checks again.
+  const msgB = original ? dagCbor.decode(original.body) as { kind?: string; beef?: Uint8Array } : undefined;
+  report.g74roundTrip = [msgB?.kind, !!msgB?.beef && Buffer.from(msgB.beef).equals(Buffer.from(gTok.toBEEF()))];
+  const again = original ? await gr("gb").p2pInbound("gb", { transport: "libp2p", topic: original.topic, from: original.from, seqno: original.seqno, signature: original.signature, body: original.body }) : undefined;
   await settleAll();
   report.g74late = {
-    late: [late.verdict, late.reason], redelivered: again ? [again.verdict, again.reason] : "A's message not found in B's log",
+    late: [late.verdict, late.reason], raw: [raw.verdict, raw.reason], redelivered: again ? [again.verdict, again.reason] : "A's message not found in B's log",
     entries: (await logLenOf("gb")) - bLen1, state: (await headOf("gb", "overlay/state")) === bState0[0],
   };
   report.g74ok = true;
@@ -1189,20 +1225,20 @@ check(report.chainState === "chain-state", `the headers (events in box chain) re
 check(eq(report.submit1, { status: "success", answered: STEAK, steak: STEAK }), `TopicBroadcaster → POST /submit (0.9.2: BRC-22, synchronous): the token admitted on the chain app's answer, the STEAK answered and in the admitting step's result (${JSON.stringify(report.submit1)})`);
 check(eq(report.posted1, [true]), `#79: the chain app broadcast the token transaction the overlay handed it; the host posted it to Arcade once (Extended Format) before it was admitted (${JSON.stringify(report.posted1)})`);
 {
-  const d = report.door121 as { filter?: string; linked?: boolean; kind?: string; grep?: [number, boolean]; identical?: boolean; txBlocks?: boolean[]; ingested?: boolean; ingests?: string[] } | undefined;
-  check(d?.filter === "kernel.beef" && d.linked === true && d.kind === "beef", `#121: the submit's entry: the door ran the row's beef filter; its request names the BEEF's pointer record, listed in door.beefs (${JSON.stringify(d)})`);
+  const d = report.door121 as { filter?: string; form?: string; linked?: boolean; kind?: string; grep?: [number, boolean]; identical?: boolean; txBlocks?: boolean[]; ingested?: boolean; ingests?: string[] } | undefined;
+  check(d?.filter === "kernel.beef" && d.form === "beef" && d.linked === true && d.kind === "beef", `#121, #146: the submit's entry: the door ran the row's beef filter; its request's body is the envelope (form "beef") linking the BEEF's pointer record, listed in door.beefs (${JSON.stringify(d)})`);
   check(!!d?.grep && d.grep[0] === 0 && d.grep[1], `#121: no block in the store holds the submitted BEEF's bytes (a grep of every block: ${JSON.stringify(d?.grep)})`);
-  check(d?.identical === true && !!d.txBlocks?.length && d.txBlocks.every(Boolean), `#121: the record's bytes back (beef.ts beefOf over its blocks: each transaction a bitcoin-tx block) are the submitted bytes`);
-  check(d?.ingested === true && !!d.ingests?.length && d.ingests.every((x) => x === "the pointer"), `#121: the chain app ingested it from the pointer record's CID — every ingest message the overlay sent carries the CID, none the bytes (${JSON.stringify(d?.ingests)})`);
+  check(d?.identical === true && !!d.txBlocks?.length && d.txBlocks.every(Boolean), `#121, #146: the envelope's bytes back (beef.ts wireOf over the pointer record and its blocks: each transaction a bitcoin-tx block) are the submitted bytes`);
+  check(d?.ingested === true && !!d.ingests?.length && d.ingests.every((x) => x === "the envelope"), `#121, #146: the chain app ingested it from the envelope — every ingest message the overlay sent carries the envelope linking the pointer record, none the bytes (${JSON.stringify(d?.ingests)})`);
   const bb = report.badBump as Record<string, unknown> | undefined;
   check(eq(bb, { status: 400, code: "ERR_BEEF", entries: 0, reason: true, same: true }), `#121, #143: a bad BUMP: rejected by kernel.beef ("merkle root"), no entry, nothing runs; 400 to the client (${JSON.stringify(bb)})`);
   const db_ = report.dupeBlocks as { bitcoinAndRaw: [number, number]; samePointer: boolean } | undefined;
-  check(!!db_ && db_.bitcoinAndRaw[0] === db_.bitcoinAndRaw[1] && db_.samePointer && (db_ as { delivered?: boolean }).delivered === true, `#121: a held transaction submitted again writes no block (bitcoin and raw blocks ${JSON.stringify(db_?.bitcoinAndRaw)}), the same pointer record; answered the first STEAK from the state (0.9.2)`);
+  check(!!db_ && db_.bitcoinAndRaw[0] === db_.bitcoinAndRaw[1] && db_.samePointer && (db_ as { delivered?: boolean }).delivered === true, `#121: a held transaction submitted again writes no block (bitcoin and raw blocks ${JSON.stringify(db_?.bitcoinAndRaw)}), its envelope links the same pointer record; answered the first STEAK from the state (0.9.2)`);
   check(eq(report.lookupSame, [true, true]), `#121: the lookup answers the same bytes on the instance that took T1 over HTTP and the one that took it over GossipSub (${JSON.stringify(report.lookupSame)})`);
 }
 {
-  const gg = report.gossip as { verdict: string; appended: number; boxes: string[]; applied: number; admitted: number; same: boolean; posts: number } | undefined;
-  check(gg?.verdict === "accept" && gg.appended === 1 && eq(gg.boxes, ["libp2p:tm_demo:p2p", "overlay:submit"]) && gg.applied === 1 && gg.admitted === 1 && gg.same, `#57, #68, #79: the same transaction as a GossipSub message: one entry; accept, admitting the \`p2p\` event then the submit event into the app's own box \`overlay\`; the same applied / admitted records (but for their step times) as POST /submit produced (${JSON.stringify(gg)})`);
+  const gg = report.gossip as { verdict: string; appended: number; boxes: string[]; applied: number; admitted: number; same: boolean; posts: number; wire: boolean[] } | undefined;
+  check(gg?.verdict === "accept" && gg.appended === 1 && eq(gg.boxes, ["libp2p:tm_demo:p2p", "overlay:submit"]) && gg.applied === 1 && gg.admitted === 1 && gg.same && eq(gg.wire, [true]), `#57, #68, #79, skein-overlay 0.12.0: the same transaction as a GossipSub \`submit\` message: one entry; accept, admitting the \`p2p\` event then the submit event into the app's own box \`overlay\`; the same applied / admitted records (but for their step times) as POST /submit produced, each naming the submitted bytes (${JSON.stringify(gg)})`);
   check(gg?.posts === 2, `#57: the pubsub submission went through the same gate: the gossip instance's chain app broadcast it too (${JSON.stringify(gg?.posts)} posts of it)`);
   check(eq(report.gossipAgain, ["ignore", "already admitted", 1, true]), `#57, #68: the message redelivered: one entry, ignored, nothing else changed (${JSON.stringify(report.gossipAgain)})`);
 }
@@ -1262,18 +1298,18 @@ process.stdout.write("== overlay gossip (#74, #79)\n");
 check(report.g74ok === true, `the gossip scenario ran${report.g74error ? `: ${report.g74error}` : ""}`);
 check(eq(report.g74submit, [200, STEAK, STEAK]), `A: POST /submit (200, the STEAK) admitted on its chain app's accepted (Arcade's RECEIVED) (${JSON.stringify(report.g74submit)})`);
 check(eq(report.g74bPending, { pending: true, applied: 0, proven: false }), `A re-published the raw submission on \`tm_demo\`: B (no status provider) judged it, handed it to its chain app, waits — nothing admitted before the proof (${JSON.stringify(report.g74bPending)})`);
-check(eq(report.g74cFirst, [["peer-admit", "tm_demo", true, true, [0], []]]), `A's verdict on \`tm_demo-admit\`: C records it as a peer-admit record from A's peer key under overlay/gossip (${JSON.stringify(report.g74cFirst)})`);
+check(eq(report.g74cFirst, [["peer-admit", "tm_demo", true, true, [0], []]]), `A's \`admit\` on \`tm_demo\`: C records it as a peer-admit record from A's peer key under overlay/gossip (${JSON.stringify(report.g74cFirst)})`);
 check(eq(report.g74bAdmitted, { applied: 1, pending: false, block: true, aBlock: true, live: [[true, 0]] }), `A's chain app proved it; A published \`tm_demo-proof\`; B's route checked the BUMP against its chain state, B's chain app proved it, B admitted at the proof (${JSON.stringify(report.g74bAdmitted)})`);
 {
   const c = report.g74cBoth as { froms: string[]; want: string[]; cApplied: number } | undefined;
-  check(!!c && eq(c.froms, c.want) && c.cApplied === 0, `B published its own admit: C holds A's and B's peer-admits, and admitted nothing itself (${JSON.stringify(c)})`);
+  check(!!c && eq(c.froms, c.want) && c.cApplied === 0, `B published its own \`admit\`: C holds A's and B's peer-admits, and admitted nothing itself (no proof reaches it) (${JSON.stringify(c)})`);
 }
-check(eq(report.g74published, { a: ["tm_demo", "tm_demo-admit", "tm_demo-proof"], b: ["tm_demo-admit"] }), `what each published: A the submission, its verdict and the proof; B only its verdict (the submission and the proof came by gossip: \`via\`) (${JSON.stringify(report.g74published)})`);
+check(eq(report.g74published, { a: ["tm_demo-proof", "tm_demo:admit", "tm_demo:submit"], b: ["tm_demo:admit"] }), `what each published: A the submission and its verdict on \`tm_demo\`, and the proof; B only its verdict (the submission and the proof came by gossip: \`via\`) (${JSON.stringify(report.g74published)})`);
 check(eq(report.g74badProof, ["ignore", "the bump's root is not our header's merkle root", 1, true, true]), `a bad BUMP on \`tm_demo-proof\`: ignore (not reject), only its request entry written, B's state where it was (${JSON.stringify(report.g74badProof)})`);
-check(eq(report.g74roundTrip, [true, true]), `#121, the gossip round trip: B's log holds A's raw submission as a pointer record, and its bytes back are exactly what A was sent over HTTP (${JSON.stringify(report.g74roundTrip)})`);
+check(eq(report.g74roundTrip, ["submit", true]), `#121, #146, the gossip round trip: B's log holds A's \`submit\` message as received, its \`beef\` exactly the bytes A was sent over HTTP (${JSON.stringify(report.g74roundTrip)})`);
 {
-  const l = report.g74late as { late: unknown[]; redelivered: unknown; entries: number; state: boolean } | undefined;
-  check(!!l && eq(l.late, ["ignore", "already judged"]) && eq(l.redelivered, ["ignore", "already admitted"]) && l.entries === 2 && l.state, `late duplicates on \`tm_demo\`: "already judged" / "already admitted", each one request entry, the state unchanged (${JSON.stringify(l)})`);
+  const l = report.g74late as { late: unknown[]; raw: unknown[]; redelivered: unknown; entries: number; state: boolean } | undefined;
+  check(!!l && eq(l.late, ["ignore", "already judged"]) && eq(l.redelivered, ["ignore", "already admitted"]) && l.raw[0] === "ignore" && /not a submit or admit message/.test(String(l.raw[1])) && l.entries === 3 && l.state, `late duplicates on \`tm_demo\`: "already judged" / "already admitted", and a raw BEEF (the wire before 0.12.0) ignored as no message of either kind, each one request entry, the state unchanged (${JSON.stringify(l)})`);
 }
 
 const replay = (file: string, what: string) => {
