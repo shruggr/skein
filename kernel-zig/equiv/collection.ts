@@ -194,7 +194,7 @@ try {
   const submit = async (t: Transaction, parents: Transaction[]) => {
     const txs = [...parents, t];
     const w = new Utils.Writer();
-    w.writeUInt32LE(0x0100beef);
+    w.writeUInt32LE(0xefbe0001); // BEEF V1: 01 00 be ef
     w.writeVarIntNum(txs.length);
     for (const x of txs) w.write(x.merklePath!.toBinary());
     w.writeVarIntNum(txs.length);
