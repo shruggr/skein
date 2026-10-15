@@ -917,7 +917,7 @@ export class Router {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default" && o.image !== "open-exchange" && o.image !== "collection" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default, open-exchange and collection images and mailbox instances`);
+    if (o.image !== undefined && o.image !== "default" && o.image !== "open-exchange" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default and open-exchange images and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");

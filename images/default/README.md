@@ -42,13 +42,11 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   images/open-exchange's (#147) `apps/amm/`: shruggr/skein-amm v0.9.1
   (37ab1cb, Open Exchange, carrying skein-mandala v0.9.2 and its own engine, skein-overlay
   0.12.1's build: one engine tonight; the standalone skein-overlay app comes
-  back as `apps/overlay/` when the engine leaves amm). images/collection's
-  (#151) `apps/collection/`: shruggr/skein-collection v0.1.0 (183aa21,
-  carrying skein-overlay 0.13.0's engine). To move a pin, replace the
-  directory with the new tag's tree (`git -C ../skein-amm archive <tag> |
-  tar -x -C images/open-exchange/apps/amm` into an emptied directory) and
-  the version in src/host/boot.test.ts. (images/host, images/open-exchange
-  and images/collection have no README of their own: a file in both merged
+  back as `apps/overlay/` when the engine leaves amm). To move a pin,
+  replace the directory with the new tag's tree (`git -C ../skein-amm
+  archive <tag> | tar -x -C images/open-exchange/apps/amm` into an emptied
+  directory) and the version in src/host/boot.test.ts. (images/host and
+  images/open-exchange have no README of their own: a file in both merged
   images must be the same blob.)
 - `chain/` (#132): **not in the repo** — the host adds it. The image a
   host boots skeins from is this directory with the whole header chain at

@@ -40,7 +40,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { headTree } from "../runtime/heads.ts";
 import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, parseTree, readBlob, readTree, type Entry } from "../runtime/tree.ts";
-import { anyOf, COLLECTION_IMAGE, DEFAULT_IMAGE, dirSource, HOST_IMAGE, MemBlocks, mergeImages, OPEN_EXCHANGE_IMAGE, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, HOST_IMAGE, MemBlocks, mergeImages, OPEN_EXCHANGE_IMAGE, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import type { HostDb } from "./instances.ts";
 
 /** Headers per block (skein-sdk `image.per_block`). */
@@ -90,8 +90,6 @@ export interface ImageChainOptions {
   hostDir?: string;
   /** The Open Exchange image's own part (#147, default: the repo's images/open-exchange), merged over the static part. */
   openExchangeDir?: string;
-  /** The collection image's own part (#151, default: the repo's images/collection), merged over the static part. */
-  collectionDir?: string;
   fetch?: typeof fetch;
   log?(line: string): void;
 }
@@ -106,12 +104,12 @@ export function historyOf(feed: string | undefined): string | undefined {
   return u.toString();
 }
 
-/** The images merged over the default one (#142, #147, #151). */
-export type MergedImage = "host" | "open-exchange" | "collection";
-/** The image names a creation takes (#147, #151): `default`, `open-exchange`, `collection` (the host image is the host skein's alone). */
-export const IMAGE_NAMES = ["default", "open-exchange", "collection"] as const;
+/** The images merged over the default one (#142, #147). */
+export type MergedImage = "host" | "open-exchange";
+/** The image names a creation takes (#147): `default`, `open-exchange` (the host image is the host skein's alone). */
+export const IMAGE_NAMES = ["default", "open-exchange"] as const;
 function mergedImage(name: string): MergedImage {
-  if (name !== "open-exchange" && name !== "collection") throw new Error(`image ${JSON.stringify(name)}: this host has ${IMAGE_NAMES.join(", ")}`);
+  if (name !== "open-exchange") throw new Error(`image ${JSON.stringify(name)}: this host has ${IMAGE_NAMES.join(", ")}`);
   return name;
 }
 
@@ -250,15 +248,14 @@ export class ImageChain {
   }
 
   /**
-   * #142, #147, #151: a named image's static part — its own part merged over images/default (boot.ts
-   * mergeImages), once: `host` (images/host), `open-exchange` (images/open-exchange), `collection`
-   * (images/collection).
+   * #142, #147: a named image's static part — its own part merged over images/default (boot.ts
+   * mergeImages), once: `host` (images/host), `open-exchange` (images/open-exchange).
    */
   private mergedStatic(name: MergedImage): Promise<{ root: CID; entries: Entry[]; objects: Objects }> {
     let p = this.merged.get(name);
     if (!p) this.merged.set(name, p = (async () => {
       const base = await this.static();
-      const own = await dirSource(name === "host" ? this.o.hostDir ?? HOST_IMAGE : name === "collection" ? this.o.collectionDir ?? COLLECTION_IMAGE : this.o.openExchangeDir ?? OPEN_EXCHANGE_IMAGE);
+      const own = await dirSource(name === "host" ? this.o.hostDir ?? HOST_IMAGE : this.o.openExchangeDir ?? OPEN_EXCHANGE_IMAGE);
       const merged = new MemBlocks();
       const objects = anyOf(merged, base.objects, own.objects);
       const root = await mergeImages(objects, base.root, own.root, merged);
@@ -284,7 +281,7 @@ export class ImageChain {
     const chainObjects = { get: async (cid: CID) => this.o.db.imageBlock(cid.toString()) };
     const chain = this.o.db.setting("image_chain");
     if (named) {
-      // The host image (#142), the Open Exchange image (#147), the collection image (#151): its root is not kept in host.db; the chain part's objects are the same.
+      // The host image (#142), the Open Exchange image (#147): its root is not kept in host.db; the chain part's objects are the same.
       const root = chain ? await this.rootWith(Cid.parse(chain), s) : undefined;
       const mem = new MemBlocks();
       if (root) await mem.putBlock(root.cid, root.object);

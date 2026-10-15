@@ -414,8 +414,6 @@ export const DEFAULT_IMAGE = join(ROOT, "images/default");
 export const HOST_IMAGE = join(ROOT, "images/host");
 /** The Open Exchange image's own part (#147): merged over the default image (mergeImages) — the overlay engine and the amm app, root routes /submit, /lookup and / (the amm landing). */
 export const OPEN_EXCHANGE_IMAGE = join(ROOT, "images/open-exchange");
-/** The collection image's own part (shruggr/skein#151): merged over the default image (mergeImages) — the collection app (shruggr/skein-collection) with its engine; it registers nothing. */
-export const COLLECTION_IMAGE = join(ROOT, "images/collection");
 
 /**
  * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
