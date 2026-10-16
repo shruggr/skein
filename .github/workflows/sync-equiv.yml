@@ -42,13 +42,12 @@ jobs:
         working-directory: kernel-zig
         run: mise exec -- zig build --release
 
-      - name: kernel-zig/equiv/sync.ts
+      - name: kernel-zig/equiv/sync.ts, three times, then the blocks a replay lacks
         env:
           KEEP: "1"
-        run: node --experimental-strip-types --no-warnings kernel-zig/equiv/sync.ts
-
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-stores
-          path: /tmp/skein-kz-sync-*/*/instances/
+        run: |
+          set +e
+          st=0
+          for i in 1 2 3; do node --experimental-strip-types --no-warnings kernel-zig/equiv/sync.ts || st=1; done
+          node --experimental-strip-types --no-warnings kernel-zig/equiv/blockdiff.ts /tmp/skein-kz-sync-*/*/instances/*/runtime.db
+          exit $st
