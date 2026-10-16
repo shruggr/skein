@@ -196,6 +196,13 @@ const tipOf = async (h: Name) => { const x = await anchorsOf(h); return x.tipHei
 const sameTip = async (x: Name, y: Name) => { const [p, q] = [await tipOf(x), await tipOf(y)]; return !!p && !!q && p.genesis === q.genesis && p.tip === q.tip && p.anchor === q.anchor ? p : undefined; };
 const holdsOn = async (h: Name, txid: string) => await (await fetch(`${origin(h)}/overlay/holds?txid=${txid}`)).json() as { via?: string };
 const submit = async (h: Name, beef: number[] | Uint8Array, topics: string) => await fetch(`${origin(h)}/overlay/submit`, { method: "POST", headers: { "x-topics": topics }, body: Uint8Array.from(beef) });
+/** Until nothing moves: every running router settled, twice over a quiet second (gossip in flight lands as entries before a router stops). */
+const quiet = async () => {
+  for (let i = 0; i < 3; i++) {
+    for (const h of names) await routers[h]?.settled();
+    await sleep(1000);
+  }
+};
 const subscribers = (h: Name, topic: string) => ((r(h).p2p?.node(h)?.services as { pubsub: { getSubscribers(t: string): unknown[] } } | undefined)?.pubsub.getSubscribers(topic).length ?? 0);
 
 let overlayDir = "";
@@ -244,6 +251,7 @@ try {
   check(agree2?.tip === 2 && agree2.genesis === 2, `a (by gossip) and b agree: genesis ${agree2?.genesis}, tip ${agree2?.tip}, anchor ${agree2?.anchor.slice(0, 16)}…`);
 
   // ------------------------------------------------ a offline for three blocks; b takes a token in each
+  await quiet();
   await r("a").stop();
   const later: Transaction[] = [];
   for (let i = 1; i <= 3; i++) {
@@ -289,6 +297,10 @@ try {
   const viaWant = await until("the transfer admitted on a", async () => (await admittedIn(storeOf("a"), x.id("hex"))) || undefined, 60_000).catch(() => false);
   check(viaWant, `the transfer, posted to a without p, admitted once p came through a want (${x.id("hex").slice(0, 8)}…)`);
   check((await holdsOn("a", p.id("hex"))).via === "admitted", `a holds p now (${(await holdsOn("a", p.id("hex"))).via})`);
+  // a's admission gossips the transfer: b takes it, and c (which lacks p) pauses it and wants p of the topic's peers.
+  const everywhere = await until("b and c admit the transfer", async () => ((await admittedIn(storeOf("b"), x.id("hex"))) && (await admittedIn(storeOf("c"), x.id("hex")))) || undefined, 60_000).catch(() => false);
+  check(everywhere && (await holdsOn("c", p.id("hex"))).via === "admitted", "the transfer gossiped from a: b admits it, c admits it once p comes through its own want");
+  await quiet();
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
