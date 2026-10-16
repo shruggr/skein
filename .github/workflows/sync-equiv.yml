@@ -43,4 +43,12 @@ jobs:
         run: mise exec -- zig build --release
 
       - name: kernel-zig/equiv/sync.ts
+        env:
+          KEEP: "1"
         run: node --experimental-strip-types --no-warnings kernel-zig/equiv/sync.ts
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-stores
+          path: /tmp/skein-kz-sync-*/*/instances/
