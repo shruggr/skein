@@ -367,6 +367,37 @@ export class ImageChain {
 }
 
 /**
+ * shruggr/skein#150: the chain app's best-chain header at `height` (the head `chain/state`, map
+ * `headers`: the MST height (u32 big-endian) → header): its hash (display hex) and merkle root
+ * (display hex); undefined when the chain state holds none there.
+ */
+export async function chainHeader(store: Store, height: number): Promise<{ hash: string; root: string } | undefined> {
+  const state = await headTree(store, "chain/state");
+  if (!state) return undefined;
+  const v = await store.get(state).catch(() => undefined) as { kind?: string; maps?: { headers?: CID | null } } | undefined;
+  const key = Buffer.alloc(4);
+  key.writeUInt32BE(height);
+  let node = v?.kind === "chain-state" ? v.maps?.headers ?? undefined : undefined;
+  while (node) {
+    const [left, es] = dagCbor.decode(await store.bytes(node)) as [CID | null, Array<[Uint8Array, unknown, CID | null]>];
+    let next: CID | null = left;
+    let found: unknown;
+    for (const [k, val, right] of es) {
+      const c = Buffer.compare(Buffer.from(k), key);
+      if (c === 0) { found = val; break; }
+      if (c > 0) break;
+      next = right;
+    }
+    if (found) {
+      const raw = await store.bytes(found as CID);
+      return { hash: display(sha256d(raw)), root: Buffer.from(raw.subarray(36, 68)).reverse().toString("hex") };
+    }
+    node = next ?? undefined;
+  }
+  return undefined;
+}
+
+/**
  * #141: a skein's chain tip as its store holds it: the chain app's state (the head `chain/state`,
  * {kind: "chain-state", maps: {headers}} — the MST height (u32 big-endian) → header, skein-sdk
  * chain.zig; its last key is the tip), else the chain part of the tree it was born from (`main`'s

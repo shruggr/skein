@@ -209,8 +209,8 @@ export interface ProvidersOptions {
   log?(source: string, line: string): void;
 }
 
-/** The events the libp2p node's wiring takes (`topicEvent`): subscriptions (#119), beacons (#126), liveness (#138). */
-const TOPIC_EVENTS: readonly string[] = ["subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness"];
+/** The events the libp2p node's wiring takes (`topicEvent`): subscriptions (#119), beacons (#126), liveness (#138), an overlay's wants (#112, #150). */
+const TOPIC_EVENTS: readonly string[] = ["subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant"];
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
 /** The fetch provider's refusal of a response over the request's `maxBytes` (#91). */

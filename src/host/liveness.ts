@@ -77,6 +77,8 @@ export class Liveness {
   private beats = new Map<string, Map<string, Map<string, LiveBeat>>>();
 
   private readonly now: () => number;
+  /** Told each beat newly kept (shruggr/skein#150: the overlay's sync reads a peer's tip anchor from it). */
+  kept?: (handle: string, topic: string, beat: LiveBeat) => void;
   constructor(now: () => number = Date.now) { this.now = now; }
 
   /** `handle`'s apps keep this liveness now: the beats of topics none keeps any more are dropped. */
@@ -118,7 +120,11 @@ export class Liveness {
     if (!bySender) byTopic.set(topic, bySender = new Map());
     const sender = Buffer.from(b.sender).toString("hex");
     const was = bySender.get(sender);
-    if (!was || b.at > was.at) bySender.set(sender, { sender, at: b.at, body: b.body, from });
+    if (!was || b.at > was.at) {
+      const beat = { sender, at: b.at, body: b.body, from };
+      bySender.set(sender, beat);
+      this.kept?.(handle, topic, beat);
+    }
     // The stale ones go as the set is touched.
     for (const [k, x] of bySender) if (now - x.at >= window) bySender.delete(k);
     return "accept";
@@ -130,6 +136,14 @@ export class Liveness {
     if (!l) return undefined;
     const now = this.now();
     return [...(this.beats.get(handle)?.get(topic)?.values() ?? [])].filter((b) => now - b.at < l.window).sort((x, y) => y.at - x.at);
+  }
+
+  /** Every beat live on `topic` at `handle` (newer than the longest window on it), whichever app keeps it. */
+  live(handle: string, topic: string): LiveBeat[] {
+    const window = this.windowOf(handle, topic);
+    if (window === undefined) return [];
+    const now = this.now();
+    return [...(this.beats.get(handle)?.get(topic)?.values() ?? [])].filter((b) => now - b.at < window);
   }
 
   /** Forget `handle`: its liveness and its beats. */

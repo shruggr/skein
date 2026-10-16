@@ -126,15 +126,16 @@ import { rootOf } from "./install.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
-import { historyOf, ImageChain, skeinTip } from "./image-chain.ts";
+import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
+import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { DoorAnswered, Kernel } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
-import { beaconEvent, beaconsOf, DEFAULT_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
-import { peerIdFromMultihash } from "@libp2p/peer-id";
+import { beaconEvent, beaconsOf, DEFAULT_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
+import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
@@ -345,6 +346,8 @@ export class Router {
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
   readonly p2p?: P2PHost;
+  /** shruggr/skein#150: overlay sync over the libp2p node (sync.ts). */
+  readonly sync?: OverlaySync;
   /** The host's providers (#70): what carries the instances' messages out. */
   readonly providers: Providers;
   /** #148: the pages' subscriptions to their apps' emitted events (GET /<app>/.events), per instance. */
@@ -431,6 +434,25 @@ export class Router {
         // #126: a beacon's beat signed by the instance's signer, as an intention request is.
         sign: (h, data) => this.signAs(h, data),
         identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
+        hostProtocols: { [SYNC_PROTOCOL]: (h, remote, frame) => this.sync!.serve(h, remote.toString(), frame) },
+        beat: (h, topic, b) => this.sync?.beat(h, topic, b),
+      });
+      const p2pHost = this.p2p;
+      this.sync = new OverlaySync({
+        overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
+        read: (h, app, path, query) => this.appRead(h, app, path, query),
+        deliver: (h, peer, beef) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef }),
+        header: async (h, height) => {
+          const row = this.o.db.get(h);
+          if (!row || !existsSync(row.store)) return undefined;
+          const st = openStoreFile(row.store, { readOnly: true });
+          try { return await chainHeader(st, height); } finally { st.close(); }
+        },
+        request: (h, peer, body) => p2pHost.request(h, peer, SYNC_PROTOCOL, body),
+        subscribers: (h, topic) => p2pHost.subscribers(h, topic),
+        beats: (h, liveTopic) => p2pHost.live.live(h, liveTopic),
+        self: (h) => p2pHost.peerId(h),
+        log: (s, l) => this.say(s, l),
       });
     }
     // Without a host's own provider keys: a router's own, fresh (a test's).
@@ -561,6 +583,7 @@ export class Router {
 
   private async shutdown(): Promise<void> {
     this.stopped = true;
+    this.sync?.stop();
     // Clients waiting on a thread are answered 503 + Retry-After before the servers close (#66).
     this.stopNow();
     if (this.inflight.size) {
@@ -796,6 +819,8 @@ export class Router {
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
+    // shruggr/skein#112: the wants standing in the log, asked again.
+    if (this.sync) this.sync.standing(handle, await this.foldWants(row.store).catch((e) => { this.say(handle, `sync: the wants not read: ${(e as Error).message}`); return [] as Want[]; }));
     await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
@@ -1132,6 +1157,7 @@ export class Router {
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
     if (rec.event === "beacon" || rec.event === "unbeacon") return this.beaconEvent(handle, rec);
+    if (rec.event === "want" || rec.event === "unwant") return this.wantEvent(handle, rec);
     if (rec.event === "liveness" || rec.event === "unliveness") return this.livenessEvent(handle, rec);
     const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
@@ -1221,6 +1247,33 @@ export class Router {
       this.say(handle, `events: ${(e as Error).message}`);
       if (res.headersSent) res.end(); else answer(json(500, { status: "error", code: "ERR_INTERNAL", description: (e as Error).message }));
     }
+  }
+
+  /**
+   * A `want` / `unwant` event from `handle`'s overlay (shruggr/skein#112, #150): the sync asks peers
+   * for the transaction while it stands (sync.ts). An instance still loading reads it from its log.
+   */
+  private wantEvent(handle: string, rec: Record<string, unknown>): void {
+    const e = wantEvent(rec);
+    if ("refused" in e) { this.say(handle, `sync: ${String(rec.event)}: ${e.refused}`); return; }
+    this.sync?.want(handle, e);
+  }
+
+  /** shruggr/skein#112: the overlays' standing wants, folded from the instance's log (`want` minus `unwant`). */
+  private async foldWants(store: string): Promise<Want[]> {
+    if (!this.sync || !existsSync(store)) return [];
+    const s = openStoreFile(store, { readOnly: true });
+    try { return foldWants(await emittedEvents(s, (rec) => { const e = wantEvent(rec); return "refused" in e ? undefined : e; })); } finally { s.close(); }
+  }
+
+  /** An app's read route at `/<app><path>` (shruggr/skein#150: the overlay's `/anchors`, `/admitted`, `/holds`), its JSON answer. */
+  private async appRead(handle: string, app: string, path: string, query: Record<string, string>): Promise<unknown> {
+    const l = await this.hydrate(handle);
+    const qs = new URLSearchParams(query).toString();
+    const route = `/${app}${path}`;
+    const a = await serveHttp(l.kernel, { method: "GET", path: route, route, query: qs ? `?${qs}` : "", headers: {}, body: new Uint8Array() }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+    if (a.status !== 200) throw new Error(`${route}: ${a.status} ${Buffer.from(a.body).toString("utf8").slice(0, 200)}`);
+    return JSON.parse(Buffer.from(a.body).toString("utf8"));
   }
 
   /**

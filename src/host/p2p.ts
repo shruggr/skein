@@ -81,7 +81,7 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
 import { verifyAnyone } from "../runtime/identity.ts";
-import { Liveness, type Live } from "./liveness.ts";
+import { Liveness, type Live, type LiveBeat } from "./liveness.ts";
 
 export type DhtMode = "off" | "client" | "server";
 
@@ -150,6 +150,14 @@ export interface P2POptions {
   identity?(handle: string): Promise<Uint8Array | undefined>;
   /** How often topics are re-advertised and looked up in the DHT, and bootstrap peers redialled (ms). */
   discoveryMs?: number;
+  /**
+   * Protocols the host itself serves on every node, beside /skein/message/1.0.0 (shruggr/skein#150:
+   * the overlay's sync): each inbound frame answered by the handler, its answer written back; nothing
+   * reaches the front door.
+   */
+  hostProtocols?: Record<string, (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>>;
+  /** Each beat the liveness tool newly keeps from another peer (shruggr/skein#150). */
+  beat?(handle: string, topic: string, beat: LiveBeat): void;
 }
 
 // ---------------------------------------------------------------- keys and IDs
@@ -467,7 +475,10 @@ export class P2PHost {
   private starting = new Map<string, Promise<unknown>>();
   private stopped = false;
 
-  constructor(o: P2POptions) { this.o = o; }
+  constructor(o: P2POptions) {
+    this.o = o;
+    if (o.beat) this.live.kept = (h, topic, b) => { if (b.from !== this.peerId(h)) o.beat!(h, topic, b); };
+  }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
 
@@ -514,8 +525,8 @@ export class P2PHost {
     const was = n.config;
     const added = config.topics.filter((t) => !was.topics.includes(t));
     const removed = was.topics.filter((t) => !config.topics.includes(t));
-    const addedP = config.protocols.filter((p) => !was.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
-    const removedP = was.protocols.filter((p) => !config.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
+    const addedP = config.protocols.filter((p) => !was.protocols.includes(p) && !this.hostServed(p));
+    const removedP = was.protocols.filter((p) => !config.protocols.includes(p) && !this.hostServed(p));
     if (!added.length && !removed.length && !addedP.length && !removedP.length) { n.config = { ...config, listen: was.listen }; return; }
     n.config = { ...config, listen: was.listen };
     this.resubscribe(n);
@@ -560,6 +571,28 @@ export class P2PHost {
     for (const t of added) this.say(handle, `libp2p: liveness ${t} (app ${lives.filter((l) => l.topic === t).map((l) => l.app).join(", ")})`);
     for (const t of removed) this.say(handle, `libp2p: ${t} left`);
     if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
+  }
+
+  /** Whether the host serves `protocol` on every node itself (/skein/message/1.0.0, `hostProtocols`). */
+  private hostServed(protocol: string): boolean { return protocol === MESSAGE_PROTOCOL || protocol in (this.o.hostProtocols ?? {}); }
+
+  private async handleHostProtocol(n: Node, protocol: string, f: (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>): Promise<void> {
+    await n.node.handle(protocol, (stream, connection) => {
+      void (async () => {
+        const lp = lpStream(stream);
+        try {
+          for (;;) {
+            let frame: Uint8Array;
+            try { frame = (await lp.read()).subarray(); } catch { break; }
+            await lp.write(await f(n.handle, connection.remotePeer, frame));
+          }
+          await stream.close().catch(() => {});
+        } catch (e) {
+          this.say(n.handle, `libp2p: ${protocol} from ${connection.remotePeer}: ${(e as Error).message}`);
+          stream.abort(e as Error);
+        }
+      })();
+    }, { runOnLimitedConnection: true });
   }
 
   private async handleProtocol(n: Node, protocol: string): Promise<void> {
@@ -608,7 +641,9 @@ export class P2PHost {
     this.nodes.set(handle, n);
     if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(handle, `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
     this.resubscribe(n);
-    for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
+    const host = this.o.hostProtocols ?? {};
+    for (const protocol of [...config.protocols.filter((p) => !(p in host)), ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
+    for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
     const discover = () => void this.discover(n).catch((e) => this.say(handle, `libp2p: discovery: ${(e as Error).message}`));
     setTimeout(discover, 200);
@@ -769,6 +804,32 @@ export class P2PHost {
       }
     })();
     return id;
+  }
+
+  /**
+   * One request to a peer on `protocol` (a host protocol, shruggr/skein#150): a stream opened, one
+   * frame written, one frame read back, the stream closed. → the answer's bytes.
+   */
+  async request(handle: string, peer: string, protocol: string, body: Uint8Array, timeoutMs = 15_000): Promise<Uint8Array> {
+    const n = this.nodeOf(handle);
+    const signal = AbortSignal.timeout(timeoutMs);
+    const stream = await n.node.dialProtocol(peerIdFromString(peer), protocol, { signal });
+    try {
+      const lp = lpStream(stream);
+      await lp.write(body, { signal });
+      const answer = (await lp.read({ signal })).subarray();
+      await stream.close().catch(() => {});
+      return answer;
+    } catch (e) {
+      stream.abort(e as Error);
+      throw e;
+    }
+  }
+
+  /** The peers `handle`'s node knows subscribe `topic` (GossipSub's view), as peer ID strings. */
+  subscribers(handle: string, topic: string): string[] {
+    const n = this.nodes.get(handle);
+    return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
   }
 
   /** Write one length-prefixed frame on a dialled stream. */
