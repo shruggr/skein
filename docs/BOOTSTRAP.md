@@ -44,67 +44,79 @@ images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
   bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows (no route to the wallet);
-                                          no explorer row (#121: the claim writes it with the owner's key)
-  etc/apps.json                           the apps installed at birth (#141) and the owner's read at `/`
-  etc/routes.json                         empty
+                                          the explorer row (root's)
   etc/config.json                         {collect: []}
-  apps/chain/, apps/git/, apps/site/      shruggr/skein-chain v0.6.0, skein-git v0.1.3, skein-site v0.10.0: each the tag's git tree
   chain/headers/<first>, chain/tip        the chain part (#132): not in the repo — the host adds it (below)
 ```
 
-It has the four tables, the programs needed to be reachable (the front
+It has the four tables and the programs needed to be reachable (the front
 door, the messagebox) and to pay its host (the wallet), wired by the
-genesis with no app records; and **three apps installed at birth** (#141):
-
-- **chain** — the chain app, so the chain data the image carries and the
-  app that reads it arrive together: its first step loads `chain/headers`
-  into `chain/state`, and the host's headers feed is attached from the
-  skein's creation (below, "The image's chain part").
-- **git** — the app every other app is installed through (by hash, docs/APPS.md §3).
-- **site** — the management page, under `/site/` (its own read) and at `/`
-  (the owner's read, `{address: "/", prefix: true, program: <site's
-  program>, fn: "get", root: "www"}`): a new skein answers its page at its root.
-
-They are installed **as apps**: each has its app record under `<app>/app`,
-its rows (each with `app`) and its reads in the `reads` head, exactly what
-installing it by messages writes — so the owner upgrades or uninstalls
-them like any other app, and an app's state stays its own. `etc/apps.json`
-names them:
-
-```json
-{ "install": ["apps/chain", "apps/git", "apps/site"],
-  "reads": [{ "address": "/", "prefix": true, "program": "site.site", "fn": "get", "root": "www" }] }
-```
-
-The loader (`boot`, src/host/boot.ts `installAtBirth`) plans each with
-src/host/plan.ts — `readStoredApp` over the app's tree in the image,
-`planInstall` against the instance as its genesis will stand,
-`planRootRoute` for root's route at `/` — puts the records into the store,
-appends the routes to the genesis's `dispatch`, and names the heads in the
-genesis's `heads` (`{"chain/app": <record>, "git/app": …, "site/app": …}`),
-which the kernel advances when it processes the genesis, after the routes
-(as `tree` sets `main`). The CIDs are an install's, with no difference
-(#143: no route names a sender, and the install grants no key — what was
-"from `$owner`" is a function gated by root in the app's `roles`, git's
-`call`; the claim grants root).
+genesis. **It has no apps** (#152): chain, git and site are apps like any
+other, installed by root's messages after the claim (`skein install
+<dir>`; README, "Run a skein locally"), so the owner upgrades them by
+installing a newer version, which keeps each app's state (docs/APPS.md,
+"Reconfiguration"). Nothing answers at `/` until root routes it.
 
 - **The explorer** is a route of every genesis (`/explore` and below,
   behind `kernel.brc104`, the front door's `explore` gated by root). Before
   the claim nobody holds root: 403.
+
+### Apps at birth (#141, #152)
+
+An image may list apps to install at birth in `etc/apps.json`
+(images/README.md): `{install: [<entry>], routes?: [<root's own route>]}`,
+each entry one app —
+
+- a **directory**, relative to the image: a directory of its tree, or one
+  beside it (`..`, `../<dir>`, an absolute path), which the host reads from
+  disk when it boots the image from its directory (src/host/boot.ts
+  `imageDir`, the BootSource's `apps`), scanned as `skein install <dir>`
+  scans one (install.ts `appIgnore`). An app repository carries its image as
+  `image/` listing `..`;
+- a **release tarball** `{url, hash}`, `hash` the git id of the app's tree
+  (40 hex: `git rev-parse <tag>^{tree}`). The loader (`appTarball`) takes
+  the tree from the source if it holds it; else it fetches `url`, unpacks
+  it (gzip or plain tar; a tarball of one directory, as a tag's archive is,
+  is that directory), scans it, and refuses it unless its tree is `hash`.
+
+The loader (`boot`, `installAtBirth`) installs each as a directory install:
+the app's objects put into the store, then planned with src/host/plan.ts —
+`readStoredApp` over the app's tree, `planInstall` against the instance as
+its genesis will stand — its records put, its routes (each with `app`)
+appended to the genesis's `dispatch`, and its head `<app>/app` named in the
+genesis's `heads`, which the kernel advances when it processes the genesis,
+after the routes. The CIDs are an install's, with no difference. An app
+with a `start` message is refused at birth: a genesis carries no message,
+and the start is root's (install it after the claim). `routes` are root's
+own (no `app`: an upgrade or uninstall of an app leaves them), added after
+the apps by `planRootRoute`; a handler may name `<app>.<role>` of an app
+installed above it, which the loader resolves to that app's program record.
+Replay copies the records the heads name and the trees they link
+(kernel-zig/src/replay.zig `copyRecords`), so an app's tree need not be in
+the image's.
+
 ### The host image and the host skein (#142)
 
 The host skein is made from the **host image**: `images/host` merged over
 `images/default`. Images are starting trees that merge: `images/host` holds
-only what it adds — `apps/onboard/` (shruggr/skein-onboard v0.3.4, the
-tag's git tree) and `etc/apps.json` `{"install": ["apps/onboard"]}`.
+only what it adds — `etc/apps.json` naming shruggr/skein-onboard v0.4.0 by
+its release tarball:
+
+```json
+{ "install": [{ "url": "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz",
+                "hash": "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae" }] }
+```
+
 The merge (src/host/boot.ts `mergeImages`) adds every path of the host part
 to the default image's tree: a directory in both is merged, a file in both
 must be the same blob, and `etc/apps.json` lists are joined (an app in
-both is refused); any other path in both is refused, by its path. The
-installer's own checks (no route with a key another app has, the heads)
-run when the merged image's four apps — chain, git,
-site, onboard — are installed at birth. The chain part is added to the
-merged tree as to the default one.
+both is refused; a root route of the part at the same transport, address
+and prefix as one of the base's replaces it); any other path in both is
+refused, by its path. The installer's own checks (no route with a key
+another app has, the heads) run when the merged image's app is installed at
+birth. The chain part is added to the merged tree as to the default one.
+`skein-host add <h> --image host` boots an unclaimed skein from the same
+image.
 
 The host skein's genesis **names its root** (#143: `root: [<key>]`): the
 operator's key (`$SKEIN_HOME/operator.key`, below "Commands"). Booted with
@@ -115,50 +127,15 @@ birth from the host's settings (`config.onboard`: `domain` from
 `origin` from `SKEIN_ROUTER_ORIGIN`; `name` from `SKEIN_HOST_NAME`; `note`
 from `SKEIN_HOST_NOTE`), merged over the manifest's as an install's
 `--config` is: that app record is this host skein's own. No claim route, no
-claim entry: the skein is published at once. A user skein is unchanged: it
-boots from the default image and is claimed (below).
+claim entry: the skein is published at once. Chain, git and site are
+installed into it by the operator's messages, as into any skein
+(scripts/host/up.sh does). A user skein is unchanged: it boots from the
+default image and is claimed (below).
 
 The settings shape the host skein once, at its birth. A later change to
 host.env does not reach into it; to change the onboarding app's config, the
 operator installs the same tree again with `--config` (`skein install
-images/host/apps/onboard --instance host --config <file.json>`).
-
-### The Open Exchange image (#147)
-
-`images/open-exchange` merged over `images/default`, as the host image is:
-the default image's three apps and `apps/amm/` (shruggr/skein-amm v0.9.1,
-the tag's git tree), installed at birth after them. amm carries
-skein-mandala v0.9.0 and its own overlay engine (`bin/overlay.wasm`,
-skein-overlay 0.11.0's build), so tonight the image has **one engine, amm's**.
-The standalone engine app (shruggr/skein-overlay) returns when the engine
-leaves amm: amm and mandala then register into it (decided 2026-10-08);
-amm 0.9.1 is not there yet. Its `etc/apps.json` names root's own routes:
-
-- `POST /submit` → amm's engine's submit handler: `{transport: "http",
-  address: "/submit", filters: ["kernel.beef"], program: "amm.overlay",
-  fn: "submit"}`. A root route's handler may name `<app>.<role>`, an app
-  installed at birth above it (as `skein routes add` takes it): the loader
-  resolves it to that app's program record.
-- `POST /lookup` → the engine's lookup filter: the read route
-  `{transport: "http", address: "/lookup", filters: ["amm.lookup"]}`.
-- `/` → the amm app's landing: the read route `{transport: "http",
-  address: "/", prefix: true, filters: ["amm.page"], root: "www", index:
-  "index.html"}`. It replaces the default image's `/` (the site): in the
-  merge, a root route of the part at the same transport, address and
-  prefix as one of the base's replaces it. The site stays at its own app
-  path, `/site/`.
-
-The @bsv/sdk clients take a bare origin as an overlay host and post to
-`<origin>/submit` and `<origin>/lookup` (skein-overlay docs/OVERLAY.md
-"Root routes"); amm's own `/amm/submit` and `/amm/lookup` stay. Nothing
-registers at runtime. The discovery topic `tm_mandala` is registered by
-root's `register` message after the birth (skein-amm README: "registered
-by `register` alone"); the image does not do it.
-
-A user skein is made from it by name: `skein-host add <handle> --image
-open-exchange`, or a creation with `image: "open-exchange"` (the
-manager's `create`; src/host/image-chain.ts `source({image})`), with the
-chain part added as to the default image, unclaimed as from the default.
+<a skein-onboard checkout> --instance host --config <file.json>`).
 
 ### The image's chain part (#132)
 
@@ -201,21 +178,20 @@ bytes (`src/host/image-chain.ts`):
   `chain` tree in `host_settings` (`image`, `image_chain`). The static part
   is scanned from the repo as before.
 
-**A skein is born with the chain up to the current tip, and the chain app
-to read it** (#141): the instance manager's `create` (and `skein-host
-init`, `skein-host add <h> --image default`) boots from the image as it
-stands — after the first fill at start — so its tree, and its store, carry
-`chain/headers`, and its table the chain app's event row. The chain app
-(shruggr/skein-chain 0.4.0) loads them into its empty `chain/state` at its
-first step (it reads `main`, the genesis's tree; its docs/CHAIN.md, "Born
-with the chain"). Replay: the image tree is the genesis's, so the chain app
-loads the same; nothing new is in the log.
+**A skein is born with the chain up to the current tip**: the instance
+manager's `create` (and `skein-host init`, `skein-host add <h> --image
+default`) boots from the image as it stands — after the first fill at
+start — so its tree, and its store, carry `chain/headers`. The chain app
+(shruggr/skein-chain), once root installs it (#152), loads them into its
+empty `chain/state` at its first step (it reads `main`, the genesis's tree;
+its docs/CHAIN.md, "Born with the chain"). Replay: the image tree is the
+genesis's, so the chain app loads the same; nothing new is in the log.
 
-**The feed from the first second** (#141). The host subscribes a skein to
-its headers feed while its table has a row taking events in box `chain`
-(#102) — with the chain app in the image, from its creation (`create`
-subscribes it as it enables it; an instance added offline, at its first
-load). On subscribing (and on every resubscription: a host restart, a skein
+**The feed** (#141). The host subscribes a skein to its headers feed while
+its table has a row taking events in box `chain` (#102): from the chain
+app's install (the table followed live), or from its creation when an
+image installs the chain app at birth (`create` subscribes it as it enables
+it; an instance added offline, at its first load). On subscribing (and on every resubscription: a host restart, a skein
 enabled again) the host first pushes the headers the skein lacks — from its
 tip (its `chain/state`'s last header, else its tree's `chain/tip`) to the
 host's, read from the image's chain part in turn with its writes, in runs of
@@ -240,7 +216,9 @@ alone, as before.
 The image's genesis is written by `skein-host add <h> --image <spec>`:
 
 - `default` (the default image as this host holds it: `images/default` with
-  its chain part, #132), a directory, or a tree CID with `--from <store.db>`;
+  its chain part, #132), `host` (the host image, above, with the same chain
+  part), a directory (#152: the apps its `etc/apps.json` names beside it read
+  from there), or a tree CID with `--from <store.db>`;
 - an outpoint (`<txid>_<vout>`) is refused for now: an image on chain is read
   through the ORDFS app, which is not built yet.
 
@@ -322,7 +300,7 @@ etc/dispatch.json        the routes (#77, #143): [{transport?: mailbox | event |
                          libp2p topic / "/<protocol>"; the program a bin/ name, a CID, or "kernel" with fn the
                          operation; no program: an http read route (its filters answer). No sender (#143). Required.
                          A tree that names no http route gets the default ones (each dropped when its program is lacking).
-etc/apps.json            optional (#141): {install: [<an app's tree>], routes?: [<root's own route>]}
+etc/apps.json            optional (#141, #152): {install: [<directory> | {url, hash}], routes?: [<root's own route>]} ("Apps at birth")
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
@@ -474,8 +452,8 @@ There are three ways to install an app.
   instance with no route at box `git` is refused before anything is sent;
   git's `call` is root's (#143), so a key without root gets nothing back. A directory is read on the client's machine and the objects the
   instance lacks are sent (`objects`, ≤ 1 MiB per message, a larger record
-  alone in its own); a tree the instance holds already (an image's app,
-  `images/default/apps/<app>`) sends only the head and what changes.
+  alone in its own); a tree the instance holds already (an app installed
+  before, an image's app) sends only the head and what changes.
 
   The checks (docs/APPS.md §2, §3; src/host/manifest.ts, plan.ts): every
   `requires` interface provided by an installed app's `*/app` head; the
@@ -625,7 +603,7 @@ skein-host system <dir>                                   the default system tre
 skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
-skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no root, the claim route (#89)
+skein-host add <h> --image <default | host | dir | tree-cid [--from store.db]>  an image: no root, the claim route (#89)
 skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 ```
 
@@ -696,12 +674,18 @@ boot is written, and the process exits 0.
   boots from the same image; replayed.
 - `src/host/boot.test.ts` also resolves the default image: no root, the
   admin routes and the claim route, the explorer behind `kernel.brc104`
-  (root's), no http route at `/`, `/site` or `/manifest.json`; a sender or
-  `$owner` refused (#143); and (#141) its apps at birth: the records of
-  chain, git and site in the store, their routes with `app`, root's read
-  route at `/`, the heads `chain/app`, `git/app`, `site/app`, chain's app
-  record and routes the same CIDs as an install by messages over the same
-  tree.
+  (root's), no http route at `/`, `/site` or `/manifest.json`, no
+  `etc/apps.json` (#152); a sender or `$owner` refused (#143); an image's
+  apps at birth (#141, #152), copies of app-demo as a directory of the
+  image, a directory beside it and a tarball served locally by `{url,
+  hash}`: their objects and records in the store, their routes with `app`,
+  root's route at `/`, the heads, the first app's record and routes the
+  same CIDs as an install by messages over the same tree; a tarball whose
+  tree is not its hash, a missing tarball, a directory beside an image read
+  from its tree alone and an app with a `start` refused; the host image
+  naming skein-onboard v0.4.0 by tarball; `skein-host add --image host`
+  booting unclaimed with the onboarding app, `--image default` with no app,
+  another name refused.
 - `src/host/image-chain.test.ts` and `src/host/feeds.test.ts` (#141): the
   backfill — a skein whose tip lags the image's gets the headers it lacks,
   in order; one at the tip, past it or with no tip none; a forked tip from
@@ -709,23 +693,25 @@ boot is written, and the process exits 0.
   subscribing, live headers wait behind the backfill (pushed as runs), one
   it carries not pushed twice.
 - `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
-  image serves the site at `/`, `/site/` and `/manifest.json` and its
-  genesis names the heads of its apps (#141), answers nobody's explorer read and
+  image serves nothing at `/`, `/site/` and `/manifest.json` and its
+  genesis names no head (#152), answers nobody's explorer read and
   refuses the owner's admin messages; the owner's own claim (sent on its
   session; a key in its body not read) writes the
   sender's admin rows, removes the claim row, sets the head `claim` and the
   owner's address-book entry, and the owner reads the explorer (another key
-  does not); a stranger's claim after it is refused; `skein install
-  images/default/apps/git --instance` adds git's owner row (#142: the head
-  again and that row); the owner installs app-demo and calls it; an owned instance refuses a claim; `add --image
+  does not); a stranger's claim after it is refused; `skein install <dir>
+  --instance` of chain, git and site and `skein routes add … /` over the
+  control socket, after which the site serves `/`, `/site/` and
+  `/manifest.json`, and installing git again sends only its head; the owner
+  installs app-demo and calls it; an owned instance refuses a claim; `add --image
   default` and the refused outpoint form; a claim signed before the
   instance existed (no recipient), forwarded, makes its signer the owner,
   and a recipient-less message in another box is not admitted; the stores
   replayed.
 - `src/host/manager.test.ts`: the instance manager (#90) on signed
   messages: the host skein (#142: from the host image, the operator's admin
-  rows, explorer row and git's owner row at birth, no claim row, a claim
-  refused) with the manager in its address book; `create`
+  rows, explorer row and the onboarding app, its only app, at birth, no
+  claim row, a claim refused) with the manager in its address book; `create`
   forwards the owner's own signed claim into the child before it is
   published (#127: the claim its first entry; no claim, another key's or a
   forged one refused, the child left unpublished), the
@@ -751,11 +737,12 @@ boot is written, and the process exits 0.
   sent; replayed.
 - `kernel-zig/equiv/site.ts` (in `run.sh`, #92): the management site in
   headless Chrome on a host skein (#142: owned by the operator's key at
-  birth, the site and the onboarding app installed at birth, host.env naming
-  the host; the onboarding app's tree installed again with `--config`) —
-  create from the page (nothing written into the wallet), Your skeins from
-  the host's `GET /skeins?key=`, the new skein managed from the host's page (chain, git and site there from birth, #141; git's
-  owner row added by installing git again as the owner),
+  birth, the onboarding app installed at birth, host.env naming the host;
+  the onboarding app's tree installed again with `--config`; chain, git and
+  site and root's `/` by the owner's messages, #152) — create from the page
+  (nothing written into the wallet), Your skeins from the host's `GET
+  /skeins?key=`, the new skein given chain, git and site by the owner's
+  messages and managed from the host's page,
   app-demo deployed by hash from the page, the explorer, the host skein's
   children; replayed.
 - `src/host/http.test.ts`: the fetch provider's network (`fetchHttp`): a

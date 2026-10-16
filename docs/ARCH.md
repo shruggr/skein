@@ -354,9 +354,9 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 
 The host runs one instance of its own: the **host skein**, the operator's.
 `skein-host run` creates it on its first run (handle `host`) from the host
-image — the default image with the onboarding app — owned at birth by the
-operator's key (`$SKEIN_HOME/operator.key`, #142: the genesis names it, so
-its admin rows and its apps' owner rows are there with no claim), and
+image — the default image with the onboarding app, its only app (#152) —
+owned at birth by the operator's key (`$SKEIN_HOME/operator.key`, #142: the
+genesis names it, so its admin rows are there with no claim), and
 host.db records which row it is (`skein-host list` shows it as kind `host`). It is
 an ordinary instance under the same transports, with one difference: its
 address book, and no other, has entries for the **instance manager** and

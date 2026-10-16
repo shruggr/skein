@@ -8,8 +8,9 @@ form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
 by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
 management page, §3; and by #125: the management site an app, §3; and by
-#141: chain, git and site installed at birth in the default image, §3; and
-by #143: routes, filters and roles — §2 rewritten). Status of each
+#141: an image's apps installed at birth, §3; and
+by #143: routes, filters and roles — §2 rewritten; and by #152: images carry
+no apps — chain, git and site are installed by message, §3). Status of each
 part is marked (Built, #…) or (Spec.) in the text, and in §7's table. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -384,9 +385,10 @@ instance, and there are two ways:
 site is an app, shruggr/skein-site (name `site`): one function serving
 its own tree's `www` (the head `site/app`'s record, its `tree`, through
 skein-sdk's `files`) as one read (#135), `/site/*`; the page is the installer
-(there is no installer program). The default image installs it at birth
-(#141, docs/BOOTSTRAP.md "The default image"), with root's read route at
-`/`: a new skein answers its page at its root. **The path `/` is root's**:
+(there is no installer program). Root installs it by message, like any
+app (#152: the default image carries no apps; docs/BOOTSTRAP.md "The
+default image"), and adds its read route at `/` to answer the page at the
+skein's root. **The path `/` is root's**:
 an app's paths are under its name, and root may add a route of its own —
 the read route `{transport: "http", address: "/", prefix: true, filters:
 ["site.get"], root: "www"}` (#143: the site's filter `get`, which its
@@ -405,10 +407,10 @@ on approval it sends the messages, signed by the wallet on a BRC-104
 session. The page and the client `skein` are two ways to the same
 messages: none of it is the host's (#124).
 
-- **The git app is there.** The default image installs it at birth (#141)
-  with its route — box `git`, its `call` gated by root (#143: what `$owner`
-  was is a role now) — so after the claim root may use it at once. The host
-  skein (#142) is born with it and with the operator's key as root.
+- **The git app first.** Root installs it by message after the claim (#152:
+  a directory install, `skein install <dir>`), with its route — box `git`,
+  its `call` gated by root (#143: what `$owner` was is a role now). An image
+  may list it to install at birth (docs/BOOTSTRAP.md "Apps at birth").
 - **Every other app by hash.** The page sends `{fn: "git.clone", args: {url,
   hash}}` to box `git` and reads the answer from the thread that message
   launched: `/explore/edges/<message>?rel=launched-by` names it,
@@ -453,8 +455,8 @@ claim — the claimant's own message in box `claim` (#127: `skein claim
 <where>`; or, for a hosted registration, signed by the claimant's wallet
 before the instance existed and forwarded by the host's instance manager) —
 grants root to its sender; from then on root installs exactly as above. The
-apps the image installed at birth (#141: chain, git, site) are there
-already, with their routes.
+apps an image lists in `etc/apps.json` (#141, #152; the default image lists
+none) are there already, with their routes.
 
 **Reconfiguration** is the same messages again. Installing an app that is
 installed (its `<name>/app` head's root is an app record) is the upgrade:
@@ -744,8 +746,7 @@ does not offer it.
 ## 6a. Worked example: the chain module (#78)
 
 (#143: the manifest below is the chain app's as it stood before routes,
-filters and roles; its #143 form is its own repository's — and the default
-image's copy, `images/default/apps/chain/etc/app.json`.)
+filters and roles; its #143 form is its own repository's.)
 
 The chain state — headers, transactions, proofs, spends, settlement,
 broadcasts — is global to an instance and has one writer, the app
@@ -805,7 +806,7 @@ more: one program, two rows, one interface.
   `chain/state` by CID.
 
 Installed: `skein install https://github.com/shruggr/skein-chain#<commit>
-<the instance's origin>` (the default image installs it at birth, #141); at boot: `bin/chain.wasm` in the system tree and its
+<the instance's origin>`; at boot: `bin/chain.wasm` in the system tree and its
 rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
 under its default scope). kernel-zig/equiv/chain.ts does both.
 
@@ -895,7 +896,7 @@ bounded at 64 MiB).
 | the kernel's door: a route's filters before anything is recorded (`kernel.brc104`, `kernel.beef`, an app's own in the deterministic profile); reject and answer write nothing; read routes; the gate (root, `user`, app roles) and the grants head with the `grant` operation; `genesis.root`; the claim grants root | built (#143: kernel-zig/src/dispatch.zig, door.zig, grants.zig, scheduler.zig `door`) |
 | install client (manifest → objects + head + dispatch + start, the prompt; no key, #143); `skein install <catalog-name|url#commit|dir>` / `uninstall`, signed in the client with the operator's key, sent over the host's control socket or one BRC-104 session (a repository cloned in the VM by the git app); `--dry-run`; `start`/`stop` | built (#72, #76, #77, #124, #142, #143) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
-| the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; chain, git and site installed at birth in the default image (#141) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
+| the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; installed by message (#152) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
 | root's own http route to an app's handler (`skein routes add --transport http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125, #143: src/client/admin.ts `planRoute`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |

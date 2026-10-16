@@ -78,14 +78,42 @@ bin/skein claim --instance martha                     # the claim, signed with ~
 ```
 
 The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
-every user skein: the front door, the messagebox, the wallet, the chain, git
-and site apps installed at birth (#141), and one row to the kernel,
-`claim`, from anyone: the first claim's sender owns it (#127), so claim it
-first thing. The host signs no user's claim; `skein claim --messagebox
-<url>` names where the instance reaches its owner. A second claim is
-refused. After the claim, the owner's rows into the apps installed at
-birth: `bin/skein install images/default/apps/git --instance martha` (the
-same for `apps/chain`), or the page.
+every user skein: the front door, the messagebox, the wallet, and one row
+to the kernel, `claim`, from anyone: the first claim's sender owns it
+(#127), so claim it first thing. The host signs no user's claim; `skein
+claim --messagebox <url>` names where the instance reaches its owner. A
+second claim is refused. It has no apps (#152). After the claim, install
+the chain, git and site apps by message, and root's route `/` to the site:
+
+```
+git clone -q --branch v0.6.0 https://github.com/shruggr/skein-chain ../skein-chain
+git clone -q --branch v0.2.0 https://github.com/shruggr/skein-git ../skein-git
+git clone -q --branch v0.10.0 https://github.com/shruggr/skein-site ../skein-site
+bin/skein install ../skein-chain --instance martha
+bin/skein install ../skein-git --instance martha
+bin/skein install ../skein-site --instance martha
+bin/skein routes add --prefix --filters site.get --settings '{"root":"www"}' / --instance martha
+```
+
+Installing a newer version the same way upgrades the app and keeps its
+state (docs/APPS.md, "Reconfiguration").
+
+To have apps at birth, boot from an image directory that lists them: the
+default image's `bin/` and `etc/` with an `etc/apps.json` naming each app
+as a directory (relative to the image) or a release tarball by its tree's
+git id (images/README.md):
+
+```json
+{ "install": [
+    { "url": "https://github.com/shruggr/skein-chain/archive/refs/tags/v0.6.0.tar.gz", "hash": "13a517e964c4785330d8b7ef77796e149657cbbb" },
+    { "url": "https://github.com/shruggr/skein-git/archive/refs/tags/v0.2.0.tar.gz", "hash": "0894fefd71d7aa1739d77b9d503421b4d55e497a" },
+    { "url": "https://github.com/shruggr/skein-site/archive/refs/tags/v0.10.0.tar.gz", "hash": "2a7b9a492beec6c1c865fc9e33628e18bd36d312" } ],
+  "routes": [ { "transport": "http", "address": "/", "prefix": true, "filters": ["site.get"], "root": "www" } ] }
+```
+
+```
+bin/skein-host add martha --image ./my-image
+```
 
 A plain `skein-host add martha` (no `--image`) is code genesis, with the
 owner in it: `SKEIN_OWNER`, else `~/.skein/owner.identity` (the owner
@@ -147,16 +175,17 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   (`SKEIN_OPERATOR_KEY`, default `$SKEIN_HOME/operator.key`; a file you put
   there is used instead: hex or WIF, mode 0600) and the **host skein**
   (handle `host`) from the host image — the default image with the
-  onboarding app (shruggr/skein-onboard) — its genesis naming the
-  operator's key as its owner: its admin rows, its explorer row and its
-  apps' owner rows are there at birth, with no claim. The onboarding app's
+  onboarding app (shruggr/skein-onboard v0.4.0, its release tarball,
+  fetched and checked by its tree) — its genesis naming the operator's key
+  as its owner: its admin rows, its explorer row and the onboarding app's
+  routes are there at birth, with no claim. The onboarding app's
   config comes from the settings (`domain` from `SKEIN_HANDLE_DOMAIN`, else
   the domain of `SKEIN_ROUTER_ORIGIN`; `origin`; `name` from
   `SKEIN_HOST_NAME`; `note` from `SKEIN_HOST_NOTE`). It prints the host
   skein's identity and URL, then serves. Later runs start what exists; a
   changed host.env does not reach into the host skein (`skein install
-  images/host/apps/onboard --instance host --config <file.json>` changes the
-  app's config). `skein-host init` is the first run's part alone. Its
+  <a skein-onboard checkout> --instance host --config <file.json>` changes
+  the app's config). `skein-host init` is the first run's part alone. Its
   address book alone names the **instance manager**, the host's provider
   that creates, starts and stops instances; the manager acts for no one
   else.
@@ -373,7 +402,7 @@ This repository's layout:
 
 ```
 kernel-zig/      the kernel: skein-kernel serve | replay | shell | dump | fuel; equiv/ (the equivalence suite)
-images/default/  the default image (#89): a system tree with no owner and the claim row; the git app's tree in apps/git (#92); no site (#125)
+images/          the default image (#89): a system tree with no owner and the claim row, no apps (#152); the host image's own part (#142); images/README.md
 programs/        frontdoor, messagebox, resolve, wallet (Zig over skein-sdk); test/ (fixtures, app-demo)
 wasm/            the committed modules the kernel pins (kernel-zig/src/programs.zig), see wasm/README.md
 src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, signer, install

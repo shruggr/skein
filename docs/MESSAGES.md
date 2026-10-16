@@ -1176,7 +1176,7 @@ appended as a request entry, the app's route handler answering:
 A host with no host skein answers them 404. The app's configuration
 (`config.onboard` of its installed manifest, written at the host skein's
 birth from the host's settings, #142, or by `skein install
-images/host/apps/onboard --config <file.json>`): `domain`, the **handle domain** (default
+<a skein-onboard checkout> --config <file.json>`): `domain`, the **handle domain** (default
 `localhost`); `origin`, where the manifest says resolve and search are
 (default `https://<domain>`); `name`, `note`, `icon`, the host's
 presentation in `metanet.trust` (§5.1); `ordfs`, the ORDFS content route
