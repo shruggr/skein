@@ -2,10 +2,10 @@
 //
 //   an instance booted from the default image (images/default) — its genesis
 //   names no root; its admin routes are root's and nobody holds root; the
-//   claim route (box `claim`, open, to the kernel); it serves the management
-//   site at `/`, `/site/` and `/manifest.json` (#141: chain, git and site
-//   installed at birth, root's read route at `/`); its explorer is root's
-//   (403 before the claim), and the gate takes no message in an admin box.
+//   claim route (box `claim`, open, to the kernel); no app and nothing served
+//   at `/`, `/site/` or `/manifest.json` (#152: an image carries no apps);
+//   its explorer is root's (403 before the claim), and the gate takes no
+//   message in an admin box.
 //
 //   The owner claims it with a message from the owner's wallet (`skein
 //   claim`, sent on its session): root is granted to the message's sender
@@ -13,9 +13,12 @@
 //   nothing. In one step the kernel writes the grants and removes the claim
 //   route; the head `claim` names what was claimed (the sender as claimant,
 //   the messagebox); the claimant's mailbox goes into the address book. A
-//   second claim (a stranger's message into `claim`) finds no route. Nothing
-//   waits on the claim (#143: git's `call` is root's), and root installs
-//   programs/test/app-demo with its messages and calls it.
+//   second claim (a stranger's message into `claim`) finds no route. Root
+//   installs chain, git and site by message (`skein install <dir>`, the
+//   src/testapps.ts pins) and its own route `/` to the site (`skein routes
+//   add`), which then serves `/`, `/site/` and `/manifest.json`; installing
+//   git again sends only its head; root installs programs/test/app-demo with
+//   its messages and calls it.
 //
 //   A claim signed before the instance existed (#127: naming no recipient,
 //   what a registrant's page signs and the host forwards) claims a fresh
@@ -44,7 +47,7 @@ import { adminMain } from "../../src/client/admin-cli.ts";
 import { writeFileSync } from "node:fs";
 import { encode } from "../../src/runtime/cid.ts";
 import { main } from "../../src/host/cli.ts";
-import { ownerCli, sendPlan } from "../../src/testapps.ts";
+import { appCheckout, CHAIN_GIT_SITE, GIT_APP, ownerCli, sendPlan } from "../../src/testapps.ts";
 import { dirSource } from "../../src/host/boot.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
@@ -103,11 +106,11 @@ try {
   const g = (await genesisOf("inst"))!;
   check(g.root === undefined && g.owner === undefined && (g.tree as CID).equals(image.root), "the genesis names no root, and the image's tree");
   check((await kernelRows()).join(",") === "objects,head,dispatch,peers,grant,claim" && (await roots()).length === 0, `the admin routes (root's: nobody holds it) and the claim route: ${(await kernelRows()).join(", ")}`);
-  for (const path of ["/", "/site/", "/site/app.js", "/manifest.json"]) {
+  for (const path of ["/", "/site/", "/manifest.json"]) {
     const r = await fetch(`${h.base}/@inst${path}`);
-    check(r.status === 200, `GET ${path}: 200, the site installed at birth serves it (#141: its read route under /site/, root's at /): ${r.status}`);
+    check(r.status === 404, `GET ${path}: 404, nothing served there (#152: the image carries no apps): ${r.status}`);
   }
-  check(["chain/app", "git/app", "site/app"].every((n) => g.heads && (g.heads as Record<string, unknown>)[n]), `#141: the genesis names the heads chain/app, git/app and site/app (${Object.keys((g.heads as object) ?? {}).join(", ")})`);
+  check(g.heads === undefined && !(await rows()).some((x) => x.app !== undefined), `#152: the genesis names no head and no app's route (${Object.keys((g.heads as object) ?? {}).join(", ")})`);
   const unread = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
   check(unread.status === 403, `before the claim the explorer is nobody's (#143: root's, and no one holds root): ${unread.status}`);
   check(!(await rows()).some((x) => x.sender !== undefined), "#143: no route names a sender");
@@ -143,16 +146,30 @@ try {
   check(/403 ERR_NOT_SUBSCRIBED/.test(byStranger), `a stranger's sendMessage into \`claim\` finds no route (${byStranger})`);
   check((await roots()).join(",") === owner8, "root is still the claimant's alone");
 
-  // ------------------------------------------------ the apps installed at birth: nothing to add (#141, #143)
-  // `skein install images/default/apps/git --instance inst`, signed with the root key in the client, over the host's
-  // control socket: the tree, the record and the routes are the instance's already — nothing is sent.
+  // ------------------------------------------------ chain, git and site, installed by message (#152)
+  // `skein install <dir> --instance inst` for each, then `skein routes add … /` (the site at root's `/`), signed with
+  // the root key in the client, over the host's control socket.
   await h.router.listenControl(join(h.home, "host.sock"));
   const keyFile = join(h.home, "operator.key");
   writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
-  const iout: string[] = [], ierr: string[] = [];
-  const icode = await adminMain("install", [join(imageDir, "apps/git"), "--instance", "inst"], { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => iout.push(l), err: (l) => ierr.push(l) });
-  await h.router.settled();
-  check(icode === 0 && iout.some((l) => /: 1 message sent/.test(l)), `skein install images/default/apps/git --instance inst after the claim: one message (the head again: the image wrote its routes) (${[...iout, ...ierr].filter((l) => /sent|dispatch add|install:/.test(l)).join(" | ")})`);
+  const admin = async (cmd: string, args: string[]) => {
+    const out: string[] = [], err: string[] = [];
+    const code = await adminMain(cmd, [...args, "--instance", "inst"], { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => out.push(l), err: (l) => err.push(l) });
+    await h.router.settled();
+    return { code, out, err };
+  };
+  for (const a of CHAIN_GIT_SITE) {
+    const ir = await admin("install", [appCheckout(a)]);
+    check(ir.code === 0 && !!(await (await k()).call("head", `${a.name}/app`)), `skein install ${a.name} --instance inst after the claim: exit ${ir.code} ${ir.err.join(" ")}`);
+  }
+  const rr = await admin("routes", ["add", "--prefix", "--filters", "site.get", "--settings", JSON.stringify({ root: "www" }), "/"]);
+  check(rr.code === 0, `skein routes add --prefix --filters site.get --settings '{"root":"www"}' / --instance inst: exit ${rr.code} ${rr.err.join(" ")}`);
+  for (const path of ["/", "/site/", "/site/app.js", "/manifest.json"]) {
+    const r = await fetch(`${h.base}/@inst${path}`);
+    check(r.status === 200, `GET ${path}: 200, the site serves it (its read route under /site/, root's at /): ${r.status}`);
+  }
+  const again = await admin("install", [appCheckout(GIT_APP)]);
+  check(again.code === 0 && again.out.some((l) => /: 1 message sent/.test(l)), `skein install git again: one message (the head again: the tree, the record and the routes are the instance's already) (${[...again.out, ...again.err].filter((l) => /sent|dispatch add|install:/.test(l)).join(" | ")})`);
 
   // ------------------------------------------------ the owner installs an app
   let r = await cli("install", demoDir, "--instance", "inst");

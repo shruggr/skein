@@ -2,7 +2,7 @@
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
 // with a scripted inference peer, and a host skein from the host image (#142)
-// with the onboarding app (images/host). The page
+// with the onboarding app (images/host: skein-onboard by its release tarball). The page
 // identity (a wallet in the tab over a test key here; Yours in use) registers
 // its mailbox instance through it, over its BRC-104 session with the host's
 // origin (#135);

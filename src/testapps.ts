@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { AuthFetch, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { join as joinPath } from "node:path";
-import { planInstallApp, planUninstallApp, type AdminPlan } from "./client/admin.ts";
+import { planInstallApp, planRoute, planUninstallApp, type AdminPlan } from "./client/admin.ts";
 import { RawBox } from "./client/raw.ts";
 import { WASM_DIR, wasmDirObjects } from "./host/boot.ts";
 import { HostDb } from "./host/instances.ts";
@@ -60,6 +60,13 @@ export const CHAIN_APP: PinnedApp = {
   name: "chain", repo: "https://github.com/shruggr/skein-chain",
   rev: process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59", dir: process.env.SKEIN_CHAIN_DIR,
 };
+
+/**
+ * #152: chain, git and site — what an image installed at birth before images carried apps — in that
+ * order, for installApps after the claim (each at its pin, or $SKEIN_CHAIN_DIR / $SKEIN_GIT_DIR /
+ * $SKEIN_SITE_DIR).
+ */
+export const CHAIN_GIT_SITE: PinnedApp[] = [CHAIN_APP, GIT_APP, SITE_APP];
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */
 export function appCheckout(app: PinnedApp): string {
@@ -163,8 +170,20 @@ export async function ownerCli(h: InstallHost, args: string[], wallet: WalletInt
   }
 }
 
+/**
+ * #152: root's own route `/` to the site's page (`skein routes add --transport http --prefix --filters
+ * site.get --settings '{"root":"www"}' /`), sent as the owner; the site installed first.
+ */
+export async function siteAtRoot(h: InstallHost, handle: string, o: { wallet?: WalletInterface } = {}): Promise<void> {
+  await h.settled();
+  const view = await viewOf(h, handle);
+  let p;
+  try { p = await planRoute(view, { op: "add", transport: "http", address: "/", prefix: true, filters: ["site.get"], settings: { root: "www" } }); } finally { view.close(); }
+  await sendPlan(h, handle, p, o.wallet);
+}
+
 /** Install apps into an instance as its owner (installApp each; the instance's store must exist: hydrate it first). */
-export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP], o: { config?: Record<string, unknown> } = {}): Promise<void> {
+export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP], o: { config?: Record<string, unknown>; wallet?: WalletInterface } = {}): Promise<void> {
   for (const app of apps) {
     try { await installApp(h, handle, appCheckout(app), o); } catch (e) { throw new Error(`install ${app.name} into ${handle}: ${(e as Error).message}`); }
   }

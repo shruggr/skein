@@ -4,10 +4,12 @@
 //
 //   `skein-host init` (#142: the first run's part of `run`) creates the host
 //   skein from the host image, owned by your key ($SKEIN_HOME/operator.key) at
-//   birth: chain, git, site (its page at /site/, the owner's read at /) and the
-//   onboarding app installed, its config from the settings (host.env names the
-//   host); you install the onboarding app's tree again with a config the
-//   settings do not carry (`skein install <dir> --config --instance host`).
+//   birth: the onboarding app installed, its config from the settings
+//   (host.env names the host); you install the onboarding app's tree again
+//   with a config the settings do not carry (`skein install <dir> --config
+//   --instance host`), then chain, git and site by your messages (#152: an
+//   image carries no apps; src/testapps.ts's pins) and root's read at `/` to
+//   the site (`skein routes add`): its page at /site/ and at /.
 //
 //   The wallet's grouped request (#97): GET /manifest.json at the host skein's
 //   own origin is the site's manifest.json, by that root read (the protocols,
@@ -23,11 +25,10 @@
 //   1. create: the form sends {fn: "onboard.create", args: {handle: alice}}
 //      to /onboard/call on your session; the answer {handle, identity, url};
 //      nothing is written into your wallet (no token tracks a skein); the
-//      page opens alice's view (alice serves no page: she is managed from
-//      the host's);
+//      page opens alice's view (alice is managed from the host's page); you
+//      install chain, git and site into her by your messages, and her `/`;
 //   2. alice's apps, from the host's page talking to alice: her apps read from her
-//      explorer (yours: you own her) — chain, git and site, installed at birth
-//      (#141; #143: their routes came with the image, root's by the claim); then install app-demo by hash from a
+//      explorer (yours: you own her) — chain, git and site; then install app-demo by hash from a
 //      local repository served by `git http-backend`: one message to box git,
 //      the git app's answer {tree, app} read from its thread, the manifest
 //      read out of the stored tree, the record rebuilt in the page (the same
@@ -82,7 +83,7 @@ import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { appCheckout, ownerCli, SITE_APP } from "../../src/testapps.ts";
+import { appCheckout, CHAIN_GIT_SITE, ONBOARD_APP, ownerCli } from "../../src/testapps.ts";
 import { adminMain } from "../../src/client/admin-cli.ts";
 import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
@@ -90,7 +91,6 @@ import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chromium, playwright } from "./browser.ts";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** The profile signature (#104): [1, "metanet handles profile"], key ID "1", counterparty anyone. */
 const PROFILE_PROTOCOL: [1, string] = [1, "metanet handles profile"];
@@ -273,15 +273,23 @@ try {
   const cfg = join(home, "onboard.json");
   await fs.writeFile(cfg, JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } }));
   const io: string[] = [];
-  const ic = await adminMain("install", [join(repoRoot, "images/host/apps/onboard"), "--instance", "host", "--config", cfg], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { io.push(l); out(l); }, err: (l) => { io.push(l); out(l); } });
+  const ic = await adminMain("install", [appCheckout(ONBOARD_APP), "--instance", "host", "--config", cfg], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { io.push(l); out(l); }, err: (l) => { io.push(l); out(l); } });
   await router.settled();
   check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.4.0 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
-  // #125: the management site, installed at birth with its root read (#141); a site checkout ($SKEIN_SITE_DIR) over it.
-  if (SITE_APP.dir) {
-    r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
+  /** #152: chain, git and site into `handle` by your messages, then root's read route `/` to the site (`skein routes add`, over the control socket). */
+  const baseApps = async (handle: string) => {
+    for (const a of CHAIN_GIT_SITE) {
+      const ir = await cli(["install", appCheckout(a), "--instance", handle], { wallet: ephemeralWallet(youKey), id: you });
+      await router.settled();
+      check(ir.code === 0, `${a.name} installed into ${handle} by your messages: exit ${ir.code} ${ir.err.join(" ")}`);
+    }
+    const ro: string[] = [];
+    const rc = await adminMain("routes", ["add", "--prefix", "--filters", "site.get", "--settings", JSON.stringify({ root: "www" }), "/", "--instance", handle], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { ro.push(l); out(l); }, err: (l) => { ro.push(l); out(l); } });
     await router.settled();
-    check(r.code === 0, `the site checkout installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
-  }
+    check(rc === 0, `root's read route / to the site in ${handle} (skein routes add): exit ${rc} ${ro.filter((l) => /sent|routes/.test(l)).join(" | ")}`);
+  };
+  // #125: the management site, with chain and git, and root's read at `/` (#152: by message).
+  await baseApps("host");
 
   // ------------------------------------------------ the wallet's grouped request (#97): /manifest.json at the host skein's own origin
   // (host.localhost:<port>, the origin a wallet takes the page's originator from); the router's origin keeps its own.
@@ -352,9 +360,13 @@ try {
   check(!!alice && alice.status === "enabled", `create from the page: alice exists (${alice?.identity?.slice(0, 10)}), and the page opened her view`);
   const aliceId = alice!.identity!;
   stores.push(alice!.store);
-  check(page.url().startsWith(`${sitePage}?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page stays the host's, on alice's view (#125: she serves no page) (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
+  check(page.url().startsWith(`${sitePage}?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page stays the host's, on alice's view (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
+  check((await fetch(`${base}/@alice/`)).status === 404, "#152: alice, from the default image, serves nothing at / until root installs the site");
+  await baseApps("alice");
   const aliceRoot = await fetch(`${base}/@alice/`);
-  check(aliceRoot.status === 200 && (await aliceRoot.text()).includes('src="app.js"'), `alice serves the site at / (#141: installed at birth, the owner's read at /): ${aliceRoot.status}`);
+  check(aliceRoot.status === 200 && (await aliceRoot.text()).includes('src="app.js"'), `alice serves the site at /, root's read: ${aliceRoot.status}`);
+  await page.reload();
+  await ready();
   const baskets = await page.evaluate(async () => {
     const w = (window as unknown as { site: { wallet: { listOutputs(a: unknown): Promise<{ outputs: unknown[] }> } } }).site.wallet;
     return (await w.listOutputs({ basket: "skein-locators" })).outputs.length;
@@ -362,11 +374,10 @@ try {
   check(baskets === 0 && broadcasts.length === 0, `nothing written into your wallet at create: no skein token, no broadcast (${baskets} outputs, ${broadcasts.length} broadcasts)`);
   check((await rootsOf("alice")).join(",") === you, "alice is claimed for your key: root (#143)");
 
-  // ------------------------------------------------ 2. alice's apps: chain, git and site from her image (#141); then app-demo by hash
+  // ------------------------------------------------ 2. alice's apps: chain, git and site; then app-demo by hash
   await page.waitForSelector("tr[data-app=git]", { timeout: 60_000 });
   const apps = await page.locator("#apps").innerText();
-  check(["chain", "git", "site"].every((n) => apps.includes(n)), `alice's page reads her heads through her explorer: chain, git and site installed at birth (${apps.replace(/\s+/g, " ").slice(0, 120)})`);
-  // #143: nothing to add after the claim — git's route came with the image, its `call` root's, and the claim granted root.
+  check(["chain", "git", "site"].every((n) => apps.includes(n)), `alice's page reads her heads through her explorer: chain, git and site (${apps.replace(/\s+/g, " ").slice(0, 120)})`);
 
   await page.fill("#install-url input[name=url]", repoUrl);
   await page.fill("#install-url input[name=hash]", hashA);

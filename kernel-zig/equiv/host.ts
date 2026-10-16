@@ -125,7 +125,7 @@ try {
   check(hostRows.map((x) => x.address).join(",") === "objects,head,dispatch,peers,grant", "the host skein's kernel routes are the admin routes: no claim route");
   check((await holders("host")).join(",") === operatorId, "#143: root is the operator's key, from the genesis");
   const rows = await allRows("host");
-  check(rows.some((x) => x.address === "/explore" && x.fn === "explore") && rows.some((x) => x.app === "git" && x.address === "git") && rows.every((x) => x.sender === undefined), "the explorer route, git's route; no route names a sender");
+  check(rows.some((x) => x.address === "/explore" && x.fn === "explore") && [...new Set(rows.filter((x) => x.app).map((x) => x.app))].join(",") === "onboard" && rows.every((x) => x.sender === undefined), "the explorer route; #152: onboard's routes, the one app at birth; no route names a sender");
   const hostId = db.get("host")!.identity!;
   const late = await sendPlan({ port, owner: client, settled: () => router.settled() }, "host", planClaim(hostId)).then(() => "sent", (e: Error) => e.message);
   check(/403/.test(late) && (await holders("host")).join(",") === operatorId, `a claim (another wallet's) finds no route: ${late.slice(0, 80)}`);

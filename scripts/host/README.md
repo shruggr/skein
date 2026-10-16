@@ -36,9 +36,9 @@ So `up.sh` goes:
    knows: the rows are what a registration would make.
 2b. **The host skein** (#90, #142): `skein-host init` (the first run's
    part of `run`), once — the operator's own instance (`host`), from the
-   host image (the default image with the onboarding app), its genesis
-   naming the operator's key: its admin rows and its apps' owner rows are
-   there at birth, no claim. The onboarding app's config comes from the
+   host image (the default image with the onboarding app, its only app),
+   its genesis naming the operator's key: its admin rows and the onboarding
+   app's routes are there at birth, no claim. The onboarding app's config comes from the
    settings (`SKEIN_HANDLE_DOMAIN`, default the domain of
    `SKEIN_ROUTER_ORIGIN`, i.e. `localhost`; the router's origin;
    `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`). The instance manager is in its
@@ -52,6 +52,15 @@ So `up.sh` goes:
    owner's mailbox instance (the host's default for
    `SKEIN_OWNER_MESSAGEBOX`; `run` prints which at start, and a WARNING if
    there is none).
+3b. **The host skein's chain, git and site** (#152: an image carries no
+   apps), as the owner's messages (`skein install <dir> --instance host`):
+   the checkouts `SKEIN_CHAIN_DIR`, `SKEIN_GIT_DIR`, `SKEIN_SITE_DIR` if
+   set, else the tags `SKEIN_CHAIN_APP`, `SKEIN_GIT_APP`, `SKEIN_SITE_APP`
+   name (`<url>#<tag>`, default skein-chain v0.6.0, skein-git v0.2.0,
+   skein-site v0.10.0), checked out under `~/.skein/apps/`; then root's read
+   route `/` to the site (`skein routes add --prefix --filters site.get
+   --settings '{"root":"www"}' / --instance host`). Run again, an install
+   sends only the head.
 4. **The grants** (`grants.sh`), toward every row's front-door key from
    `skein-host list`, now that every row exists.
 5. **The address books** (#40). Into every enabled agent, through its

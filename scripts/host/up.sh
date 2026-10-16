@@ -27,7 +27,8 @@
 #      written from owner-wallet.env), the onboarding app's config from the
 #      settings (SKEIN_HANDLE_DOMAIN, default localhost; the router's
 #      origin), the instance manager in its address book. Once: run again, it
-#      only says which instance it is
+#      only says which instance it is. The onboarding app is the image's only
+#      app (#152): chain, git and site come in step 3b
 #   3. the router, if nothing listens on :8100 (it hydrates every enabled row:
 #      the agents' geneses happen here, the owner's mailbox already there).
 #      Its broadcaster (#58) is the host's Arcade: SKEIN_ARC_URL and
@@ -37,6 +38,13 @@
 #      Every new genesis seeds its address book with the host's providers
 #      (fetch, waker, libp2p when it runs one, broadcast with an Arcade: local,
 #      keys derived from the master secret) and the owner's mailbox
+#   3b. the host skein's chain, git and site apps (#152: an image carries no
+#      apps), as the owner's messages: the checkouts $SKEIN_CHAIN_DIR /
+#      $SKEIN_GIT_DIR / $SKEIN_SITE_DIR, else the tags SKEIN_CHAIN_APP /
+#      SKEIN_GIT_APP / SKEIN_SITE_APP name (<url>#<tag>, default the versions
+#      src/testapps.ts pins), checked out under ~/.skein/apps/; then root's
+#      read route `/` to the site. Installing what the skein has sends only
+#      the head again
 #   4. the grants, toward every row's front-door key (`skein-host list`), now
 #      that every row exists
 #   5. the address books (#40, #70): how each agent reaches a key. Into every
@@ -50,7 +58,7 @@
 #      SKEIN_SHELL_APP / SKEIN_CHAT_APP name: <url>#<tag>, checked out under
 #      ~/.skein/apps/ — an agent has no git app). Installing what an instance has
 #      sends only the head again.
-#   Steps 5–6 are the owner's messages (#124, #142): `bin/skein … --instance
+#   Steps 3b, 5 and 6 are the owner's messages (#124, #142): `bin/skein … --instance
 #   <h>` signs them with the dev owner's key and hands them to the running
 #   host over its control socket. An instance owned by another key (an
 #   owner.identity that is not owner-dev.identity) refuses them: that owner
@@ -140,6 +148,17 @@ else
   for _ in $(seq 60); do listening "$port" && break; sleep 0.5; done
   listening "$port" || { echo "the router did not start; see $skein/logs/host.log" >&2; exit 1; }
   echo "router: http://127.0.0.1:$port (log $skein/logs/host.log)"
+fi
+
+# 3b. The host skein's chain, git and site (#152), then root's read route `/` to the site.
+app_dir() { if [ -n "$1" ]; then echo "$1"; else checkout "$2"; fi; }
+if [ -n "$hostskein" ]; then
+  for dir in "$(app_dir "${SKEIN_CHAIN_DIR:-}" "${SKEIN_CHAIN_APP:-https://github.com/shruggr/skein-chain#v0.6.0}")" \
+             "$(app_dir "${SKEIN_GIT_DIR:-}" "${SKEIN_GIT_APP:-https://github.com/shruggr/skein-git#v0.2.0}")" \
+             "$(app_dir "${SKEIN_SITE_DIR:-}" "${SKEIN_SITE_APP:-https://github.com/shruggr/skein-site#v0.10.0}")"; do
+    owner_send "$hostskein" install "$dir" || echo "install $dir into $hostskein failed (above)" >&2
+  done
+  owner_send "$hostskein" routes add --prefix --filters site.get --settings '{"root":"www"}' / || echo "root's route / to the site in $hostskein failed (above)" >&2
 fi
 
 # 4. The grants, toward every row (agents and mailbox instances), all of which exist now.

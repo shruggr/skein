@@ -39,7 +39,7 @@ import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { adminMain } from "../../src/client/admin-cli.ts";
 import { main } from "../../src/host/cli.ts";
-import { ownerCli, SITE_APP } from "../../src/testapps.ts";
+import { appCheckout, ownerCli, SITE_APP } from "../../src/testapps.ts";
 import { readFileSync } from "node:fs";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -91,7 +91,7 @@ try {
 
   // ------------------------------------------------ skein-site, from its repo (#125)
   const siteSpec = SITE_APP.dir ?? `${SITE_APP.repo}#${SITE_APP.rev}`;
-  const SITE_VERSION = (JSON.parse(readFileSync(join(here, "../../images/default/apps/site/etc/app.json"), "utf8")) as { version: string }).version;
+  const SITE_VERSION = (JSON.parse(readFileSync(join(appCheckout(SITE_APP), "etc/app.json"), "utf8")) as { version: string }).version;
   let code = await cli("install", siteSpec, "--instance", "inst", "--dry-run");
   check(code === 0 && out.some((l) => /^ {2}route +http \/site\/ prefix \[site\.get\] → \(a read: its filters answer, nothing logged\) \(root www\)/.test(l)), `the prompt shows the site's read route under /site/ (${code}: ${out.filter((l) => /^ {2}route /.test(l)).join(" | ")})`);
   check((await record("site/app")) === undefined, "a dry run sends nothing");
