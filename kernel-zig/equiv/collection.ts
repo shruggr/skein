@@ -11,7 +11,9 @@
 //
 //   - the collection's mint (a 1-sat inscription, MAP type=ord
 //     subType=collection, a SIGMA by the issuer, signed as 1sat-sdk signs):
-//     admitted;
+//     admitted; the topic's beat on <topic>-live carries tipHeight (its
+//     block's) and tipAnchor (skein-overlay 0.14.0's anchor chain), and
+//     GET /collection/anchors?topic= answers the same;
 //   - an item mint naming it, signed by the issuer: admitted; an item signed
 //     by another key in the same transaction: not;
 //   - a transfer whose funding input comes before the item's: the item's
@@ -34,17 +36,19 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BSM, MerklePath, PrivateKey, Script, Transaction, UnlockingScript, Utils } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
+import { beaconsOf } from "../../src/host/p2p.ts";
 import { planClaim } from "../../src/client/admin.ts";
 import { appCheckout, CHAIN_APP, ownerCli, sendPlan, type PinnedApp } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-/** shruggr/skein-collection v0.1.1. */
+/** shruggr/skein-collection v0.2.0. */
 const COLLECTION_APP: PinnedApp = {
   name: "collection", repo: "https://github.com/shruggr/skein-collection",
-  rev: process.env.SKEIN_COLLECTION_REV ?? "b2184a9f9e0821e8f0df81acc3e21b4e4b54c479", dir: process.env.SKEIN_COLLECTION_DIR,
+  rev: process.env.SKEIN_COLLECTION_REV ?? "7f1e2032d3a99ffa724dfdc8925bdc4bd3743b44", dir: process.env.SKEIN_COLLECTION_DIR,
 };
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -144,7 +148,7 @@ try {
     check(r.code === 0, `skein install ${a.name} into the claimed skein (booted from the default image, ${booted.programs.length} programs): exit ${r.code} ${r.err.join(" ").slice(0, 200)}`);
   }
   const app = await record("collection/app");
-  check(app?.kind === "app" && app.version === "0.1.1" && Object.keys(app.programs as object).sort().join(",") === "collection-lookup,collection-topic,overlay", `collection/app is skein-collection ${app?.version}, its engine with it (programs ${Object.keys((app?.programs as object) ?? {}).join(", ")})`);
+  check(app?.kind === "app" && app.version === "0.2.0" && Object.keys(app.programs as object).sort().join(",") === "collection-lookup,collection-topic,overlay", `collection/app is skein-collection ${app?.version}, its engine with it (programs ${Object.keys((app?.programs as object) ?? {}).join(", ")})`);
   check(!(await record("collection/topics")) && !(await record("collection/lookups")), "the install registers nothing: no collection/topics, no collection/lookups");
 
   // The chain: block 1 is [coinbase, fund]; Alice's six 10 000-sat outputs.
@@ -175,6 +179,7 @@ try {
     { sats: 9_000, lock: p2pkh(pkh(alice)) },
   ]);
   await mineTx(coll);
+  const collBlock = sha256d(tip);
   const collId = `${coll.id("hex")}_0`;
   const topic = `tm_col_${collId}`;
 
@@ -215,6 +220,13 @@ try {
   // ------------------------------------------------ rule 1: the collection's mint
   let s = await submit(coll, [fund]);
   check(s.status === 200 && JSON.stringify(s.steak?.outputsToAdmit) === "[0]", `the collection's mint admitted, output 0 (${show(s)})`);
+  // anchor(2) = sha256d(anchor(1) = 32 zero bytes ‖ blockhash(2) ‖ root(2) = the mint's txid), internal byte order.
+  const anchor2 = sha256d(Buffer.concat([Buffer.alloc(32), collBlock, internal(coll.id("hex"))])).toString("hex");
+  const beat = (await beaconsOf((await k()).store)).find((b) => b.app === "collection" && b.topic === `${topic}-live`);
+  const tipBeat = beat ? dagCbor.decode(beat.body) as { tipHeight?: number; tipAnchor?: Uint8Array } : undefined;
+  const anchors = await (await fetch(`${origin}/collection/anchors?topic=${topic}`)).json().catch(() => undefined) as { genesisHeight?: number; tipHeight?: number; anchors?: Array<{ height: number; anchor: string }> } | undefined;
+  const beatAnchor = tipBeat?.tipAnchor instanceof Uint8Array ? Buffer.from(tipBeat.tipAnchor).toString("hex") : undefined;
+  check(tipBeat?.tipHeight === 2 && beatAnchor === anchor2 && anchors?.genesisHeight === 2 && anchors.tipHeight === 2 && anchors.anchors?.find((a) => a.height === 2)?.anchor === anchor2, `the mint mined at height 2: the topic's beat carries tipHeight ${tipBeat?.tipHeight} and tipAnchor ${beatAnchor?.slice(0, 16)}…, GET /collection/anchors?topic= answers ${JSON.stringify(anchors)} (anchor(2) ${anchor2.slice(0, 16)}…)`);
 
   // ------------------------------------------------ rule 2: an item mint signed by the issuer; one by another key not
   const item = (n: number) => inscribed(pkh(alice), `item ${n}`, [["type", "ord"], ["subType", "collectionItem"], ["name", `Item ${n}`], ["subTypeData", JSON.stringify({ collectionId: collId, mintNumber: String(n) })]]);
