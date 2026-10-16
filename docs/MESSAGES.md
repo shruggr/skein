@@ -1425,6 +1425,46 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   An unsigned read: no entry, nothing logged; metered as a read (bytes
   served, billing.ts). A runtime without the tool records the events and
   nothing happens. Beats are unbilled for now (#130).
+- **Overlay sync (#150).** The host's own, beside the liveness tool
+  (src/host/sync.ts); an overlay app (shruggr/skein-overlay 0.14.0) keeps
+  the anchors and answers the reads. Every node serves
+  **`/skein/overlay/sync/1.0.0`** itself (no row, no entry: like
+  /skein/message/1.0.0, a host protocol), one dag-cbor frame each way:
+
+      {kind: "locator", topic, locator: [{height, anchor: bytes(32)}]}
+          → {kind: "locator", topic, genesisHeight?, agreedHeight?, tipHeight?}
+      {kind: "admitted", topic, fromHeight, toHeight, limit}
+          → {kind: "admitted", topic, blocks: [{height, blockHash, txids, bump}], nextHeight}
+      {kind: "tx", topic, txid}  → {kind: "tx", txid, beef?: bytes}   (absent: not held)
+      anything else              → {kind: "error", message}
+
+  answered from the overlay's reads `/<app>/anchors`, `/<app>/admitted`
+  and `/<app>/holds` (the app is the one beating on `<topic>-live`).
+  - **Catch-up.** A beat the liveness tool newly keeps from another peer
+    on `<topic>-live`, whose `tipAnchor` is not ours at its `tipHeight`,
+    starts one: our locator (tip, tip-1, tip-2, tip-4 … genesis; empty for a
+    new node) to that peer; from the height after the one it agrees at (its
+    genesis when none), its admitted lists by ranges of 1 000 heights,
+    spread across the peers whose last beat names the same tip anchor. Each
+    block is checked against our chain state's headers (its hash; the BUMP's
+    root for every txid) before a transaction is fetched; a list that fails
+    drops that peer for the host's run; a height we hold no header for yet
+    leaves the range to a later beat. Each txid our admitted lists lack is
+    asked of the peer that listed it (`tx`) and the BEEF handed to the
+    overlay's receive row `/skein/overlay/beef/1.0.0` as a frame from that
+    peer (an entry, as any stream frame): the overlay takes a mined one no
+    one waits on with every topic it serves. Block by block, in height
+    order. At most one catch-up per (instance, topic, peer) at a time, and
+    one per 10 s.
+  - **Wants (#112).** The overlay's `{event: "want", txid, topic, peer?}`
+    is asked (`tx`) of `peer`, else of the topic's peers (the node's gossip
+    subscribers of `<topic>` and the beaters on `<topic>-live`), and the
+    BEEF handed to the receive row as from the peer that sent it; asked
+    again, every 2 s doubling to a minute, while it stands; `unwant` ends
+    it. The standing wants are folded from the log at hydrate (`want` minus
+    `unwant`), as the subscriptions are.
+  - Unbilled, and the tail (`tailDigest`) is not reconciled: a peer whose
+    tail differs is not asked for anything beyond the wants.
 - **Event streams (#148).** A page follows its app's emitted events live,
   served by the host on the instance's origin, beside the liveness read
   (src/host/events.ts), no program in between:
