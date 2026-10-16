@@ -40,6 +40,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { beaconsOf } from "../../src/host/p2p.ts";
+import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { planClaim } from "../../src/client/admin.ts";
 import { appCheckout, CHAIN_APP, ownerCli, sendPlan, type PinnedApp } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
@@ -222,7 +223,8 @@ try {
   check(s.status === 200 && JSON.stringify(s.steak?.outputsToAdmit) === "[0]", `the collection's mint admitted, output 0 (${show(s)})`);
   // anchor(2) = sha256d(anchor(1) = 32 zero bytes ‖ blockhash(2) ‖ root(2) = the mint's txid), internal byte order.
   const anchor2 = sha256d(Buffer.concat([Buffer.alloc(32), collBlock, internal(coll.id("hex"))])).toString("hex");
-  const beat = (await beaconsOf((await k()).store)).find((b) => b.app === "collection" && b.topic === `${topic}-live`);
+  const log = openStoreFile(store, { readOnly: true });
+  const beat = await beaconsOf(log).then((bs) => bs.find((b) => b.app === "collection" && b.topic === `${topic}-live`)).finally(() => log.close());
   const tipBeat = beat ? dagCbor.decode(beat.body) as { tipHeight?: number; tipAnchor?: Uint8Array } : undefined;
   const anchors = await (await fetch(`${origin}/collection/anchors?topic=${topic}`)).json().catch(() => undefined) as { genesisHeight?: number; tipHeight?: number; anchors?: Array<{ height: number; anchor: string }> } | undefined;
   const beatAnchor = tipBeat?.tipAnchor instanceof Uint8Array ? Buffer.from(tipBeat.tipAnchor).toString("hex") : undefined;
