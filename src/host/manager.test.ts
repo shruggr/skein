@@ -53,8 +53,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   const grants = await hk.store.get(await hk.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
   assert.deepEqual(grants.roles.root!.map((k) => hex(k)), [h.ownerId], "#143: the operator is root, from the genesis");
   assert.ok(hostRows.some((r) => r.address === "/explore" && r.fn === "explore"), "the explorer route (root's)");
-  assert.ok(hostRows.some((r) => r.app === "git" && r.address === "git"), "git's route");
-  assert.ok(hostRows.some((r) => r.app === "onboard"), "the onboarding app installed at birth");
+  assert.deepEqual([...new Set(hostRows.filter((r) => r.app).map((r) => r.app))], ["onboard"], "#152: the onboarding app, the one app installed at birth");
   const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
 
@@ -115,7 +114,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "create", { handle: "carol", owner: "nope" });
   assert.match(String(a[0]?.body.error), /owner: not an identity key/);
   a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /the default and open-exchange images and mailbox instances/);
+  assert.match(String(a[0]?.body.error), /the default image and mailbox instances/);
   assert.equal(h.db.get("carol"), undefined);
   a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
   assert.match(String(a[0]?.body.error), /domain .*a host name/);

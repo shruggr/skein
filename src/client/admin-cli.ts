@@ -23,7 +23,7 @@
 // install from the stored tree, and sends the head, the rows and the start: nothing of the app's tree or
 // modules crosses from here. A catalog name is looked up in the instance's own site tree
 // (www/catalog.json). A directory is read here and its objects sent (what the instance lacks); installing
-// a tree the instance holds already (an image's app, `images/default/apps/<app>`) sends only what changes:
+// a tree the instance holds already (an app installed before, an image's app) sends only what changes:
 // the owner's rows after a claim. `--dry-run` with a clone still sends the clone (the tree is read from the
 // instance), then sends nothing more.
 

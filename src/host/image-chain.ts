@@ -40,7 +40,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { headTree } from "../runtime/heads.ts";
 import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, parseTree, readBlob, readTree, type Entry } from "../runtime/tree.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, HOST_IMAGE, MemBlocks, mergeImages, OPEN_EXCHANGE_IMAGE, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, HOST_IMAGE, imageDir, MemBlocks, mergeImages, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import type { HostDb } from "./instances.ts";
 
 /** Headers per block (skein-sdk `image.per_block`). */
@@ -88,8 +88,6 @@ export interface ImageChainOptions {
   dir?: string;
   /** The host image's own part (#142, default: the repo's images/host), merged over the static part. */
   hostDir?: string;
-  /** The Open Exchange image's own part (#147, default: the repo's images/open-exchange), merged over the static part. */
-  openExchangeDir?: string;
   fetch?: typeof fetch;
   log?(line: string): void;
 }
@@ -104,14 +102,11 @@ export function historyOf(feed: string | undefined): string | undefined {
   return u.toString();
 }
 
-/** The images merged over the default one (#142, #147). */
-export type MergedImage = "host" | "open-exchange";
-/** The image names a creation takes (#147): `default`, `open-exchange` (the host image is the host skein's alone). */
-export const IMAGE_NAMES = ["default", "open-exchange"] as const;
-function mergedImage(name: string): MergedImage {
-  if (name !== "open-exchange") throw new Error(`image ${JSON.stringify(name)}: this host has ${IMAGE_NAMES.join(", ")}`);
-  return name;
-}
+/** The image names (#152): `default`, and `host` (images/host merged over it, #142). */
+export const IMAGE_NAMES = ["default", "host"] as const;
+
+/** An image's static part: its tree, the root's entries, its objects, the apps it names beside it (boot.ts imageDir). */
+interface Static { root: CID; entries: Entry[]; objects: Objects; apps: Record<string, CID> }
 
 export class ImageChain {
   readonly o: ImageChainOptions;
@@ -120,9 +115,9 @@ export class ImageChain {
   /** The last block's headers (raw). */
   private last: Buffer = Buffer.alloc(0);
   private queue: Promise<unknown> = Promise.resolve();
-  private stat?: Promise<{ root: CID; entries: Entry[]; objects: Objects }>;
-  /** #142, #147: the named images' static parts — each one's own part merged over the default image, once. */
-  private merged = new Map<string, Promise<{ root: CID; entries: Entry[]; objects: Objects }>>();
+  private stat?: Promise<Static>;
+  /** #142: the host image's static part — its own part merged over the default image, once. */
+  private merged?: Promise<Static>;
   /** Settles once the first sync (start) is done: what a creation waits for. */
   ready: Promise<void> = Promise.resolve();
 
@@ -238,30 +233,26 @@ export class ImageChain {
     return true;
   }
 
-  /** The static part: the image directory, scanned once. */
-  private static(): Promise<{ root: CID; entries: Entry[]; objects: Objects }> {
+  /** The static part: the image directory, scanned once (boot.ts imageDir: the apps it names beside it too). */
+  private static(): Promise<Static> {
     this.stat ??= (async () => {
-      const d = await dirSource(this.o.dir ?? DEFAULT_IMAGE);
-      return { root: d.root, entries: parseTree(await d.objects.bytes(d.root)), objects: d.objects };
+      const d = await imageDir(this.o.dir ?? DEFAULT_IMAGE);
+      return { root: d.root, entries: parseTree(await d.objects.bytes(d.root)), objects: d.objects, apps: d.apps };
     })();
     return this.stat;
   }
 
-  /**
-   * #142, #147: a named image's static part — its own part merged over images/default (boot.ts
-   * mergeImages), once: `host` (images/host), `open-exchange` (images/open-exchange).
-   */
-  private mergedStatic(name: MergedImage): Promise<{ root: CID; entries: Entry[]; objects: Objects }> {
-    let p = this.merged.get(name);
-    if (!p) this.merged.set(name, p = (async () => {
+  /** #142: the host image's static part — images/host merged over images/default (boot.ts mergeImages), once. */
+  private hostStatic(): Promise<Static> {
+    this.merged ??= (async () => {
       const base = await this.static();
-      const own = await dirSource(name === "host" ? this.o.hostDir ?? HOST_IMAGE : this.o.openExchangeDir ?? OPEN_EXCHANGE_IMAGE);
+      const own = await imageDir(this.o.hostDir ?? HOST_IMAGE);
       const merged = new MemBlocks();
       const objects = anyOf(merged, base.objects, own.objects);
       const root = await mergeImages(objects, base.root, own.root, merged);
-      return { root, entries: parseTree((await objects.get(root))!), objects };
-    })());
-    return p;
+      return { root, entries: parseTree((await objects.get(root))!), objects, apps: { ...base.apps, ...own.apps } };
+    })();
+    return this.merged;
   }
 
   /** The image's root: the static part's entries, `chain` among them. */
@@ -276,23 +267,24 @@ export class ImageChain {
    * the repo's pinned modules.
    */
   async source(o: { host?: boolean; image?: string } = {}): Promise<BootSource> {
-    const named: MergedImage | undefined = o.host ? "host" : o.image === undefined || o.image === "default" ? undefined : mergedImage(o.image);
-    const s = named ? await this.mergedStatic(named) : await this.static();
+    if (o.image !== undefined && !(IMAGE_NAMES as readonly string[]).includes(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has ${IMAGE_NAMES.join(", ")}`);
+    const named = o.host || o.image === "host";
+    const s = named ? await this.hostStatic() : await this.static();
     const chainObjects = { get: async (cid: CID) => this.o.db.imageBlock(cid.toString()) };
     const chain = this.o.db.setting("image_chain");
     if (named) {
-      // The host image (#142), the Open Exchange image (#147): its root is not kept in host.db; the chain part's objects are the same.
+      // The host image (#142): its root is not kept in host.db; the chain part's objects are the same.
       const root = chain ? await this.rootWith(Cid.parse(chain), s) : undefined;
       const mem = new MemBlocks();
       if (root) await mem.putBlock(root.cid, root.object);
-      return { kind: "tree", root: root?.cid ?? s.root, objects: anyOf(mem, s.objects, wasmDirObjects(WASM_DIR), chainObjects) };
+      return { kind: "tree", root: root?.cid ?? s.root, objects: anyOf(mem, s.objects, wasmDirObjects(WASM_DIR), chainObjects), apps: s.apps };
     }
     const objects = anyOf(s.objects, wasmDirObjects(WASM_DIR), chainObjects);
-    if (!chain) return { kind: "tree", root: s.root, objects };
+    if (!chain) return { kind: "tree", root: s.root, objects, apps: s.apps };
     const root = await this.rootWith(Cid.parse(chain), s);
     // The static part changed since the last write (a new checkout): this root is the current one.
     if (this.o.db.setting("image") !== root.cid.toString()) this.o.db.writeImage(new Map([[root.cid.toString(), root.object]]), new Set([this.o.db.setting("image") ?? ""]), { image: root.cid.toString() });
-    return { kind: "tree", root: root.cid, objects };
+    return { kind: "tree", root: root.cid, objects, apps: s.apps };
   }
 
   /**

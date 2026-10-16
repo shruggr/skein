@@ -1,3 +1,8 @@
 {
-  "install": ["apps/onboard"]
+  "install": [
+    {
+      "url": "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz",
+      "hash": "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae"
+    }
+  ]
 }

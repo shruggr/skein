@@ -19,7 +19,7 @@ import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from "../testapps.ts";
 import { fakeDiscovery } from "./fake-discovery.ts";
-import { anyOf, dirSource, wasmDirObjects } from "./boot.ts";
+import { imageSource } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { Router, type SignedClaim } from "./router.ts";
 import { Signer } from "./signer.ts";
@@ -111,8 +111,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
      */
     async image(handle: string, dir = join(ROOT, "images/default")) {
       db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() });
-      const d = await dirSource(dir);
-      return await router.bootRow(handle, { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(join(ROOT, "wasm"))) }, { image: true });
+      return await router.bootRow(handle, await imageSource(dir), { image: true });
     },
     /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
     mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); },

@@ -17,8 +17,11 @@ import { KERNEL_BIN } from "./kernel.ts";
 import { Router } from "./router.ts";
 import { Signer } from "./signer.ts";
 import { existsSync } from "node:fs";
-import { anyOf, dirSource, installAtBirth, MemBlocks, mergeImages, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
-import { readApp } from "./install.ts";
+import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, MemBlocks, mergeImages, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
+import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
 import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
 import { WALLET } from "../runtime/programs.ts";
@@ -83,6 +86,7 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
   const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
   assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox", "wallet"], "#116, #130: the wallet is core, in the image");
+  assert.equal(s.apps, undefined, "#152: no etc/apps.json — the image carries no apps");
   assert.equal(encode(s.programs.find((p) => p.name === "wallet")!.record).cid.toString(), encode(WALLET).cid.toString(), "the image's wallet record is WALLET (bin/wallet.json)");
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const c = { identity: key(), handle: "a", domain: "localhost" };
@@ -122,104 +126,108 @@ test("system tree: refusals — no routes, the forms before #77/#115, a sender, 
   assert.equal(resolveSystem(c, {}, {}, undefined, [{ address: "run", program: "missing" }]).dispatch.filter((r) => r.address === "run").length, 0);
 });
 
-test("#141, #143: the default image installs chain, git and site at birth — the records, routes and heads a message install writes, root's read route at /", async () => {
-  const image = join(import.meta.dirname, "../../images/default");
-  const { root, objects } = await dirSource(image);
-  const src = anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
-  const s = await readSystemTree(src, root);
-  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site"]);
+/** A copy of the test app (programs/test/app-demo) named `name`, at `dir`, with no start or stop message. */
+async function demoApp(dir: string, name: string): Promise<void> {
+  await fs.cp(join(import.meta.dirname, "../../programs/test/app-demo"), dir, { recursive: true, filter: (p) => !/(zig-out|\.zig-cache|zig-pkg)$/.test(p) });
+  const m = JSON.parse(await fs.readFile(join(dir, "etc/app.json"), "utf8")) as Record<string, unknown>;
+  delete m.start; delete m.stop;
+  await fs.writeFile(join(dir, "etc/app.json"), `${JSON.stringify({ ...m, name }, null, 2)}\n`);
+}
+
+test("#152: an image's apps — a directory of the image, a directory beside it, a tarball by {url, hash} — each a directory install: its objects put, the app record and routes a message install writes, root's own route", async (t) => {
+  const work = await fs.mkdtemp(join(tmpdir(), "skein-img-"));
+  const server = createServer(async (req, res) => {
+    try { res.end(await fs.readFile(join(work, req.url!.slice(1)))); } catch { res.statusCode = 404; res.end(); }
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  t.after(async () => { server.close(); await fs.rm(work, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const image = join(work, "image");
+  await fs.cp(join(import.meta.dirname, "../../images/default"), image, { recursive: true });
+  await demoApp(join(image, "apps/one"), "one");
+  await demoApp(join(work, "two"), "two");
+  await demoApp(join(work, "three"), "three");
+  assert.equal(spawnSync("tar", ["-czf", join(work, "three.tgz"), "-C", work, "three"]).status, 0);
+  const three = (await dirSource(join(work, "three"), { ignore: appIgnore })).root;
+  const hash = Buffer.from(three.multihash.digest).toString("hex");
+  const tarball = { url: `${base}/three.tgz`, hash };
+  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: ["apps/one", "../two", tarball], routes: [{ transport: "http", address: "/", prefix: true, filters: ["kernel.brc104"], program: "one.demo", fn: "call" }] }));
+
+  const src = await imageSource(image);
+  assert.deepEqual(Object.keys(src.apps ?? {}), ["../two"], "the directory beside the image is read with it");
+  const s = await readSystemTree(src.objects, src.root);
+  assert.deepEqual(Object.keys(s.appTrees ?? {}), ["apps/one"], "the directory of the image is in its tree");
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const identity = key();
   const c = { identity, handle: "a", domain: "localhost" };
-  const sys = resolveSystem(c, programs, s.config, root, s.dispatch);
+  const sys = resolveSystem(c, programs, s.config, src.root, s.dispatch);
   const kept = new Map<string, Uint8Array>();
-  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
-  const born = await installAtBirth(target, src, s, sys, c);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.6.0", "git 0.2.0", "site 0.10.0"]);
-  assert.deepEqual(Object.keys(born.heads).sort(), ["chain/app", "git/app", "site/app"], "#143: no reads head");
+  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
+  const born = await installAtBirth(target, src.objects, s, sys, c, src.apps);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["one 0.1.0", "two 0.1.0", "three 0.1.0"]);
+  assert.deepEqual(Object.keys(born.heads).sort(), ["one/app", "three/app", "two/app"]);
   const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
-  for (const n of ["chain", "git", "site"]) assert.equal(get(born.heads[`${n}/app`]!).kind, "app", `${n}/app is its app record, in the store`);
-  // The routes: each app's with its `app`, then root's own (no app).
+  assert.ok(get(born.heads["three/app"]!).tree.equals(three), "the tarball's app record names its tree, the hash");
+  for (const n of ["two", "three"]) assert.ok(kept.has(get(born.heads[`${n}/app`]!).tree.toString()), `${n}'s tree is put (it is not in the image's)`);
   const rows = born.rows as Array<Record<string, any>>;
-  assert.deepEqual(rows.map((r) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`), [
-    "chain event chain", "chain mailbox chain [kernel.beef]", "chain mailbox chain/status",
-    "git mailbox git .call",
-    "site http /site/ prefix [site.get]",
-    "root http / prefix [site.get]",
-  ]);
-  assert.ok(rows.every((r) => r.sender === undefined), "#143: no sender");
-  const site = get(born.heads["site/app"]!);
-  assert.deepEqual([site.filters, site.routes.length], [{ get: "site.get" }, 1], "the site's record: its filter declared, its read route");
-  assert.equal(rows.find((r) => r.address === "/site/")!.program, undefined, "a read route: no program");
-  assert.deepEqual(get(born.heads["git/app"]!).roles, { root: ["call"] }, "git's call is root's (#143: what $owner was)");
-  // The same app record as `skein install <dir>` over the instance: same CID, the same routes byte for byte.
+  assert.deepEqual(rows.filter((r) => r.app === "three").map(showRow), ["three mailbox three", "three mailbox three/tick", "three http /three/call [kernel.brc104] .call"]);
+  assert.deepEqual(rows.filter((r) => r.app === undefined).map(showRow), ["root http / prefix [kernel.brc104] .call"], "root's own route after the apps");
+  // The same app record as `skein install <dir>` over the instance: the same CID, the same routes byte for byte.
   const view = { store: { has: async () => false, get: async () => { throw new Error("none"); }, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} } as never, identity, programs: sys.programs, addressBook: [], heads: [], dispatch: [...sys.dispatch] };
-  const viaMessages = await planInstall(await readApp(join(image, "apps/chain")), view, { modules: src });
-  assert.ok(viaMessages.recordCid.equals(born.heads["chain/app"]!), "the image's chain/app is the message install's app record");
-  assert.deepEqual(viaMessages.rows.map((r) => encode(r.row as never).cid.toString()), rows.filter((r) => r.app === "chain").map((r) => encode(r as never).cid.toString()), "the same routes, byte for byte");
-  // The genesis carries the heads.
+  const viaMessages = await planInstall(await readApp(join(image, "apps/one")), view, { modules: src.objects });
+  assert.ok(viaMessages.recordCid.equals(born.heads["one/app"]!), "the image's one/app is the message install's app record");
+  assert.deepEqual(viaMessages.rows.map((r) => encode(r.row as never).cid.toString()), rows.filter((r) => r.app === "one").map((r) => encode(r as never).cid.toString()), "the same routes, byte for byte");
   const g = genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>;
-  assert.ok(g.heads["chain/app"].equals(born.heads["chain/app"]));
+  assert.ok(g.heads["three/app"].equals(born.heads["three/app"]), "the genesis carries the heads");
+
+  // Refusals.
+  const fresh = { hasBlock: async () => false, putBlock: async () => {} };
+  const wrong = { ...s, apps: { install: [{ url: tarball.url, hash: "00".repeat(20) }] } };
+  await assert.rejects(installAtBirth(fresh, src.objects, wrong, sys, c), /three\.tgz: its tree is [0-9a-f]{40}, not 0{40}/, "a tarball whose tree is not its hash");
+  const gone = { ...s, apps: { install: [{ url: `${base}/none.tgz`, hash }] } };
+  await assert.rejects(installAtBirth(fresh, src.objects, gone, sys, c), /none\.tgz: 404/);
+  const scanned = await dirSource(image);
+  await assert.rejects(installAtBirth(fresh, scanned.objects, await readSystemTree(anyOf(scanned.objects, src.objects), scanned.root), sys, c), /\.\.\/two is not a directory of the image/, "a directory beside an image read from its tree alone");
+  await demoApp(join(work, "four"), "four");
+  await fs.writeFile(join(work, "four/etc/app.json"), (await fs.readFile(join(work, "four/etc/app.json"), "utf8")).replace('"name"', '"start": {"body": {"kind": "go"}}, "name"'));
+  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: ["../four"] }));
+  const withStart = await imageSource(image);
+  await assert.rejects(installAtBirth(fresh, withStart.objects, await readSystemTree(withStart.objects, withStart.root), sys, c, withStart.apps), /four: its start message is root's/);
+  assert.throws(() => checkImageApps({ install: [{ url: tarball.url } as never] }), /want \{install:/);
+  assert.throws(() => checkImageApps({ install: ["apps/one", "apps/one/"] }), /apps\/one listed twice/);
 });
 
-test("#147: the Open Exchange image (images/open-exchange over images/default) installs chain, git, site and amm (its engine with it); /submit and /lookup at the root to amm's engine, / to the amm landing, the site at /site/", async () => {
-  const base = await dirSource(join(import.meta.dirname, "../../images/default"));
-  const own = await dirSource(join(import.meta.dirname, "../../images/open-exchange"));
+test("#142, #152: the host image (images/host over images/default) names skein-onboard v0.4.0 by tarball, and nothing else", async () => {
+  const base = await imageSource(join(import.meta.dirname, "../../images/default"));
+  const own = await imageSource(join(import.meta.dirname, "../../images/host"));
   const merged = new MemBlocks();
-  const src = anyOf(merged, base.objects, own.objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
-  const root = await mergeImages(src, base.root, own.root, merged);
-  const s = await readSystemTree(src, root);
-  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site", "apps/amm"]);
-  assert.deepEqual(s.apps?.routes?.map((r) => `${r.address}${r.prefix ? " prefix" : ""}`), ["/submit", "/lookup", "/ prefix"], "the default image's / (the site) replaced by the amm landing");
-  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
-  const c = { identity: key(), handle: "a", domain: "localhost" };
-  const sys = resolveSystem(c, programs, s.config, root, s.dispatch);
-  const kept = new Map<string, Uint8Array>();
-  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
-  const born = await installAtBirth(target, src, s, sys, c);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.6.0", "git 0.2.0", "site 0.10.0", "amm 0.9.1"]);
-  assert.deepEqual(Object.keys(born.heads).sort(), ["amm/app", "chain/app", "git/app", "site/app"]);
-  const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
-  const rows = born.rows as Array<Record<string, any>>;
-  const rootRows = rows.filter((r) => r.app === undefined);
-  assert.deepEqual(rootRows.map(showRow), [
-    "root http /submit [kernel.beef] .submit",
-    "root http /lookup [amm.lookup]",
-    "root http / prefix [amm.page]",
-  ], "root's own routes: amm's engine's submit and lookup at the origin root, the landing at /");
-  const amm = get(born.heads["amm/app"]!);
-  assert.ok(rootRows[0]!.program.equals(amm.programs.overlay), "/submit → amm's engine program (as its own /amm/submit)");
-  assert.ok(rows.some((r) => r.app === "amm" && r.address === "/amm/submit" && r.program?.equals(amm.programs.overlay) && r.fn === "submit"), "amm's own /amm/submit stays");
-  assert.ok(rows.some((r) => r.app === "amm" && r.address === "/amm/lookup"), "amm's own /amm/lookup stays");
-  assert.equal(rootRows[2]!.program, undefined, "/ is a read route");
-  assert.deepEqual([rootRows[2]!.root, rootRows[2]!.index], ["www", "index.html"], "the landing: the amm app's www/");
-  assert.ok(rows.some((r) => showRow(r) === "site http /site/ prefix [site.get]"), "the management site at /site/");
-  assert.ok(!rows.some((r) => r.app === undefined && r.filters?.includes("site.get")), "no root route to the site");
+  const src = anyOf(merged, base.objects, own.objects);
+  const s = await readSystemTree(src, await mergeImages(src, base.root, own.root, merged));
+  assert.deepEqual(s.apps?.install, [{ url: "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz", hash: "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae" }]);
+  assert.equal(s.apps?.routes, undefined, "no root route");
 });
 
 const showRow = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
 
-test("#147: skein-host add <handle> --image open-exchange — the row boots unclaimed with chain, git, site and amm and the three root routes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
-  const home = await fs.mkdtemp(join(tmpdir(), "skein-ox-"));
+test("#152: skein-host add <handle> --image takes default, host or a directory — host boots unclaimed with the onboarding app; another name is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-img-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
   const out: string[] = [], err: string[] = [];
   const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
-  assert.equal(await main(["add", "ox", "--image", "nope"], env), 1, "an unknown image name is refused");
-  assert.equal(await main(["add", "ox2", "--image", "open-exchange"], env), 0, err.join("\n"));
-  assert.match(out.join("\n"), /booted from the image .* no owner: claim it/);
+  assert.equal(await main(["add", "ox", "--image", "open-exchange"], env), 1, "open-exchange is no image name here");
+  assert.equal(await main(["add", "plain", "--image", "default"], env), 0, err.join("\n"));
+  assert.equal(await main(["add", "hosted", "--image", "host"], env), 0, err.join("\n"));
+  assert.match(out.join("\n"), /hosted: booted from the image .* no owner: claim it/);
   const db = new HostDb(join(home, "host.db"));
   const signer = new Signer(PrivateKey.fromHex(vars.SKEIN_MASTER_KEY));
   const router = new Router({ db, walletFor: (row) => signer.wallet(row.handle), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
   t.after(async () => { await router.close(); db.close(); });
-  const k = (await router.hydrate("ox2")).kernel;
+  const plain = (await (await router.hydrate("plain")).kernel.dispatch()).rows as Array<Record<string, any>>;
+  assert.deepEqual(plain.filter((r) => r.app), [], "#152: the default image installs no app");
+  const k = (await router.hydrate("hosted")).kernel;
   const rows = (await k.dispatch()).rows as Array<Record<string, any>>;
-  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["chain", "git", "site", "amm"], "the four apps installed at birth");
-  assert.deepEqual(rows.filter((r) => r.app === undefined && r.transport === "http" && ["/submit", "/lookup", "/"].includes(r.address)).map(showRow), [
-    "root http /submit [kernel.beef] .submit",
-    "root http /lookup [amm.lookup]",
-    "root http / prefix [amm.page]",
-  ]);
+  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["onboard"], "the onboarding app, installed at birth");
   assert.ok(rows.some((r) => r.program === "kernel" && r.address === "claim"), "unclaimed: the claim route");
-  for (const n of ["chain", "git", "site", "amm"]) assert.ok(await k.call("head", `${n}/app`), `${n}/app`);
+  assert.equal((await k.store.get(await k.call("head", "onboard/app") as CID) as unknown as { version: string }).version, "0.4.0");
 });

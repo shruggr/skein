@@ -6,7 +6,7 @@
 //   bin/<name>.json   optional: the program record's {inputs, services, description}
 //   etc/config.json   optional: {defaults, peers, names, collect, feeds, roles} (keys hex, $self, $infer or a provider's $<name>; feeds: feeds.ts)
 //   etc/dispatch.json [{transport?, address, prefix?, filters?, program?, fn?, …}] (#77, #143: the routes; genesis.ts DispatchSpec)
-//   etc/apps.json     optional (#141): {install: [<app tree>], routes?: [<root's own route>]}
+//   etc/apps.json     optional (#141, #152): {install: [<directory> | {url, hash}], routes?: [<root's own route>]}
 //   … anything else: the instance's files (SOUL.md, skills/ …)
 //   (etc/subscriptions.json, etc/routes.json, etc/reads.json — the forms before #77 and #115 — are refused, #143)
 //
@@ -28,19 +28,24 @@
 // `boot` here.
 
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, posix, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
 import { programRecord, RAW, rawCid, wasmKind } from "../runtime/programs.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { GIT_RAW, hashBlob, hashTree, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
+import { GIT_RAW, hashBlob, hashTree, parseTree, sha1Cid, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
 import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
+import { appIgnore } from "./install.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
@@ -52,7 +57,7 @@ export const CONFIG = "etc/config.json";
 export const DISPATCH = "etc/dispatch.json";
 /** The forms before #77 and #115, refused (#143: they spoke of senders). */
 export const GONE = ["etc/subscriptions.json", "etc/routes.json", "etc/reads.json"];
-/** #141: the apps an image installs at birth, and root's own routes (ImageApps). */
+/** #141, #152: the apps an image installs at birth, and root's own routes (ImageApps). */
 export const APPS = "etc/apps.json";
 
 /** Blocks by CID, from wherever a source keeps them. */
@@ -100,20 +105,27 @@ export interface SystemTree {
   config: ConfigSpec;
   /** etc/dispatch.json (#77, #143): the routes. Required. */
   dispatch: DispatchSpec[];
-  /** etc/apps.json (#141): the apps installed at birth, and each one's tree (path → tree CID). */
+  /** etc/apps.json (#141): the apps installed at birth, and the trees of those inside the image (appKey → tree CID). */
   apps?: ImageApps;
   appTrees?: Record<string, CID>;
 }
 
 /**
- * etc/apps.json (#141, #143): what an image installs at birth — `install`, the apps' trees in the
- * image (`apps/<name>`), in order; `routes`, root's own routes (no app: an app's upgrade or
- * uninstall leaves them), as the kernel takes them — the site at `/`: the read route
- * {transport: "http", address: "/", prefix: true, filters: ["site.get"], root: "www"}. The genesis
- * carries what installing them as messages would have written: the records (pre-filled), the
- * routes (with `app`) and the heads `<app>/app` (plan.ts planInstall, planRootRoute).
+ * etc/apps.json (#141, #143, #152): what an image installs at birth — `install`, in order, each app
+ * a directory (a path relative to the image: a directory of its tree, or one beside it, `..`, read
+ * when the image is read from its directory) or a release tarball `{url, hash}` (`hash`: the git id
+ * of the app's tree, 40 hex — the tag's tree, `git rev-parse <tag>^{tree}`), which the host fetches
+ * and checks; `routes`, root's own routes (no app: an app's upgrade or uninstall leaves them), as
+ * the kernel takes them. The genesis carries what installing them as messages would have written:
+ * the app's objects and records (pre-filled), the routes (with `app`) and the heads `<app>/app`
+ * (plan.ts planInstall, planRootRoute).
  */
-export interface ImageApps { install: string[]; routes?: DispatchSpec[] }
+export interface ImageApps { install: ImageApp[]; routes?: DispatchSpec[] }
+export type ImageApp = string | { url: string; hash: string };
+/** An entry's key: its path, or its tarball's tree id. */
+export const appKey = (a: ImageApp): string => typeof a === "string" ? posix.normalize(a).replace(/\/$/, "") : a.hash;
+const isImageApp = (a: unknown): a is ImageApp =>
+  typeof a === "string" ? a.length > 0 : !!a && typeof a === "object" && typeof (a as { url?: unknown }).url === "string" && typeof (a as { hash?: unknown }).hash === "string" && /^[0-9a-f]{40}$/.test((a as { hash: string }).hash) && Object.keys(a).length === 2;
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);
@@ -197,15 +209,24 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   const config = json<ConfigSpec>(CONFIG) ?? {};
   if (config.defaults && Object.values(config.defaults).some((v) => typeof v !== "string")) throw new Error(`${CONFIG}: every default is a string`);
   const apps = json<ImageApps>(APPS);
-  if (apps !== undefined && (!apps || !Array.isArray(apps.install) || apps.install.some((x) => typeof x !== "string") || (apps.routes !== undefined && !Array.isArray(apps.routes)))) throw new Error(`${APPS}: want {install: [<path of an app's tree>], routes?: [<root's own route>]}`);
-  if ((apps as { reads?: unknown } | undefined)?.reads !== undefined) throw new Error(`${APPS}: reads: gone (#143) — root's own read is a route in \`routes\` (filters only)`);
+  checkImageApps(apps);
   const appTrees: Record<string, CID> = {};
-  for (const path of apps?.install ?? []) {
-    const e = at(path);
-    if (!e || e.mode !== "40000") throw new Error(`${APPS}: ${path} is not a directory of the tree`);
-    appTrees[path] = e.cid;
+  for (const a of apps?.install ?? []) {
+    if (typeof a !== "string") continue;
+    const e = at(appKey(a));
+    if (e?.mode === "40000") appTrees[appKey(a)] = e.cid;
   }
   return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, dispatch };
+}
+
+/** etc/apps.json's shape (#141, #152), refused with what it wants. */
+export function checkImageApps(apps: ImageApps | undefined): void {
+  if (apps === undefined) return;
+  if (!apps || !Array.isArray(apps.install) || !apps.install.every(isImageApp) || (apps.routes !== undefined && !Array.isArray(apps.routes))) throw new Error(`${APPS}: want {install: [<directory, relative to the image> | {url: <tarball>, hash: <its tree's git id, 40 hex>}], routes?: [<root's own route>]}`);
+  if ((apps as { reads?: unknown }).reads !== undefined) throw new Error(`${APPS}: reads: gone (#143) — root's own read is a route in \`routes\` (filters only)`);
+  const keys = apps.install.map(appKey);
+  const twice = keys.filter((k, i) => keys.indexOf(k) !== i);
+  if (twice.length) throw new Error(`${APPS}: ${twice.join(", ")} listed twice`);
 }
 
 // ---------------------------------------------------------------- the loader
@@ -213,8 +234,12 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
 export type BootSource =
   /** No tree: the stock system in code (the live agents). */
   | { kind: "code" }
-  /** A system tree whose objects are in `objects` (a scanned directory, a store, a verified packet). */
-  | { kind: "tree"; root: CID; objects: Objects }
+  /**
+   * A system tree whose objects are in `objects` (a scanned directory, a store, a verified packet). `apps` (#152):
+   * the trees of the apps its etc/apps.json names by a directory outside the image, by appKey, read with the image
+   * from its directory (their objects in `objects`).
+   */
+  | { kind: "tree"; root: CID; objects: Objects; apps?: Record<string, CID> }
   /** A checkpoint (#30): the state record and every block it reaches, verified; restored, not replayed. */
   | { kind: "checkpoint"; state: CID; blocks: Array<{ cid: CID; bytes: Uint8Array }> };
 
@@ -263,7 +288,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   if (c.root?.length && s.dispatch.some(isClaim)) s = { ...s, dispatch: s.dispatch.filter((r) => !isClaim(r)) };
   let apps: Booted["apps"];
   if (t.apps) {
-    const born = await installAtBirth(k, src.objects, t, s, c);
+    const born = await installAtBirth(k, src.objects, t, s, c, src.apps);
     s = { ...s, dispatch: [...s.dispatch, ...born.rows], heads: born.heads };
     n += born.put;
     apps = born.apps;
@@ -273,14 +298,17 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
 }
 
 /**
- * #141: the apps an image installs at birth (etc/apps.json), planned as an install by messages
- * would be (plan.ts: readStoredApp over the app's tree in the image, planInstall) against the
- * instance as its genesis will stand — the same records, routes and heads — and root's own routes
- * (planRootRoute). An app's config given at creation (`appConfig`) is merged over its manifest's,
- * as an install's `--config` is. Their records are put into the store; the routes and heads go
- * into the genesis.
+ * #141, #152: the apps an image installs at birth (etc/apps.json), each a directory install — the
+ * app's tree (in the image; a directory beside it, `resolved` by the source; a tarball fetched and
+ * checked, appTarball), its objects put — planned as an install by messages would be (plan.ts:
+ * readStoredApp over the app's tree, planInstall) against the instance as its genesis will stand —
+ * the same records, routes and heads — and root's own routes (planRootRoute). An app's config given
+ * at creation (`appConfig`) is merged over its manifest's, as an install's `--config` is. Their
+ * objects and records are put into the store; the routes and heads go into the genesis.
  */
-export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, objects: Objects, t: SystemTree, s: System, c: Genesis2Config): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
+export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, imageObjects: Objects, t: SystemTree, s: System, c: Genesis2Config, resolved: Record<string, CID> = {}): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
+  const fetched = new MemBlocks();
+  const objects = anyOf(imageObjects, fetched);
   const local = new MemBlocks();
   const bytes = async (cid: CID): Promise<Uint8Array> => {
     const b = local.map.get(cid.toString())?.bytes ?? await objects.get(cid);
@@ -303,12 +331,18 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, o
   let put = 0;
   const put1 = async (r: { cid: CID; bytes: Uint8Array }) => { if (!(await k.hasBlock(r.cid))) { await k.putBlock(r.cid, r.bytes); put++; } };
   const apps: Array<{ name: string; version: string; notes: string[] }> = [];
-  for (const path of t.apps!.install) {
-    const app = await readStoredApp(store, t.appTrees![path]!);
+  for (const entry of t.apps!.install) {
+    const key = appKey(entry);
+    let tree = t.appTrees?.[key] ?? resolved[key];
+    if (!tree && typeof entry === "string") throw new Error(`${APPS}: ${entry} is not a directory of the image (a directory beside it is read when the image is booted from its directory)`);
+    if (!tree) tree = await appTarball(entry as { url: string; hash: string }, imageObjects, fetched);
+    if (!t.appTrees?.[key]) for (const o of await treeObjects(objects, tree)) await put1(o);
+    const app = await readStoredApp(store, tree);
     // #142: an app's config at birth (the host skein's onboard: its domain, origin, name and note from host.env), merged as `--config` is.
     const config = c.appConfig?.[app.checked.manifest.name];
     if (config) app.checked.manifest.config = mergeConfig(app.checked.manifest.config, config);
     const p = await planInstall(app, view, { modules: objects });
+    if (p.start) throw new Error(`${APPS}: ${p.app}: its start message is root's, sent by an install by message; a genesis carries no message (install ${p.app} after the claim)`);
     for (const r of p.records) { local.map.set(r.cid.toString(), r); await put1(r); }
     for (const h of p.heads) {
       heads.set(h.name, h.tree);
@@ -412,14 +446,12 @@ export const WASM_DIR = join(ROOT, "wasm");
 export const DEFAULT_IMAGE = join(ROOT, "images/default");
 /** The host image's own part (#142): merged over the default image (mergeImages), the host skein's image. */
 export const HOST_IMAGE = join(ROOT, "images/host");
-/** The Open Exchange image's own part (#147): merged over the default image (mergeImages) — the overlay engine and the amm app, root routes /submit, /lookup and / (the amm landing). */
-export const OPEN_EXCHANGE_IMAGE = join(ROOT, "images/open-exchange");
 
 /**
  * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
  * `base`. A directory in both is merged; a file in both must be the same blob — except `etc/apps.json`,
- * whose `install` and `routes` lists are joined (an app in both is refused; a root route of `over` at the
- * same transport, address and prefix as one of `base`'s replaces it, #147). Any other path in both is a
+ * whose `install` and `routes` lists are joined (an app in both, by appKey, is refused; a root route of
+ * `over` at the same transport, address and prefix as one of `base`'s replaces it, #147). Any other path in both is a
  * collision, refused with its path. The installer's own checks (boxes, heads, paths) run when the merged
  * image's apps are installed at birth (installAtBirth). The new trees and the merged apps.json go into
  * `out`; every other object stays where it was.
@@ -440,9 +472,10 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
       if (had.mode === "40000" && e.mode === "40000") { entries.set(e.name, { ...e, cid: await merge(had.cid, e.cid, path) }); continue; }
       if (path === APPS && had.mode !== "40000" && e.mode !== "40000") {
         const x = JSON.parse(await blob(had.cid, path)) as ImageApps, y = JSON.parse(await blob(e.cid, path)) as ImageApps;
-        const both = (x.install ?? []).filter((p) => (y.install ?? []).includes(p));
+        const theirs = new Set((y.install ?? []).map(appKey));
+        const both = (x.install ?? []).map(appKey).filter((p) => theirs.has(p));
         if (both.length) throw new Error(`${APPS}: ${both.join(", ")} installed by both images`);
-        // #147: a root route of `over` at a route of `base`'s (same transport, address, prefix) replaces it (Open Exchange's `/`).
+        // #147: a root route of `over` at a route of `base`'s (same transport, address, prefix) replaces it.
         const key = (r: DispatchSpec) => `${r.transport ?? "mailbox"} ${r.address}${r.prefix ? " prefix" : ""}`;
         const mine = new Set((y.routes ?? []).map(key));
         const routes = [...(x.routes ?? []).filter((r) => !mine.has(key(r))), ...(y.routes ?? [])];
@@ -462,11 +495,59 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
 
 /**
  * An image as a boot source (#89, #90): a directory (default: the default
- * image), its objects with the repo's pinned modules beside them.
+ * image), its objects with the repo's pinned modules beside them, and the
+ * apps it names by a directory outside it (imageDir).
  */
-export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSource> {
+export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSource & { kind: "tree" }> {
+  const d = await imageDir(dir);
+  return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)), apps: d.apps };
+}
+
+/**
+ * #152: an image directory scanned, and each app its etc/apps.json names by a directory outside it
+ * (`..`, `../<dir>`, an absolute path) scanned from there as `skein install <dir>` reads it
+ * (install.ts appIgnore): the trees by appKey (BootSource `apps`), their objects with the image's.
+ */
+export async function imageDir(dir: string): Promise<{ root: CID; objects: MemBlocks; apps: Record<string, CID> }> {
   const d = await dirSource(dir);
-  return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)) };
+  const apps: Record<string, CID> = {};
+  const file = join(dir, APPS);
+  if (!existsSync(file)) return { ...d, apps };
+  let list: ImageApps;
+  try { list = JSON.parse(readFileSync(file, "utf8")) as ImageApps; } catch (x) { throw new Error(`${APPS}: ${(x as Error).message}`); }
+  checkImageApps(list);
+  for (const a of list.install) {
+    if (typeof a !== "string") continue;
+    const key = appKey(a);
+    if (posix.isAbsolute(key) || key === ".." || key.startsWith("../")) apps[key] = await scan(d.objects, resolve(dir, a), { ignore: appIgnore });
+  }
+  return { ...d, apps };
+}
+
+/**
+ * #152: an app by release tarball, `hash` its tree's git id: the tree the image's objects hold
+ * already, else fetched from `url` (gzip or plain tar), unpacked (a tarball holding one directory,
+ * as a tag's archive does, is that directory), scanned into `into` as `skein install <dir>` reads
+ * a directory (install.ts appIgnore), and refused unless its tree is `hash`.
+ */
+export async function appTarball(a: { url: string; hash: string }, have: Objects, into: MemBlocks, get: typeof fetch = fetch): Promise<CID> {
+  const want = sha1Cid(Buffer.from(a.hash, "hex"));
+  if (await have.get(want)) return want;
+  const r = await get(a.url);
+  if (!r.ok) throw new Error(`${APPS}: ${a.url}: ${r.status} ${r.statusText}`);
+  let bytes: Uint8Array = new Uint8Array(await r.arrayBuffer());
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = gunzipSync(bytes);
+  const dir = mkdtempSync(join(tmpdir(), "skein-app-"));
+  try {
+    const x = spawnSync("tar", ["-x", "-f", "-", "-C", dir], { input: bytes });
+    if (x.status !== 0) throw new Error(`${APPS}: ${a.url}: not a tarball (${x.stderr.toString().trim() || `tar exit ${x.status}`})`);
+    const top = readdirSync(dir, { withFileTypes: true });
+    const root = await scan(into, top.length === 1 && top[0]!.isDirectory() ? join(dir, top[0]!.name) : dir, { ignore: appIgnore });
+    if (!root.equals(want)) throw new Error(`${APPS}: ${a.url}: its tree is ${Buffer.from(root.multihash.digest).toString("hex")}, not ${a.hash}`);
+    return root;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Source B: a packet file, verified (packet.ts) — a system tree to boot, or a checkpoint to restore. */

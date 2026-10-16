@@ -20,7 +20,7 @@
 //                                     of (#113), each with the request that adopts it — for the owner's wallet to send
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
-//   skein-host add <handle> --image <default | open-exchange | dir | tree-cid [--from store.db] | outpoint>
+//   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
@@ -29,8 +29,10 @@
 // `pack` writes a packet (packet.ts: synthetic transactions, never broadcast).
 // `add --image` (#89) boots the new row from an image: a system tree whose
 // genesis names no owner and carries the claim row (`default`: the repo's
-// images/default, the default image; an outpoint is refused until the ORDFS
-// app exists). Its claim row admits anyone: the first claim's sender owns it
+// images/default, the default image; `host`: images/host merged over it, the
+// onboarding app installed at birth; a directory: an image of its own, the
+// apps its etc/apps.json names installed at birth, #152; an outpoint is
+// refused until the ORDFS app exists). Its claim row admits anyone: the first claim's sender owns it
 // (#127) — the owner claims it (`skein claim --instance <handle>` or
 // `skein claim <its origin>`, or a wallet's own claim message); the host
 // holds no owner's key and sends no claim.
@@ -40,7 +42,7 @@
 // host.db) it makes the master secret and host.db as before, the operator's key (SKEIN_OPERATOR_KEY,
 // default $SKEIN_HOME/operator.key: used if present, made if not, plain, 0600) and the HOST SKEIN —
 // Router.createInstance with `host`: from the host image (images/host merged over images/default: the
-// chain, git, site and onboarding apps), its genesis's `root` the operator's key (#143: root from birth;
+// onboarding app), its genesis's `root` the operator's key (#143: root from birth;
 // no claim route), the onboarding app's config
 // from host.env (domain SKEIN_HANDLE_DOMAIN, default the router origin's domain; origin
 // SKEIN_ROUTER_ORIGIN; name SKEIN_HOST_NAME; note SKEIN_HOST_NOTE), the instance manager and the certifier in
@@ -117,7 +119,7 @@ import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
 import { DatabaseSync } from "node:sqlite";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -171,7 +173,7 @@ const USAGE = `usage:
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
-  skein-host add <handle> --image <default | open-exchange | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
+  skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
@@ -223,8 +225,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
           const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
             // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
-            // #147: `open-exchange`, images/open-exchange merged over it (as the host image is).
-            const src = v.image === "default" || v.image === "open-exchange" ? await router.image.source({ image: v.image }) : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
+            // `host`: images/host merged over it (#142), unclaimed.
+            const src = v.image === "default" || v.image === "host" ? await router.image.source({ image: v.image }) : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
             env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein claim --instance ${handle})" : ""}`);
           } catch (e) {
@@ -733,10 +735,7 @@ async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; 
     });
   }
   const spec = v.boot!;
-  if (existsSync(spec) && statSync(spec).isDirectory()) {
-    const d = await dirSource(resolve(spec));
-    return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)) };
-  }
+  if (existsSync(spec) && statSync(spec).isDirectory()) return await imageSource(resolve(spec));
   const root = parseCid(spec);
   const path = v.from ?? row.store;
   if (!existsSync(path)) throw new Error(`--boot ${spec}: no store at ${path} to read the tree from (--from)`);
