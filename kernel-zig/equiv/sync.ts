@@ -27,7 +27,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:net";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,12 +134,18 @@ const walletKeys: Record<string, string> = { a: "1111", b: "1112", c: "1113" };
 const dbs: Partial<Record<Name, HostDb>> = {};
 const routers: Partial<Record<Name, Router>> = {};
 const log = (who: string) => (s: string, l: string) => { if (process.env.VERBOSE || /^sync: /.test(l)) process.stdout.write(`  | [${who}:${s}] ${l}\n`); };
+/** Each router's own SKEIN_HOME: the owner's install finds the instance through its host.db. */
+const homeOf = (h: Name) => join(home, h);
 function router(h: Name): Router {
-  if (!dbs[h]) { dbs[h] = new HostDb(join(home, `${h}-host.db`)); dbs[h]!.add(h, { store: join(home, `instances/${h}/runtime.db`) }); }
+  if (!dbs[h]) {
+    mkdirSync(homeOf(h), { recursive: true });
+    dbs[h] = new HostDb(join(homeOf(h), "host.db"));
+    dbs[h]!.add(h, { store: join(homeOf(h), `instances/${h}/runtime.db`) });
+  }
   return new Router({
-    db: dbs[h]!, walletFor: (row) => ephemeralWallet(key(walletKeys[row.handle]!)), home, owner, idleMs: 0,
+    db: dbs[h]!, walletFor: (row) => ephemeralWallet(key(walletKeys[row.handle]!)), home: homeOf(h), owner, idleMs: 0,
     providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000,
-    kernel: { command: kernel, env: { SKEIN_HOME: home } }, libp2pDiscoveryMs: 300,
+    kernel: { command: kernel, env: { SKEIN_HOME: homeOf(h) } }, libp2pDiscoveryMs: 300,
     genesis: { defaults: { walletNetwork: "regtest" } },
     arc: { url: arcade.url, token: "the-host-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 500, max: 2000 },
     libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports[h]}`], bootstrap: names.filter((x) => x !== h).map(addr), dht: "off", relays: [], mdns: false },
@@ -200,7 +206,7 @@ async function bring(h: Name): Promise<void> {
   await r(h).listen(0);
   await r(h).hydrate(h);
   stores.push(storeOf(h));
-  const host = { home, port: r(h).port!, owner: ownerWallet, settled: () => r(h).settled() };
+  const host = { home: homeOf(h), port: r(h).port!, owner: ownerWallet, settled: () => r(h).settled() };
   for (const dir of [chainDir, overlayDir]) {
     const o = await ownerCli(host, ["install", dir, "--instance", h]);
     if (o.code !== 0) throw new Error(`${h}: install ${dir}: ${o.err.join(" ")}`);
