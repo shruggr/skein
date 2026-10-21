@@ -72,7 +72,9 @@ each entry one app —
   disk when it boots the image from its directory (src/host/boot.ts
   `imageDir`, the BootSource's `apps`), scanned as `skein install <dir>`
   scans one (install.ts `appIgnore`). An app repository carries its image as
-  `image/` listing `..`;
+  `image/` listing `..`: with no `bin/`, that directory is merged over
+  `images/default` before boot, as `images/host` is (below), so it needs only
+  `etc/apps.json`;
 - a **release tarball** `{url, hash}`, `hash` the git id of the app's tree
   (40 hex: `git rev-parse <tag>^{tree}`). The loader (`appTarball`) takes
   the tree from the source if it holds it; else it fetches `url`, unpacks
@@ -218,7 +220,9 @@ The image's genesis is written by `skein-host add <h> --image <spec>`:
 - `default` (the default image as this host holds it: `images/default` with
   its chain part, #132), `host` (the host image, above, with the same chain
   part), a directory (#152: the apps its `etc/apps.json` names beside it read
-  from there), or a tree CID with `--from <store.db>`;
+  from there; one with `bin/` is a complete image, one without is merged
+  over the default image as `images/host` is, with the same chain part), or
+  a tree CID with `--from <store.db>`;
 - an outpoint (`<txid>_<vout>`) is refused for now: an image on chain is read
   through the ORDFS app, which is not built yet.
 

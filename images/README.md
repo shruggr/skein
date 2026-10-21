@@ -11,7 +11,10 @@ boundary programs and, optionally, a list of apps to install at birth.
   `mergeImages`): the host skein's image, with skein-onboard. `skein-host
   add <h> --image host` boots an unclaimed skein from it.
 
-`skein-host add <h> --image <dir>` boots from any image directory.
+`skein-host add <h> --image <dir>` boots from an image directory. One
+with `bin/` is a complete image. One without `bin/` is merged over
+`default/` first, exactly as `host/` is (#152), so an app repository's
+`image/` needs only `etc/apps.json`.
 
 ## An image's form
 
@@ -60,4 +63,6 @@ at birth (a genesis carries no message): install it after the claim.
 
 Two images merge (`mergeImages`): their `install` lists are joined (an app
 in both is refused), and a route of the second at the same transport,
-address and prefix as one of the first replaces it.
+address and prefix as one of the first replaces it. Any other path in both
+(`etc/dispatch.json`, `etc/config.json`, `bin/<name>.json`) is refused
+unless it is the same file: a merge adds paths, it does not replace one.

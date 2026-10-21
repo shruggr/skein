@@ -29,7 +29,7 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -491,6 +491,32 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
     return t.cid;
   };
   return await merge(base, over, "");
+}
+
+/**
+ * #152: an image directory with no `bin/` is an overlay — it carries what it adds (an app repository's
+ * `image/`: `etc/apps.json` alone) and is merged over the default image before boot, as images/host is;
+ * one with `bin/` is a complete image of its own.
+ */
+export function isOverlayImage(dir: string): boolean {
+  const bin = join(dir, BIN);
+  return !(existsSync(bin) && statSync(bin).isDirectory());
+}
+
+/** An image's static part: its tree, its objects, the apps it names beside it (imageDir). */
+export interface ImageStatic { root: CID; objects: Objects; apps: Record<string, CID> }
+
+/**
+ * #142, #152: an overlay image directory (`dir`: images/host, an app repository's `image/`) merged over
+ * `base` (mergeImages: an app in both refused, a root route at the same place replaced, any other path in
+ * both refused unless it is the same blob). The apps each names beside it are kept, by appKey.
+ */
+export async function overlayImage(base: ImageStatic, dir: string): Promise<ImageStatic> {
+  const own = await imageDir(dir);
+  const merged = new MemBlocks();
+  const objects = anyOf(merged, base.objects, own.objects);
+  const root = await mergeImages(objects, base.root, own.root, merged);
+  return { root, objects, apps: { ...base.apps, ...own.apps } };
 }
 
 /**

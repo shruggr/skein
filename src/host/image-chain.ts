@@ -40,7 +40,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { headTree } from "../runtime/heads.ts";
 import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, parseTree, readBlob, readTree, type Entry } from "../runtime/tree.ts";
-import { anyOf, DEFAULT_IMAGE, HOST_IMAGE, imageDir, MemBlocks, mergeImages, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, HOST_IMAGE, imageDir, MemBlocks, overlayImage, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import type { HostDb } from "./instances.ts";
 
 /** Headers per block (skein-sdk `image.per_block`). */
@@ -116,8 +116,8 @@ export class ImageChain {
   private last: Buffer = Buffer.alloc(0);
   private queue: Promise<unknown> = Promise.resolve();
   private stat?: Promise<Static>;
-  /** #142: the host image's static part — its own part merged over the default image, once. */
-  private merged?: Promise<Static>;
+  /** #142, #152: the overlay images' static parts (images/host, a directory with no `bin/`), each merged over the default image once. */
+  private merged = new Map<string, Promise<Static>>();
   /** Settles once the first sync (start) is done: what a creation waits for. */
   ready: Promise<void> = Promise.resolve();
 
@@ -242,17 +242,20 @@ export class ImageChain {
     return this.stat;
   }
 
-  /** #142: the host image's static part — images/host merged over images/default (boot.ts mergeImages), once. */
-  private hostStatic(): Promise<Static> {
-    this.merged ??= (async () => {
-      const base = await this.static();
-      const own = await imageDir(this.o.hostDir ?? HOST_IMAGE);
-      const merged = new MemBlocks();
-      const objects = anyOf(merged, base.objects, own.objects);
-      const root = await mergeImages(objects, base.root, own.root, merged);
-      return { root, entries: parseTree((await objects.get(root))!), objects, apps: { ...base.apps, ...own.apps } };
-    })();
-    return this.merged;
+  /**
+   * #142, #152: an overlay image's static part — its directory (images/host, or one with no `bin/`) merged
+   * over the default image (boot.ts overlayImage, mergeImages), once per directory.
+   */
+  private overlayStatic(dir: string): Promise<Static> {
+    let p = this.merged.get(dir);
+    if (!p) {
+      p = (async () => {
+        const m = await overlayImage(await this.static(), dir);
+        return { ...m, entries: parseTree((await m.objects.get(m.root))!) };
+      })();
+      this.merged.set(dir, p);
+    }
+    return p;
   }
 
   /** The image's root: the static part's entries, `chain` among them. */
@@ -263,17 +266,20 @@ export class ImageChain {
   /**
    * The current image as a boot source (#89, #132): the static part with the
    * chain part at `chain/`; with no chain part, the static part alone (the
-   * repo's images/default, as before). Its objects: host.db's, the scan's,
-   * the repo's pinned modules.
+   * repo's images/default, as before). `host` / `image: "host"`: the host
+   * image; `overlay` (#152): a directory with no `bin/`, merged over the
+   * default image as the host image is, with the same chain part. Its
+   * objects: host.db's, the scan's, the repo's pinned modules.
    */
-  async source(o: { host?: boolean; image?: string } = {}): Promise<BootSource> {
+  async source(o: { host?: boolean; image?: string; overlay?: string } = {}): Promise<BootSource> {
     if (o.image !== undefined && !(IMAGE_NAMES as readonly string[]).includes(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has ${IMAGE_NAMES.join(", ")}`);
-    const named = o.host || o.image === "host";
-    const s = named ? await this.hostStatic() : await this.static();
+    const over = o.overlay ?? (o.host || o.image === "host" ? this.o.hostDir ?? HOST_IMAGE : undefined);
+    const named = over !== undefined;
+    const s = named ? await this.overlayStatic(over) : await this.static();
     const chainObjects = { get: async (cid: CID) => this.o.db.imageBlock(cid.toString()) };
     const chain = this.o.db.setting("image_chain");
     if (named) {
-      // The host image (#142): its root is not kept in host.db; the chain part's objects are the same.
+      // An overlay image (#142 the host image, #152 a directory with no bin/): its root is not kept in host.db; the chain part's objects are the same.
       const root = chain ? await this.rootWith(Cid.parse(chain), s) : undefined;
       const mem = new MemBlocks();
       if (root) await mem.putBlock(root.cid, root.object);

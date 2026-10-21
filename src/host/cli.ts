@@ -30,8 +30,10 @@
 // `add --image` (#89) boots the new row from an image: a system tree whose
 // genesis names no owner and carries the claim row (`default`: the repo's
 // images/default, the default image; `host`: images/host merged over it, the
-// onboarding app installed at birth; a directory: an image of its own, the
-// apps its etc/apps.json names installed at birth, #152; an outpoint is
+// onboarding app installed at birth; a directory with bin/: a complete image
+// of its own; a directory with no bin/ (an app repository's image/, only
+// etc/apps.json): merged over the default image as images/host is — either
+// way the apps its etc/apps.json names installed at birth, #152; an outpoint is
 // refused until the ORDFS app exists). Its claim row admits anyone: the first claim's sender owns it
 // (#127) — the owner claims it (`skein claim --instance <handle>` or
 // `skein claim <its origin>`, or a wallet's own claim message); the host
@@ -123,7 +125,7 @@ import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
 import { DatabaseSync } from "node:sqlite";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -231,9 +233,14 @@ export async function main(argv: string[], given: Env): Promise<number> {
           try {
             // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
             // `host`: images/host merged over it (#142), unclaimed.
-            const src = v.image === "default" || v.image === "host" ? await router.image.source({ image: v.image }) : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
+            // A directory with no bin/ (#152: an app repository's image/, etc/apps.json alone): merged over the
+            // default image as images/host is, with the same chain part. A directory with bin/: a complete image.
+            const overlay = v.image !== undefined && existsSync(v.image) && statSync(v.image).isDirectory() && isOverlayImage(v.image) ? resolve(v.image) : undefined;
+            const src = v.image === "default" || v.image === "host" ? await router.image.source({ image: v.image })
+              : overlay ? await router.image.source({ overlay })
+              : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein claim --instance ${handle})" : ""}`);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? ` · no owner: claim it (skein claim --instance ${handle})` : ""}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
