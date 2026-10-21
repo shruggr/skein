@@ -715,6 +715,7 @@ where they use one. Unset means the default.
 | `SKEIN_FUEL_PER_STEP` | a new genesis's `fuelPerStep` |
 | `SKEIN_OWNER`, `SKEIN_OWNER_HANDLE` | a new code genesis's owner key and its handle (default `david@localhost`); bin/skein-host fills the key from `owner.identity` |
 | `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (default: the owner's mailbox instance here) |
+| `SKEIN_NETWORK` | the network the whole host runs on: `main`, `test` or `regtest` (default `main`; any other value: `skein-host` refuses to start; `run` prints it). Every genesis the host makes has it as `defaults.walletNetwork`, under a tree's own config; the chain app takes its network from that default, so `SKEIN_HEADERS_URL` must feed this network's headers or the chain app refuses them |
 | `SKEIN_INFER`, `SKEIN_INFER_HANDLE` | a new code genesis's inference peer key and handle (default `infer@localhost`); bin/skein-host fills the key from `infer.identity` |
 | `SKEIN_HOST_URL` | where `event` and `import-handles` find the running host (default `http://127.0.0.1:8100`) |
 | `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above) |

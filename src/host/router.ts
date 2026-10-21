@@ -182,6 +182,8 @@ export interface RouterOptions {
   port?: number;
   /** The owner's messagebox URL for a new agent's genesis; default the owner's mailbox instance here, if there is one. */
   ownerMessagebox?: string;
+  /** The network the whole host runs on (SKEIN_NETWORK): every genesis it makes has it as `defaults.walletNetwork`. */
+  network?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
   ledgerMs?: number;
   /** Tests: the clock entries are stamped with (and ticks fall due by: cron.ts). */
@@ -894,7 +896,7 @@ export class Router {
   imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
     const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
     return {
-      identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), addressBook: seed,
+      identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
       feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
@@ -1046,7 +1048,7 @@ export class Router {
   genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
     if (row.kind === "mailbox") {
       if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
-      return { identity, root: [row.owner], handle: row.handle, domain: row.domain, mailbox: true };
+      return { identity, root: [row.owner], handle: row.handle, domain: row.domain, mailbox: true, network: this.o.network };
     }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const genesisDefaults = this.o.genesis?.defaults;
@@ -1057,7 +1059,7 @@ export class Router {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
+        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, network: this.o.network, ...facts,
       };
     }
     return {
@@ -1067,7 +1069,7 @@ export class Router {
       subscriptions: this.o.genesis?.subscriptions,
       feeds: this.o.genesis?.feeds,
       libp2p: this.o.genesis?.libp2p, dispatch: this.o.genesis?.dispatch,
-      ...facts,
+      network: this.o.network, ...facts,
     };
   }
 

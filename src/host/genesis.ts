@@ -106,6 +106,12 @@ export interface Genesis2Config {
   /** Where the instance's own domain resolves (`defaults.resolveOrigin`): the host's origin in dev. */
   resolveOrigin?: string;
   /**
+   * The network the whole host runs on (SKEIN_NETWORK: `main` | `test` | `regtest`), written as
+   * `defaults.walletNetwork` at the host's fill-ins level (a tree's config and `overrides` win).
+   * A network fact, not a host fact: the chain app takes its network from it (`config.chain.network`).
+   */
+  network?: string;
+  /**
    * The address book's seed (#70): the host's providers (their keys, `local`,
    * address = name; #126: no role) and, when the host knows it, the root holder's mailbox. Written
    * into the head `peers` when the genesis is processed.
@@ -410,12 +416,17 @@ function feedsIn(fs: FeedSpec[] | undefined): { feeds?: FeedSpec[] } {
   return fs.length ? { feeds: fs } : {};
 }
 
-/** DEFAULTS < the host's fill-ins < the tree's config < explicit overrides (warned when they replace a tree value). */
+/** DEFAULTS < the host's fill-ins (its facts, its network) < the tree's config < explicit overrides (warned when they replace a tree value). */
 function mergeDefaults(c: Genesis2Config, tree: Record<string, string> = {}): Record<string, string> {
   for (const [k, v] of Object.entries(c.overrides ?? {})) {
     if (tree[k] !== undefined && tree[k] !== v) c.warn?.(`host override: ${k} = ${v} replaces the system tree's ${k} = ${tree[k]}`);
   }
-  return { ...DEFAULTS, ...SESSION_DEFAULTS, ...hostFacts(c), ...c.defaults, ...tree, ...c.overrides };
+  return { ...DEFAULTS, ...SESSION_DEFAULTS, ...hostFacts(c), ...networkDefault(c), ...c.defaults, ...tree, ...c.overrides };
+}
+
+/** The host's network (SKEIN_NETWORK) as the genesis default `walletNetwork`: a network fact, beside the host facts. */
+function networkDefault(c: Pick<Genesis2Config, "network">): Record<string, string> {
+  return c.network ? { walletNetwork: c.network } : {};
 }
 
 /** What the host knows at genesis (#40): the root holder's messagebox, where its own domain resolves. */
@@ -430,10 +441,10 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
     // A mailbox instance: the front door and the messagebox, nothing else.
     const mine: Record<string, CID> = { frontdoor: programs.frontdoor!, messagebox: programs.messagebox! };
     const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, { peers: {}, names: [] }, undefined, MAILBOX_DISPATCH);
-    return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
+    return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...networkDefault(c), ...c.defaults, ...c.overrides } };
   }
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, {}, undefined, STOCK_DISPATCH.filter(known)), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, {}, undefined, STOCK_DISPATCH.filter(known)), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...networkDefault(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }
 
 /** The genesis record: who the instance is, and its system. */

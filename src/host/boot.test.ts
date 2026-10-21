@@ -11,7 +11,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import * as dagCbor from "@ipld/dag-cbor";
-import { main } from "./cli.ts";
+import { hostNetwork, main } from "./cli.ts";
 import { HostDb } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { Router } from "./router.ts";
@@ -23,7 +23,7 @@ import type { AddressInfo } from "node:net";
 import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, MemBlocks, mergeImages, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
 import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
-import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
+import { codeSystem, genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
 import { WALLET } from "../runtime/programs.ts";
 
 const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
@@ -195,6 +195,45 @@ test("#152: an image's apps — a directory of the image, a directory beside it,
   await assert.rejects(installAtBirth(fresh, withStart.objects, await readSystemTree(withStart.objects, withStart.root), sys, c, withStart.apps), /four: its start message is root's/);
   assert.throws(() => checkImageApps({ install: [{ url: tarball.url } as never] }), /want \{install:/);
   assert.throws(() => checkImageApps({ install: ["apps/one", "apps/one/"] }), /apps\/one listed twice/);
+});
+
+test("SKEIN_NETWORK: the whole host's network, every genesis's defaults.walletNetwork (default main) under a tree's own; any other value refuses to start", async (t) => {
+  assert.equal(hostNetwork({}), "main", "unset: main");
+  assert.equal(hostNetwork({ SKEIN_NETWORK: "test" }), "test");
+  assert.throws(() => hostNetwork({ SKEIN_NETWORK: "testnet" }), /SKEIN_NETWORK is main, test or regtest/);
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-net-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const err: string[] = [];
+  assert.equal(await main(["list"], { vars: { HOME: home, SKEIN_HOME: home, SKEIN_NETWORK: "testnet" }, out: () => {}, err: (l) => err.push(l) }), 2, "skein-host refuses to start");
+  assert.deepEqual(err, ['skein-host: SKEIN_NETWORK is main, test or regtest (default main), not "testnet"']);
+
+  const { root, objects } = await tree(t, { "bin/echo.wasm": MODULE, "etc/dispatch.json": JSON.stringify([{ address: "chat", program: "echo" }]) });
+  const own = await tree(t, { "bin/echo.wasm": MODULE, "etc/config.json": JSON.stringify({ defaults: { walletNetwork: "regtest" } }), "etc/dispatch.json": JSON.stringify([{ address: "chat", program: "echo" }]) });
+  const plain = await readSystemTree(objects, root), pinned = await readSystemTree(own.objects, own.root);
+  const programs = Object.fromEntries(plain.programs.map((p) => [p.name, encode(p.record).cid]));
+  const db = new HostDb(join(home, "net.db"));
+  const signer = new Signer(PrivateKey.fromRandom());
+  const routers: Router[] = [];
+  t.after(async () => { for (const r of routers) await r.close(); db.close(); });
+  const router = (vars: Record<string, string>) => {
+    const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, cron: false, network: hostNetwork(vars) });
+    routers.push(r);
+    return r;
+  };
+  const row = { handle: "a", domain: "localhost" };
+  const net = (c: Parameters<typeof resolveSystem>[0], s = plain, r = root) => (genesisRecord(c, resolveSystem(c, programs, s.config, r, s.dispatch)) as Record<string, any>).defaults.walletNetwork;
+  const main_ = router({});
+  assert.equal(net(main_.genesisConfig(row, key(), false)), "main", "unset: main in the genesis record");
+  const test_ = router({ SKEIN_NETWORK: "test" });
+  assert.equal(net(test_.genesisConfig(row, key(), false)), "test", "an agent's genesis");
+  assert.equal(net(test_.imageConfig(row, key())), "test", "an image's genesis (the host skein, an instance the manager makes)");
+  assert.equal((genesisRecord(test_.genesisConfig(row, key()), codeSystem(test_.genesisConfig(row, key()), programs)) as Record<string, any>).defaults.walletNetwork, "test", "code genesis");
+  const mailbox = test_.genesisConfig({ ...row, kind: "mailbox", owner: key() }, key());
+  assert.equal((genesisRecord(mailbox, codeSystem(mailbox, { frontdoor: programs.echo!, messagebox: programs.echo! })) as Record<string, any>).defaults.walletNetwork, "test", "a mailbox instance's genesis");
+  assert.equal(net(test_.imageConfig(row, key()), pinned, own.root), "regtest", "a tree's defaults.walletNetwork wins over the host's network");
+  const warned: string[] = [];
+  assert.equal(net({ ...test_.imageConfig(row, key()), overrides: { walletNetwork: "main" }, warn: (l) => warned.push(l) }, pinned, own.root), "main", "an explicit override wins over the tree");
+  assert.match(warned[0]!, /replaces the system tree's walletNetwork = regtest/);
 });
 
 test("#142, #152: the host image (images/host over images/default) names skein-onboard v0.4.0 by tarball, and nothing else", async () => {

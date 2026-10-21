@@ -89,6 +89,10 @@
 //                         (config.onboard), written at the host skein's birth from these settings
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
+//   SKEIN_NETWORK         the network the whole host runs on: main | test | regtest, default main (any other value:
+//                         skein-host refuses to start). Every genesis the host makes has it as defaults.walletNetwork,
+//                         under a tree's own config; the chain app takes its network from that default, so
+//                         SKEIN_HEADERS_URL must feed this network's headers or the chain app refuses them
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
 //   SKEIN_ANSWER_WAIT_MS  how long the front door holds a request waiting on its thread's answer (ms) before 503 +
 //                         Retry-After; default 120000 (two minutes; frontdoor.ts)
@@ -186,6 +190,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
   const env: Env = { ...given, vars: withHostEnv(given.vars) }; // #142: host.env's SKEIN_* under the environment
   const home = homeOf(env.vars);
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") { env.out(USAGE); return cmd ? 0 : 2; }
+  try { hostNetwork(env.vars); } catch (e) { env.err(`skein-host: ${(e as Error).message}`); return 2; }
   mkdirSync(home, { recursive: true });
   const db = new HostDb(join(home, "host.db"));
   try {
@@ -301,6 +306,14 @@ export async function main(argv: string[], given: Env): Promise<number> {
   } finally {
     if (cmd !== "run") db.close(); // run keeps it (and closes it on a signal)
   }
+}
+
+/** The network the whole host runs on (SKEIN_NETWORK, default main): a network fact, written as every genesis's `defaults.walletNetwork`. */
+export const NETWORKS = ["main", "test", "regtest"] as const;
+export function hostNetwork(v: Env["vars"]): string {
+  const n = v.SKEIN_NETWORK || "main";
+  if (!(NETWORKS as readonly string[]).includes(n)) throw new Error(`SKEIN_NETWORK is main, test or regtest (default main), not ${JSON.stringify(n)}`);
+  return n;
 }
 
 const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
@@ -660,6 +673,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
+    network: hostNetwork(v),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     // #142: settings host.env may give (the environment's are read where they are used, too).
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
@@ -866,6 +880,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   await router.listenControl(sock).then(() => env.out(`skein-host: control socket at ${sock}`), (e: Error) => env.err(`skein-host: control socket: ${e.message}`));
   const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
   if (messagebox !== undefined) env.out(`skein-host: router at http://127.0.0.1:${messagebox} · an instance at ${router.originOf("<handle>")} (or /@<handle>)`);
+  env.out(`skein-host: network ${router.o.network} (SKEIN_NETWORK): every new genesis's defaults.walletNetwork, the chain app's network`);
   const omb = router.ownerMessagebox();
   if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
   else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);

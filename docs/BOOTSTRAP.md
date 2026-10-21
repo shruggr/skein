@@ -371,7 +371,12 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   which only fill what the tree leaves unset, then the tree's `defaults`. An
   instance's behaviour comes from its tree. The one exception is an explicit
   dev override, `SKEIN_FUEL_PER_STEP`: it wins over the tree, and the host
-  logs a warning when it replaces a value the tree set.
+  logs a warning when it replaces a value the tree set. The host's network
+  (`SKEIN_NETWORK`: `main`, `test` or `regtest`, default `main`) is one of
+  the host's fill-ins, `defaults.walletNetwork` in every genesis it makes
+  (a network fact, not a host fact); the chain app takes its network from
+  it, so `SKEIN_HEADERS_URL` must feed that network's headers or the chain
+  app refuses them.
 - `peers` and `names`, when the tree omits them, are the host's (as in code
   genesis). `collect` defaults to `["completions"]`.
 - The genesis gains `tree: <root>`. It is a git-raw CID, checked by

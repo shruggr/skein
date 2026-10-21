@@ -151,6 +151,7 @@ else
 fi
 
 # 3b. The host skein's chain, git and site (#152), then root's read route `/` to the site.
+# The chain app takes its network from the genesis default SKEIN_NETWORK sets (defaults.walletNetwork; SKEIN_HEADERS_URL must feed that network's headers).
 app_dir() { if [ -n "$1" ]; then echo "$1"; else checkout "$2"; fi; }
 if [ -n "$hostskein" ]; then
   for dir in "$(app_dir "${SKEIN_CHAIN_DIR:-}" "${SKEIN_CHAIN_APP:-https://github.com/shruggr/skein-chain#v0.6.0}")" \
