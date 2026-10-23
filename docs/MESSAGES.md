@@ -1425,11 +1425,16 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   An unsigned read: no entry, nothing logged; metered as a read (bytes
   served, billing.ts). A runtime without the tool records the events and
   nothing happens. Beats are unbilled for now (#130).
-- **Overlay sync (#150).** The host's own, beside the liveness tool
-  (src/host/sync.ts); an overlay app (shruggr/skein-overlay 0.14.0) keeps
-  the anchors and answers the reads. Every node serves
-  **`/skein/overlay/sync/1.0.0`** itself (no row, no entry: like
-  /skein/message/1.0.0, a host protocol), one dag-cbor frame each way:
+- **Overlay sync (#150, #154).** The pulling half is the host's, beside
+  the liveness tool (src/host/sync.ts); the answering half is the overlay
+  engine's (shruggr/skein-overlay ≥ 0.15.0, fn `sync`), through the front
+  door. An app that serves sync declares the row
+  `{transport: "libp2p", address: "/skein/overlay/sync/1.0.0", filters:
+  ["sync"]}` (a libp2p protocol's read route, #154: filters only, no
+  handler) with `filters: {sync: "overlay.sync"}`; each inbound frame is
+  one front-door call, the filter's answer written back as the frame
+  (p2p.ts `serve`), nothing logged; an app that declares no row serves no
+  sync. One dag-cbor frame each way:
 
       {kind: "locator", topic, locator: [{height, anchor: bytes(32)}]}
           → {kind: "locator", topic, genesisHeight?, agreedHeight?, tipHeight?}
@@ -1438,8 +1443,12 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
       {kind: "tx", topic, txid}  → {kind: "tx", txid, beef?: bytes}   (absent: not held)
       anything else              → {kind: "error", message}
 
-  answered from the overlay's reads `/<app>/anchors`, `/<app>/admitted`
-  and `/<app>/holds` (the app is the one beating on `<topic>-live`).
+  answered from the engine's state (its `anchors`, `admitted` and
+  `holds`, the functions its read routes run). The puller reads its own
+  overlay's state (its locator, what it lacks) by a kernel call of the
+  engine — the app beating on `<topic>-live`, its role `overlay`, fn
+  `anchors` / `admitted` — not through the app's http table, which an app
+  need not publish; it asks a peer by `request` on the stream.
   - **Catch-up.** A beat the liveness tool newly keeps from another peer
     on `<topic>-live`, whose `tipAnchor` is not ours at its `tipHeight`,
     starts one: our locator (tip, tip-1, tip-2, tip-4 … genesis; empty for a

@@ -82,6 +82,12 @@ pub const Row = struct {
     }
 };
 
+/// Whether a route at `transport`/`address` can carry an answer back (#143, #154): http, and a libp2p
+/// stream protocol (`/…`) — a read route's transports. A libp2p topic (gossip) yields a verdict only.
+pub fn answers(transport: []const u8, address: []const u8) bool {
+    return std.mem.eql(u8, transport, "http") or (std.mem.eql(u8, transport, "libp2p") and std.mem.startsWith(u8, address, "/"));
+}
+
 pub fn isTransport(t: []const u8) bool {
     for (transports) |x| if (std.mem.eql(u8, x, t)) return true;
     return false;
@@ -163,8 +169,9 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     if (v.get("app")) |x| if (x != .null and Value.str(x) == null) return try a.dupe(u8, "app: want text");
     if (v.get("fn")) |f| if (f != .string and f != .null) return try a.dupe(u8, "fn: want text");
     const prog = v.get("program") orelse {
-        // A read route (#143): filters only; its last filter answers.
-        if (!std.mem.eql(u8, t, "http")) return try a.dupe(u8, "program: only an http route may have none (a read route: its filters answer)");
+        // A read route (#143): filters only; its last filter answers. Only a transport that carries an
+        // answer has one (#154): http, and a libp2p stream protocol (address `/…`); a topic has no one to answer.
+        if (!answers(t, addr)) return try a.dupe(u8, "program: only an http route or a libp2p protocol (/…) may have none (a read route: its filters answer)");
         if (n_filters == 0) return try a.dupe(u8, "a read route (no program) names its filters: the last one answers");
         if (v.get("fn") != null) return try a.dupe(u8, "fn: a read route has no handler");
         return null;
@@ -414,9 +421,14 @@ test "routes: filters, read routes, prefixes; an http path exact first, then the
     const read = try route(a, "http", "/site/", true, &.{"site.get"}, null, "read");
     try std.testing.expect((try problem(a, read)) == null);
     try std.testing.expect(rowOf(read).?.isRead());
-    // A read route names its filters; only http routes may have no handler.
+    // A read route names its filters; only http routes and libp2p protocols (#154) may have no handler.
     try std.testing.expect((try problem(a, try route(a, "http", "/x", false, &.{}, null, "x"))) != null);
     try std.testing.expect((try problem(a, try route(a, "mailbox", "x", false, &.{"site.get"}, null, "x"))) != null);
+    const stream_read = try route(a, "libp2p", "/skein/overlay/sync/1.0.0", false, &.{"overlay.sync"}, null, "sync");
+    try std.testing.expect((try problem(a, stream_read)) == null);
+    try std.testing.expect(rowOf(stream_read).?.isRead());
+    try std.testing.expect((try problem(a, try route(a, "libp2p", "/skein/overlay/sync/1.0.0", false, &.{}, null, "sync"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_ab", false, &.{"overlay.sync"}, null, "topic"))) != null);
     // Filters: the kernel's two, or <app>.<filter>; none on an event route.
     try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{ "kernel.brc104", "kernel.beef", "amm.quote" }, cid1, "y"))) == null);
     try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{"kernel.nope"}, cid1, "y"))) != null);

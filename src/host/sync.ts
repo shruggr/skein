@@ -30,9 +30,17 @@
 //                   answered goes into the receive row as from the peer that sent
 //                   it. Asked again with a growing delay while it stands; `unwant`
 //                   ends it. Standing wants are folded from the log at hydrate.
-//   answering       a peer's request on the stream is answered from the overlay's
-//                   reads: the locator from `/anchors`, a range from `/admitted`, a
-//                   transaction from `/holds`.
+//   answering       not the host's (shruggr/skein#154): the engine answers the
+//                   stream through the front door, on the libp2p row an app declares
+//                   (`{transport: "libp2p", address: "/skein/overlay/sync/1.0.0",
+//                   filters: ["sync"]}`, its filter `sync` the engine's fn `sync`,
+//                   shruggr/skein-overlay#5): each frame one front-door call, the
+//                   filter's answer written back as the frame (p2p.ts `serve`), nothing
+//                   logged. An app that declares no row serves no sync.
+//   our own reads   the locator and the "what we lack" check read our own overlay's
+//                   state by a kernel call of its engine (fn `anchors`, `admitted`, the
+//                   functions its read routes run; router.ts `overlayRead`), not
+//                   through the app's http table, which an app need not publish.
 //
 // The wire, one dag-cbor frame each way:
 //
@@ -44,8 +52,9 @@
 //       → {kind: "tx", txid, beef?: bytes}                                                   (absent: not held)
 //   anything else → {kind: "error", message}
 //
-// Nothing here is logged in the instance: what reaches it is the BEEFs handed
-// to the receive row, each an entry (replayed as any libp2p frame).
+// The wire is the engine's; the puller speaks it by `request`. Nothing here is
+// logged in the instance: what reaches it is the BEEFs handed to the receive
+// row, each an entry (replayed as any libp2p frame).
 
 import * as dagCbor from "@ipld/dag-cbor";
 import { MerklePath } from "@bsv/sdk";
@@ -62,8 +71,12 @@ const LIVE = "-live";
 export interface SyncOptions {
   /** The app that beats on `<topic>-live` for `handle` (its overlay), if any. */
   overlayOf(handle: string, liveTopic: string): string | undefined;
-  /** An app's read route (`/<app><path>`), its JSON answer; throws on a status other than 200. */
-  read(handle: string, app: string, path: string, query: Record<string, string>): Promise<unknown>;
+  /**
+   * Our own overlay's read (shruggr/skein#154): the engine's function `fn` (`anchors`, `admitted`)
+   * over `handle`'s current state, with its read route's query; its JSON answer. Throws on a
+   * status other than 200.
+   */
+  local(handle: string, app: string, fn: "anchors" | "admitted", query: Record<string, string>): Promise<unknown>;
   /** One BEEF into the overlay's receive row, as from `peer` (its peer ID). */
   deliver(handle: string, peer: string, beef: Uint8Array): Promise<InboundAnswer>;
   /** The chain state's header at `height`: its hash and merkle root (display hex). */
@@ -174,7 +187,7 @@ export class OverlaySync {
   }
 
   private async anchors(handle: string, app: string, topic: string, heights?: number[]): Promise<Anchors> {
-    return await this.o.read(handle, app, "/anchors", { topic, ...(heights ? { heights: heights.join(",") } : {}) }) as Anchors;
+    return await this.o.local(handle, app, "anchors", { topic, ...(heights ? { heights: heights.join(",") } : {}) }) as Anchors;
   }
 
   private async ask(handle: string, peer: string, req: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -213,7 +226,7 @@ export class OverlaySync {
       if (!ok) continue;
       const ours = new Set<string>();
       for (let h: number | null = r.from; h !== null && h <= r.to;) {
-        const page = await this.o.read(handle, app, "/admitted", { topic, fromHeight: String(h), toHeight: String(r.to) }) as Admitted;
+        const page = await this.o.local(handle, app, "admitted", { topic, fromHeight: String(h), toHeight: String(r.to) }) as Admitted;
         for (const b of page.blocks) for (const t of b.txids) ours.add(t);
         h = page.nextHeight;
       }
@@ -290,7 +303,7 @@ export class OverlaySync {
   private async landed(handle: string, app: string, topic: string, height: number, txids: string[]): Promise<void> {
     const end = Date.now() + 10_000;
     while (Date.now() < end && !this.stopped) {
-      const page = await this.o.read(handle, app, "/admitted", { topic, fromHeight: String(height), toHeight: String(height) }) as Admitted;
+      const page = await this.o.local(handle, app, "admitted", { topic, fromHeight: String(height), toHeight: String(height) }) as Admitted;
       const have = new Set(page.blocks.flatMap((b) => b.txids));
       if (txids.every((t) => have.has(t))) return;
       await sleep(100);
@@ -339,52 +352,4 @@ export class OverlaySync {
     for (const d of this.dropped.get(handle) ?? []) out.delete(d);
     return [...out];
   }
-
-  // ---------------------------------------------------------------- answering a peer
-
-  /** One request frame from `remote` on the sync protocol: its answer frame. */
-  async serve(handle: string, remote: string, frame: Uint8Array): Promise<Uint8Array> {
-    let req: Record<string, unknown>;
-    try { req = dagCbor.decode(frame) as Record<string, unknown>; } catch { return dagCbor.encode({ kind: "error", message: "not dag-cbor" }); }
-    try {
-      return dagCbor.encode(await this.answer(handle, req));
-    } catch (e) {
-      this.say(handle, `${String(req.kind)} from ${remote}: ${(e as Error).message}`);
-      return dagCbor.encode({ kind: "error", message: (e as Error).message });
-    }
-  }
-
-  private async answer(handle: string, req: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const topic = req.topic;
-    if (typeof topic !== "string" || !topic) throw new Error("no topic");
-    const app = this.o.overlayOf(handle, `${topic}${LIVE}`);
-    if (!app) throw new Error(`${topic} is not served here`);
-    if (req.kind === "locator") {
-      const loc = Array.isArray(req.locator) ? req.locator as Array<{ height?: unknown; anchor?: unknown }> : [];
-      const heights = loc.filter((x) => typeof x.height === "number" && x.anchor instanceof Uint8Array);
-      const ours = await this.anchors(handle, app, topic, heights.length ? heights.map((x) => x.height as number) : [0]);
-      const mine = new Map(ours.anchors.map((x) => [x.height, x.anchor]));
-      let agreed: number | undefined;
-      for (const x of heights) if (mine.get(x.height as number) === hex(x.anchor as Uint8Array) && (agreed === undefined || (x.height as number) > agreed)) agreed = x.height as number;
-      return {
-        kind: "locator", topic,
-        ...(ours.genesisHeight !== undefined ? { genesisHeight: ours.genesisHeight, tipHeight: ours.tipHeight } : {}),
-        ...(agreed !== undefined ? { agreedHeight: agreed } : {}),
-      };
-    }
-    if (req.kind === "admitted") {
-      const q: Record<string, string> = { topic };
-      for (const f of ["fromHeight", "toHeight", "limit"]) if (typeof req[f] === "number") q[f] = String(req[f]);
-      const a = await this.o.read(handle, app, "/admitted", q) as Admitted;
-      return { kind: "admitted", topic, blocks: a.blocks, nextHeight: a.nextHeight };
-    }
-    if (req.kind === "tx") {
-      const txid = req.txid;
-      if (typeof txid !== "string" || !/^[0-9a-f]{64}$/.test(txid)) throw new Error("tx: txid is hex");
-      const h = await this.o.read(handle, app, "/holds", { txid }) as { beef?: string };
-      return { kind: "tx", txid, ...(typeof h.beef === "string" ? { beef: Uint8Array.from(Buffer.from(h.beef, "hex")) } : {}) };
-    }
-    throw new Error(`no request ${String(req.kind)}`);
-  }
 }
-

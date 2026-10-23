@@ -347,7 +347,7 @@ export function rowsOf(specs: DispatchSpec[], programs: Record<string, CID>): Di
     if (!TRANSPORTS.includes(transport)) throw new Error(`etc/dispatch.json: route ${s.address}: transport ${JSON.stringify(transport)} is not mailbox, event, http, libp2p or local`);
     if (s.filters !== undefined && (!Array.isArray(s.filters) || !s.filters.every(isFilterRef))) throw new Error(`etc/dispatch.json: route ${s.address}: filters is a list of "kernel.brc104", "kernel.beef" or "<app>.<filter>"`);
     if (s.program === undefined) {
-      if (transport !== "http" || !s.filters?.length) throw new Error(`etc/dispatch.json: route ${s.address}: no program — only an http read route (its filters answer) has none`);
+      if (!(transport === "http" || (transport === "libp2p" && s.address.startsWith("/"))) || !s.filters?.length) throw new Error(`etc/dispatch.json: route ${s.address}: no program — only an http or libp2p protocol (/…) read route (its filters answer) has none`);
       const { transport: _t, ...rest } = s;
       void _t;
       out.push({ ...rest, transport } as DispatchRow);

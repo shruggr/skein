@@ -123,6 +123,8 @@ import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { rootOf } from "./install.ts";
+import { OVERLAY_ROLE } from "./manifest.ts";
+import { appHead } from "./plan.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
@@ -436,13 +438,12 @@ export class Router {
         // #126: a beacon's beat signed by the instance's signer, as an intention request is.
         sign: (h, data) => this.signAs(h, data),
         identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
-        hostProtocols: { [SYNC_PROTOCOL]: (h, remote, frame) => this.sync!.serve(h, remote.toString(), frame) },
         beat: (h, topic, b) => this.sync?.beat(h, topic, b),
       });
       const p2pHost = this.p2p;
       this.sync = new OverlaySync({
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
-        read: (h, app, path, query) => this.appRead(h, app, path, query),
+        local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
         deliver: (h, peer, beef) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef }),
         header: async (h, height) => {
           const row = this.o.db.get(h);
@@ -699,7 +700,9 @@ export class Router {
    * on, once it comes to rest (#66). The front door verifies, routes, and
    * admits what an accept carries (the message's `p2p` event first); a
    * redelivered message it accepted before is `ignore`. Its thread failing,
-   * or not answering within the wait, is `ignore` (no penalty).
+   * or not answering within the wait, is `ignore` (no penalty). A frame a
+   * route's filter answers at the door (a read, #143: nothing written) is
+   * answered with the filter's body (#154: the overlay's sync protocol).
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
     const l = await this.hydrate(handle);
@@ -716,6 +719,8 @@ export class Router {
       entry = await appendRequest(l.kernel, "libp2p", record, this.now());
     } catch (e) {
       if (!(e instanceof DoorAnswered)) throw e;
+      // #154: a frame on a stream answered by a filter (a read: nothing written) — its body is the answer frame.
+      if (call.topic === undefined && e.answer.kind === "answer") return { verdict: "accept", body: e.answer.body ?? new Uint8Array() };
       // #121, #143: turned away at the door (nothing written). A bad signature or a bad BEEF is the sender's fault
       // (reject: GossipSub penalises the forwarder); what this instance cannot judge (no chain state, a failing check) is ignore.
       const reason = e.answer.reason ?? "turned away";
@@ -1268,14 +1273,31 @@ export class Router {
     try { return foldWants(await emittedEvents(s, (rec) => { const e = wantEvent(rec); return "refused" in e ? undefined : e; })); } finally { s.close(); }
   }
 
-  /** An app's read route at `/<app><path>` (shruggr/skein#150: the overlay's `/anchors`, `/admitted`, `/holds`), its JSON answer. */
-  private async appRead(handle: string, app: string, path: string, query: Record<string, string>): Promise<unknown> {
+  /**
+   * shruggr/skein#154: our own overlay's read, for the sync's puller (its locator and what it lacks) —
+   * the engine's function `fn` (`anchors`, `admitted`) by a kernel call (the `call` op; nothing
+   * appended, nothing logged), not through the app's http table, which an app need not publish. The
+   * program is the app record's engine (its role `overlay`); the argument is what a read route's
+   * filter is handed (docs/APPS.md "Filters": the route handler contract's fields), `match` naming the
+   * app, so the engine reads its configuration from the app record as it does for its read routes.
+   * Its answer is the read route's `{status, type, body}`: the body's JSON, or a throw on another status.
+   */
+  private async overlayRead(handle: string, app: string, fn: "anchors" | "admitted", query: Record<string, string>): Promise<unknown> {
     const l = await this.hydrate(handle);
+    const root = await l.kernel.call("head", appHead(app)) as CID | null;
+    if (!root) throw new Error(`${app}: no app record`);
+    const engine = (await l.kernel.store.get(root) as { programs?: Record<string, unknown> }).programs?.[OVERLAY_ROLE];
+    if (!(engine instanceof CID)) throw new Error(`${app}: its app record has no engine (role ${OVERLAY_ROLE})`);
     const qs = new URLSearchParams(query).toString();
-    const route = `/${app}${path}`;
-    const a = await serveHttp(l.kernel, { method: "GET", path: route, route, query: qs ? `?${qs}` : "", headers: {}, body: new Uint8Array() }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
-    if (a.status !== 200) throw new Error(`${route}: ${a.status} ${Buffer.from(a.body).toString("utf8").slice(0, 200)}`);
-    return JSON.parse(Buffer.from(a.body).toString("utf8"));
+    const route = `/${app}/${fn}`;
+    const http = { method: "GET", path: route, route, query: qs ? `?${qs}` : "", headers: {}, body: new Uint8Array() };
+    const arg = { transport: "http", request: { kind: "http", ...http }, match: { transport: "http", address: route, app }, ...http, contentType: "" };
+    const c = await l.kernel.invoke(engine, fn, dagCbor.encode(arg), { now: stampMs(this.now()) });
+    if (!c.ok) throw new Error(`${app}.${fn}: ${c.error}`);
+    const a = dagCbor.decode(c.result) as { status?: number; body?: Uint8Array };
+    const text = a.body instanceof Uint8Array ? Buffer.from(a.body).toString("utf8") : "";
+    if (a.status !== 200) throw new Error(`${app}.${fn}: ${a.status} ${text.slice(0, 200)}`);
+    return JSON.parse(text);
   }
 
   /**

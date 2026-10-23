@@ -193,7 +193,9 @@ then the longest prefix); a `libp2p` route's a pubsub topic or
 subscribed it, #119). `program` is the handler, or `kernel`: an admin route,
 `fn` its operation (or the claim, or the host's tick: #130 — the host's key
 is the route's `host` setting, a tick from any other key refused). **No
-program: a read route** (http only): its filters answer, nothing is logged.
+program: a read route** (http, and a libp2p `/<protocol>`: a transport that
+carries an answer back, #154; a topic does not): its filters answer, nothing
+is logged — on a stream, the filter's answer body is the answer frame.
 `app` is the app that installed it: its roles gate the route's `fn`. The
 rest is the handler's own (a file handler's `root`), carried as `match`.
 There is no `sender` (#143): a route that names one is refused.

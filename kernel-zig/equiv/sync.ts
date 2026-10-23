@@ -1,5 +1,5 @@
 // Overlay sync (shruggr/skein#150) end to end over libp2p: shruggr/skein-chain
-// and shruggr/skein-overlay 0.14.0 (pinned commits, or $SKEIN_CHAIN_DIR /
+// and shruggr/skein-overlay 0.15.0 (pinned commits, or $SKEIN_CHAIN_DIR /
 // $SKEIN_OVERLAY_DIR) installed by the owner's messages into stock-system
 // instances on three routers, each topic registered by the owner (the beats
 // are a registered topic's), the validator beating every second:
@@ -17,7 +17,7 @@
 //   - a want (#112): b holds a token p (unmined, under tm_demo, gossip off for
 //     it) that no other host has; a transfer spending p is posted to a without
 //     p in its BEEF: a's overlay pauses it and wants p of the topic's peers, a
-//     host asks them, b answers from /holds with the chain state's BEEF, a
+//     host asks them, b's engine answers (fn sync, on its libp2p row) with the chain state's BEEF, a
 //     hands it to the receive row, and the transfer is admitted.
 //
 // Each instance's store then replays to itself exactly.
@@ -44,7 +44,7 @@ import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "385e1b96aedaab573b21e24a49675cc1a434034a";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "924d60f559503e9df59f596bed0162f171f1e768";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -233,7 +233,7 @@ try {
   mf.config.overlay.validator = { every: 1000 };
   mf.config.overlay.gossip = { tm_demo: false };
   writeFileSync(join(overlayDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.14.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
+  check(mf.version === "0.15.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
 
   await bring("a");
   await bring("b");

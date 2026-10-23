@@ -32,9 +32,11 @@
 //               app's ("<app>.<filter>"); none on an event route. `handler`: "<role>.<fn>" — a
 //               function of one of `programs` — or, for an app with one program, "<fn>"; a mailbox
 //               or event route may name only "<role>" (the program stepped, no function named). An
-//               http route with no handler is a READ route: its filters answer (the last one), and
-//               nothing is logged. The same key (transport, address as served, prefix) twice is
-//               refused. No `sender` (#143): who may run a function is `roles`'.
+//               http route or a libp2p protocol route ("/<protocol>", #154) with no handler is a READ
+//               route: its filters answer (the last one), and nothing is logged; a libp2p topic
+//               route names its handler (a topic carries no answer). The same key (transport,
+//               address as served, prefix) twice is refused. No `sender` (#143): who may run a
+//               function is `roles`'.
 //   filters     {<filter>: <handler>}: the app's functions any route may list as a filter
 //               (#143: `<app>.<filter>`), each "<role>.<fn>", "<fn>" (one program) or "<role>" (its
 //               function named as the filter). A filter runs before anything is recorded, in the
@@ -234,7 +236,7 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: (f: st
     if (!NAME.test(f.slice(0, dot)) || !FILTER.test(f.slice(dot + 1))) return `filter ${JSON.stringify(f)}: not <app>.<filter>`;
   }
   if (r.handler === undefined) {
-    if (t !== "http") return "handler: a mailbox, event or libp2p route names its handler (\"<role>.<fn>\")";
+    if (t !== "http" && !(t === "libp2p" && r.address.startsWith("/"))) return "handler: a mailbox, event or libp2p topic route names its handler (\"<role>.<fn>\")";
     if (!filters.length) return "a read route (no handler) names its filters: the last one answers";
     return undefined;
   }

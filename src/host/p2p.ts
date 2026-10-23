@@ -151,9 +151,9 @@ export interface P2POptions {
   /** How often topics are re-advertised and looked up in the DHT, and bootstrap peers redialled (ms). */
   discoveryMs?: number;
   /**
-   * Protocols the host itself serves on every node, beside /skein/message/1.0.0 (shruggr/skein#150:
-   * the overlay's sync): each inbound frame answered by the handler, its answer written back; nothing
-   * reaches the front door.
+   * Protocols the host itself serves on every node, beside /skein/message/1.0.0: each inbound frame
+   * answered by the handler, its answer written back; nothing reaches the front door. (The router
+   * names none: the overlay's sync, its one user under #150, is a row an app declares since #154.)
    */
   hostProtocols?: Record<string, (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>>;
   /** Each beat the liveness tool newly keeps from another peer (shruggr/skein#150). */

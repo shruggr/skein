@@ -100,7 +100,7 @@ export async function planRoute(view: InstanceView, a: RouteArgs, programs: Reco
   let row: Record<string, unknown> = { transport, address: a.address, ...(a.prefix ? { prefix: true } : {}) };
   if (a.op === "add") {
     if (a.handler === undefined) {
-      if (transport !== "http" || !a.filters?.length) throw new Error("a route names its handler; only an http read route (--filters, no handler) has none");
+      if (!(transport === "http" || (transport === "libp2p" && a.address.startsWith("/"))) || !a.filters?.length) throw new Error("a route names its handler; only an http or libp2p protocol (/…) read route (--filters, no handler) has none");
       if (a.fn) throw new Error("--fn: a read route has no handler");
     } else if (transport === "http" || transport === "libp2p") {
       if (!a.fn) throw new Error(`an ${transport} route names its handler's function (--fn)`);

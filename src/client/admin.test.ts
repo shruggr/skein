@@ -65,7 +65,7 @@ test("planRoute (#125, #143): root's own http route (prefix, filters, fn, settin
   await assert.rejects(planRoute(view(), { op: "add", address: "/", handler: String(prog) }), /--fn/);
   await assert.rejects(planRoute(view(), { op: "add", address: "/", handler: String(prog), fn: "get", settings: { app: "site" } }), /the route's own/);
   await assert.rejects(planRoute(view(), { op: "add", address: "x", prefix: true, handler: String(prog) }), /--prefix: an http route's/);
-  await assert.rejects(planRoute(view(), { op: "add", address: "/z" }), /only an http read route/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "/z" }), /only an http or libp2p protocol \(\/…\) read route/);
 });
 
 test("host.env (#142): every SKEIN_* line, quotes and comments stripped, the environment wins; the operator's key made once, 0600", async (t) => {

@@ -120,7 +120,7 @@ test("system tree: refusals — no routes, the forms before #77/#115, a sender, 
   assert.ok((await readSystemTree(comp.objects, comp.root)).modules[0]!.cid.equals(rawCid(component)), "a component in bin/ is a module like any other");
   const c = { identity: key(), root: [key()], handle: "a", domain: "localhost" };
   assert.throws(() => resolveSystem(c, {}, {}, undefined, [{ address: "run", sender: "*", program: "x" }]), /`sender` is gone \(#143/);
-  assert.throws(() => resolveSystem(c, {}, {}, undefined, [{ transport: "mailbox", address: "x", filters: ["site.get"] }]), /only an http read route/);
+  assert.throws(() => resolveSystem(c, {}, {}, undefined, [{ transport: "mailbox", address: "x", filters: ["site.get"] }]), /only an http or libp2p protocol \(\/…\) read route/);
   assert.throws(() => resolveSystem(c, {}, { peers: { infer: "$infer" } }), /no inference peer/);
   assert.throws(() => resolveSystem(c, {}, { peers: { me: "$owner" } }), /\$owner: gone \(#143/);
   // A route to a program the system lacks is left out.

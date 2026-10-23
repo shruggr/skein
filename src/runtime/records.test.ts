@@ -61,7 +61,9 @@ test("dispatch row: the kernel's rule (dispatch.zig problem)", () => {
   assert.ok(isDispatchRow({ transport: "http", address: "/api/", prefix: true, filters: ["kernel.brc104"], program: wasm, fn: "get" }));
   assert.ok(isDispatchRow({ transport: "http", address: "/site/", prefix: true, filters: ["site.get"] }), "a read route: filters only");
   assert.ok(!isDispatchRow({ transport: "http", address: "/site/", prefix: true }), "a read route names its filters");
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "x", filters: ["site.get"] }), "only an http route may have no handler");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "x", filters: ["site.get"] }), "only an http route or a libp2p protocol may have no handler");
+  assert.ok(isDispatchRow({ transport: "libp2p", address: "/skein/overlay/sync/1.0.0", filters: ["overlay.sync"] }), "#154: a libp2p protocol's read route");
+  assert.ok(!isDispatchRow({ transport: "libp2p", address: "tm_x", filters: ["overlay.sync"] }), "a libp2p topic carries no answer: it names its handler");
   assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: key, program: wasm }), "#143: no sender");
   assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "*", program: wasm }), "#143: no sender");
   assert.ok(!isDispatchRow({ transport: "event", address: "chain", filters: ["kernel.beef"], program: wasm }), "an event route has no filters");

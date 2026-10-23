@@ -132,7 +132,8 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   if (!Array.isArray(filters) || !filters.every(isFilterRef)) return false;
   if (filters.length && (t === "event" || t === "local")) return false;
   if (x.fn !== undefined && x.fn !== null && typeof x.fn !== "string") return false;
-  if (x.program === undefined) return t === "http" && filters.length > 0 && x.fn === undefined;
+  // A read route (#143): http, or a libp2p stream protocol (#154: `/…`; a topic carries no answer).
+  if (x.program === undefined) return (t === "http" || (t === "libp2p" && x.address.startsWith("/"))) && filters.length > 0 && x.fn === undefined;
   if (x.program === "kernel") return t === "mailbox" && filters.length === 0 && typeof x.fn === "string" && KERNEL_OPS.includes(x.fn);
   return isCID(x.program);
 }

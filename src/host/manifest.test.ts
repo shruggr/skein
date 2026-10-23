@@ -70,7 +70,10 @@ test("routes: no sender (#143), the transports, handlers, filters, the keys", ()
   assert.match(route({ address: "a b" }), /whitespace or a control character/);
   assert.match(route({ transport: "local" }), /transport "local"/);
   assert.match(route({ handler: "nobody.x" }), /handler "nobody\.x" is not "<role>\.<fn>"/);
-  assert.match(route({ handler: undefined }), /handler: a mailbox, event or libp2p route names its handler/);
+  assert.match(route({ handler: undefined }), /handler: a mailbox, event or libp2p topic route names its handler/);
+  // #154: a libp2p stream protocol carries an answer: a read route there (filters, no handler) installs; a topic's does not.
+  assert.equal(route({ transport: "libp2p", address: "/skein/overlay/sync/1.0.0", filters: ["chain.sync"], handler: undefined }), "");
+  assert.match(route({ transport: "libp2p", address: "tm_demo", filters: ["chain.sync"], handler: undefined }), /libp2p topic route names its handler/);
   assert.match(route({ prefix: true }), /a mailbox route has no prefix/);
   assert.match(route({ transport: "event", filters: ["kernel.beef"] }), /an event route has no filters/);
   assert.match(route({ filters: ["kernel.nope"] }), /filter kernel\.nope: the kernel's are kernel\.brc104, kernel\.beef/);

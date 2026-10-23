@@ -302,7 +302,7 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
 etc/dispatch.json        the routes (#77, #143): [{transport?: mailbox | event | http | libp2p, address, prefix?: true,
                          filters?: [filter], program?, fn?, …settings}] — a box, an event's box, an HTTP path or a
                          libp2p topic / "/<protocol>"; the program a bin/ name, a CID, or "kernel" with fn the
-                         operation; no program: an http read route (its filters answer). No sender (#143). Required.
+                         operation; no program: an http or libp2p "/<protocol>" read route (its filters answer, #154). No sender (#143). Required.
                          A tree that names no http route gets the default ones (each dropped when its program is lacking).
 etc/apps.json            optional (#141, #152): {install: [<directory> | {url, hash}], routes?: [<root's own route>]} ("Apps at birth")
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
