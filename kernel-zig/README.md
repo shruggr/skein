@@ -61,6 +61,16 @@ commands with `mise exec --` or activate mise).
   `LMDB_DATA_V1=true npm rebuild lmdb --build-from-source` (node-gyp, a C
   compiler). Only an LMDB store loads it (`src/host/stores.ts`, which
   refuses another build with this message); SQLite hosts never do.
+- **RocksDB** (#158, the one-process kernel's store, `rocksdb_store.zig`): the
+  system `librocksdb` through its C API (`rocksdb/c.h`), linked as sqlite3 is
+  (`linkSystemLibrary("rocksdb")`). Built and tested here against 11.1.1
+  (Arch's `rocksdb`: `/usr/include/rocksdb/c.h`, `/usr/lib/librocksdb.so`). The
+  binary links the shared library, so it runs only where that same major
+  version is installed: **a host's binary is built on that host** (below).
+  The C functions used were chosen from those long in the C API (column
+  families, write batches, pinned gets, iterators with an upper bound, LRU
+  cache, bloom filter, `flush_wal`); not checked against 10.1.3's header. Not
+  in the browser build.
 
 ```
 cd kernel-zig
@@ -70,6 +80,31 @@ zig build test               # unit tests, incl. test/fixtures.json made by src/
 
 wasmtime's compilation cache (`~/.cache/wasmtime`) is on: a cache of machine
 code for module bytes, not state. `SKEIN_WASMTIME_CACHE=0` turns it off.
+
+### Building on the rack (RocksDB 10.1.3) — UNVERIFIED
+
+The rack has its own RocksDB (10.1.3, `/usr/include/rocksdb/c.h`), mise's zig
+0.16.0, sqlite3.h and the wasmtime C API under
+`~/.local/wasmtime-c-api/wasmtime-v49.0.1-x86_64-linux-c-api`, and no zig of
+the system's. The binary built on jr links jr's `librocksdb.so.11` and will not
+load there: build it on the rack. The recipe, **not yet run on the rack**
+(#158's builder had no access; nothing below is a reported result):
+
+```
+ssh rack
+cd ~/Code/skein && git pull                       # the commit with #158
+cd kernel-zig
+export WASMTIME_C_API=$HOME/.local/wasmtime-c-api/wasmtime-v49.0.1-x86_64-linux-c-api
+mise exec -- zig build --release -Dcpu=baseline   # baseline: a host-tuned build SIGILLs there
+ldd zig-out/bin/skein-kernel | grep -E 'rocksdb|sqlite'   # expect the rack's librocksdb.so.10, libsqlite3
+mise exec -- zig build test --summary all         # the unit tests (rocksdb_store.zig, host.zig among them)
+```
+
+Then a host that should run one kernel process sets `SKEIN_STORE_ROCKSDB` in
+its host.env (see "One process for the host" below). If the C API of 10.1.3
+lacks a function used here, the build fails at link time naming it; nothing
+in `rocksdb_store.zig` needs a newer one as far as its headers go, but that is
+unchecked.
 
 ## Run
 
@@ -566,6 +601,72 @@ of its own for its index maps (inside the VM). **Not yet:** pruning old
 spine nodes and state records; a cache bound (decoded nodes are dropped at
 every commit).
 
+### One process for the host (issue #158)
+
+```
+skein-host run (router.ts) ── one KernelHost ──▶ skein-kernel host   (every instance of the host)
+   HostedKernel per instance                     I/O thread · workers (SKEIN_WORKERS) · run queue
+   (the Kernel surface, frames tagged h)          one RocksDB database ($SKEIN_STORE_ROCKSDB) · one wasmtime engine
+                  ▲              │                host-read socket <db dir>/kernel.sock (stores.ts)
+                  └── frames ────┘
+```
+
+`skein-kernel host` (`host.zig`) holds every instance of a host whose stores
+are sets of one RocksDB database (`rocksdb_store.zig`). The router starts it
+once (`KernelHost`, `src/host/kernel.ts`) when `SKEIN_STORE_ROCKSDB` is set and
+speaks `serve`'s frames to it, each instance-scoped frame tagged `h` (the
+handle), through a per-instance `HostedKernel` with the `Kernel` surface (the
+router's calls are unchanged). Host-level frames: `open {h, v: {domain, db}}`
+(hydrate: the set opened, the pinned modules installed, the runtime built;
+idempotent), `close {h}` (dehydrate, after its inbox drains; the router's idle
+policy sends it), `instances`, `stop`, and the host's reads `get`/`has` (a
+CID; through a set's gate if the frame names `set`, else any block),
+`members {set}` and `state {h}` (the set's committed state pointer).
+
+- **Threads.** The I/O thread reads stdin and routes: a frame with `h` into
+  that instance's inbox (the instance becomes runnable), a `call` into the
+  read queue, an answer (`re`) to the worker waiting on it. It never runs a
+  step or a call. Workers (default the CPU count) take a runnable instance,
+  run its inbox to empty (each frame as `serve` handles it: `admit` steps
+  there and then), and put it down; an instance is on one worker at a time,
+  so each instance stays single-threaded and its steps are what `serve`'s
+  are. An idle instance holds no thread.
+- **Calls beside steps.** A `call` (#40) runs on any worker over a *view* of
+  the set: a read-only index at the state pointer as committed when the view
+  is made (`rocksdb_store.zig` `View`), never the instance's working state —
+  so a read runs while its instance steps, and sees the state before that
+  step (the log appends committed so far, their entries `pending`).
+  `Runtime.callOver` is the call over such a view; the scheduler is
+  otherwise unchanged.
+- **The kernel's requests.** A step's `wallet` or `http` request is a frame
+  tagged `h`; its worker waits for the answer (no nesting: the I/O thread
+  serves everything else meanwhile, and a frame for that instance waits in
+  its inbox behind the step). `answer` waits (#66) are kept per instance;
+  their bounds are the I/O thread's poll timeout.
+- **The store.** One database per host: column families `blocks`, `members`
+  (`<set>‖0x00‖cid`), `pointers` (`<set>‖0x00‖name`), the same shape and gate
+  as the LMDB environment (`host/chain` the one shared set, #133). A commit
+  is one write batch written with `sync = false` (the WAL written, not
+  fsynced: an OS crash may lose the last commits, never corrupt); the WAL is
+  synced and the memtables flushed at a clean stop. Bloom filters on `blocks`
+  and `members`, one 64 MiB block cache, `IncreaseParallelism(cores)`,
+  `max_background_jobs` ≥ 4.
+- **One process per database.** RocksDB's lock lets one process open it. The
+  tools (`replay`, `dump`, `fuel`, `shell`, `migrate`) open
+  `rocksdb:<db dir>#<set>` themselves, so they run while the host is down;
+  so do the one-shot commands that boot (`skein-host add --image`, `init`).
+  The host's own reads of such a set (the router's folds, the CLI's
+  `peers`, `roster`, `pack`, a client's `--instance`) go to the running
+  process over its host-read socket, `<db dir>/kernel.sock` (the index reader
+  is synchronous: `src/host/stores.ts` speaks the socket from a worker thread
+  it waits on); with no process there they are refused, saying so.
+- **Crash.** If the process dies, every instance's kernel is gone (their
+  `exited`), and the next hydration starts it again and opens the instance
+  (replay at hydrate, as for `serve`).
+- `skein-host migrate-store <handle>` with `SKEIN_STORE_ROCKSDB` set copies a
+  file (or an LMDB set) into the database (`skein-kernel migrate --into
+  rocksdb:<db dir>`), host stopped.
+
 ### How serve is put together (issue #33)
 
 ```
@@ -956,6 +1057,8 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `equiv/chain.ts` (#78) | the chain module, shruggr/skein-chain at a pinned commit (or `$SKEIN_CHAIN_DIR`), installed by the owner's messages on a host with a fake Arcade (its broadcaster and `$status` provider) and called by its owner (#79: its rows take `event`, `$self` and `$owner`; a stranger is refused): the feed's headers; `ingest` proven → answered at once; `ingest` unproven → broadcast (the Arcade gets it) → `accepted` (the status provider's RECEIVED) → `proven` (Arcade's MINED proof, its header first), each an answer to the same request, a second watcher told too; refused by Arcade → `rejected`; `status`/`proof` reads by message and as a kernel call; then the same app at boot from a system tree (the default files, `bin/chain.wasm`, its rows, the default scope `chain/`); both stores replayed | all ok; both reproduced exactly |
 | `equiv/image-chain.ts` (#132) | the image carries the header chain: a fake chaintracks (history by height and a tip stream) with N regtest headers before the host starts and M more on its stream; the host builds the default image's chain part from genesis and grows it per header; a skein created from the image holds `chain/headers` and `chain/tip`; the chain app (shruggr/skein-chain 0.4.0) installed by the owner; the next header the first it takes, its chain state then every header from genesis (no feed replay); `skein-host add --image default` from the same image; replayed | all ok; reproduced exactly |
 | both backends (#96) | every store `replays.ts` checks also replayed into a set of a fresh LMDB environment (the same report, state CID and dump — the same CIDs) and, a SQLite one, migrated (`skein-kernel migrate`: the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts` and `sync.ts` run again with every host's instances sets of one environment (`SKEIN_EQUIV_STORE=lmdb`), their sets replayed the same way; run.sh prints the corpus's wall time on each | all identical |
+| RocksDB, one process (#158) | every store `replays.ts` checks also replayed into a set of a fresh RocksDB database (the same report, state CID and dump) and, a Zig one, migrated into one (the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts`, `sync.ts`, `claim.ts`, `host.ts` and `git-clone.ts` run again with every host's instances sets of one database inside one `skein-kernel host` (`SKEIN_EQUIV_STORE=rocksdb`), their sets replayed after it stopped | all identical |
+| `equiv/pool.ts` (#158) | 8 instances × 500 entries submitted interleaved: each final state CID equals a serial run's and SQLite's; the same with `SKEIN_WORKERS=1`; a `call` on an instance whose step waits on a `wallet` request answered late comes back before the step ends, with the state as committed (the entry pending); a block only bob put is absent for alice (her kernel, her call, the host's reader), a block in `host/chain` readable by both; each set replayed after the process stopped, the same state CID; timings (1 vs N workers, commit cost on RocksDB and SQLite) | all ok; timings printed |
 | `equiv/lmdb.ts` (#96, #133) | two instances in one environment: a record and a program only bob put are absent for alice (her kernel's `has`/`get`, her `call` of the program; the host's lmdb-js reader too); a block both put in both sets; a block under `host/chain` (written straight into the environment, `equiv/lmdb-env.ts`) readable by both kernels and the reader; each set's size the sum of its own members' bytes; 8 instances on one router writing N entries and N blocks each at once, SQLite against LMDB (`SKEIN_EQUIV_BENCH_DIR` for a disk) | all ok; the timing printed |
 | `equiv/serve.ts` | `serve` as the host drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their mailbox instances: genesis, the shell app and the chat app installed (#83), a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a host restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
@@ -988,6 +1091,7 @@ re-genesis when they move to this build).
 | `secp.zig` | BRC-42 "anyone" keys, ECDSA verify as @bsv/sdk (`identity.ts`) |
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
 | `lmdb_store.zig`, `any_store.zig`, `migrate.zig`, `vendor/lmdb/` | the shared host store (#96, #133): a set of one LMDB environment, its member gate and `host/chain`; either backend for serve and the tools; `skein-kernel migrate`; LMDB 0.9.36 |
+| `rocksdb_store.zig`, `host.zig` | the one-process kernel (#158): the RocksDB backend (a set of one database, its gate, a call's committed `View`); `skein-kernel host` (the I/O thread, the worker pool and run queue, the host-read socket) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `dispatch.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, the dispatch table (#77; `src/runtime/dispatch.ts` reads it), `programs.ts`, `syscalls.ts` |
 | `engine.zig`, `engine_wasmtime.zig` | the engine interface; wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |

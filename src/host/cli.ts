@@ -107,6 +107,13 @@
 //   SKEIN_STORE           #96: the host's LMDB environment (a directory, e.g. $SKEIN_HOME/store): a new instance's store is
 //                         its set there (host.db `lmdb:<dir>`; the set its handle), its kernel given SKEIN_STORE. Unset: a file
 //                         per instance, $SKEIN_HOME/instances/<handle>/runtime.db. Existing rows keep theirs until migrate-store
+//   SKEIN_STORE_ROCKSDB   #158: the host's RocksDB database (a directory, e.g. $SKEIN_HOME/store-rocksdb), run by ONE
+//                         `skein-kernel host` process the router starts (every instance in it, a worker pool,
+//                         SKEIN_WORKERS threads, default the CPU count): a new instance's store is its set there
+//                         (host.db `rocksdb:<dir>`). Over SKEIN_STORE. The host's reads of such a set go through that
+//                         process (its host-read socket), so `ls`, explore and the other readers need the host running;
+//                         the one-shot commands that boot (`add --image`, `init`) open the database themselves, so the
+//                         host must be stopped for them (RocksDB: one process per database)
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
@@ -134,7 +141,7 @@ import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
-import { isLmdb, storeSpec } from "../runtime/index-store.ts";
+import { isLmdb, isRocks, storeSpec } from "../runtime/index-store.ts";
 import { openStoreFile, storeBlocks, storeExists } from "./stores.ts";
 import { spawnSync } from "node:child_process";
 import { connect } from "node:net";
@@ -225,7 +232,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) {
-          f.store ??= env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96
+          f.store ??= env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96, #158
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
@@ -693,6 +700,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     network: hostNetwork(v),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     ...(v.SKEIN_STORE ? { lmdbStore: resolve(v.SKEIN_STORE) } : {}),
+    ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
     // #142: settings host.env may give (the environment's are read where they are used, too).
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
     ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
@@ -893,19 +901,29 @@ function controlAlive(sock: string): Promise<boolean> {
 async function migrateStoreCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const [handle, ...more] = rest;
   if (!handle || more.length) { env.err(USAGE); return 2; }
-  const dir = env.vars.SKEIN_STORE ? resolve(env.vars.SKEIN_STORE) : undefined;
-  if (!dir) { env.err("skein-host migrate-store: SKEIN_STORE (the host's LMDB environment, a directory) is not set"); return 2; }
+  // #158: SKEIN_STORE_ROCKSDB the target (from a file or an LMDB set), else SKEIN_STORE's LMDB environment (from a file).
+  const rocks = env.vars.SKEIN_STORE_ROCKSDB ? resolve(env.vars.SKEIN_STORE_ROCKSDB) : undefined;
+  const dir = rocks ?? (env.vars.SKEIN_STORE ? resolve(env.vars.SKEIN_STORE) : undefined);
+  if (!dir) { env.err("skein-host migrate-store: neither SKEIN_STORE_ROCKSDB (the host's RocksDB database) nor SKEIN_STORE (its LMDB environment) is set"); return 2; }
   const row = db.get(handle);
   if (!row) { env.err(`skein-host migrate-store: no instance ${handle}`); return 1; }
-  if (isLmdb(row.store)) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
-  if (!existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
+  if (isRocks(row.store) || (!rocks && isLmdb(row.store))) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
+  if (!isLmdb(row.store) && !existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
   if (await controlAlive(join(homeOf(env.vars), CONTROL_SOCKET)) || await routerAt(env.vars)) { env.err("skein-host migrate-store: the host is running (its kernel holds the store): stop it first, migrate, then start it"); return 1; }
-  const r = spawnSync(env.vars.SKEIN_KERNEL_BIN || KERNEL_BIN, ["migrate", "--from", row.store, "--into", dir, "--set", handle], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const target = rocks ? `rocksdb:${dir}` : dir;
+  const r = spawnSync(env.vars.SKEIN_KERNEL_BIN || KERNEL_BIN, ["migrate", "--from", storeSpec(row), "--into", target, "--set", handle], { encoding: "utf8", maxBuffer: 1 << 26 });
   if (r.status !== 0) { env.err(`skein-host migrate-store ${handle}: ${(r.stderr || r.stdout || `exit ${r.status}`).trim()}`); return 1; }
+  const store = rocks ? `rocksdb:${dir}` : `lmdb:${dir}`;
+  if (isLmdb(row.store)) {
+    // An LMDB set: left in its environment (the host writes none, as reclaim leaves it).
+    db.add(handle, { store });
+    env.out(`${handle}: migrated into ${store} (set ${handle}) ${r.stdout.trim()} · its LMDB set left in ${row.store}`);
+    return 0;
+  }
   const kept = `${row.store}.migrated-${new Date().toISOString().slice(0, 10)}`;
   for (const ext of ["", "-wal", "-shm"]) if (existsSync(`${row.store}${ext}`)) renameSync(`${row.store}${ext}`, `${kept}${ext}`);
-  db.add(handle, { store: `lmdb:${dir}` });
-  env.out(`${handle}: migrated into lmdb:${dir} (set ${handle}) ${r.stdout.trim()} · the file kept as ${kept}`);
+  db.add(handle, { store });
+  env.out(`${handle}: migrated into ${store} (set ${handle}) ${r.stdout.trim()} · the file kept as ${kept}`);
   return 0;
 }
 
@@ -948,7 +966,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
     const l = router.loaded.get(r.handle);
     return {
       handle: r.handle, domain: r.domain, identity: r.identity ?? "", status: l ? "live" : "idle",
-      store: r.store, tree: r.tree ?? "", pid: l?.kernel.proc.pid, restarts: 0, origin: router.originOf(r.handle),
+      store: r.store, tree: r.tree ?? "", pid: l?.kernel.pid, restarts: 0, origin: router.originOf(r.handle),
       wake: router.nextWake(r.handle),
     };
   }), { router: messagebox !== undefined ? `http://127.0.0.1:${messagebox}` : undefined, originOf: (h) => router.originOf(h), mailboxes: db.list("enabled").filter((r) => r.kind === "mailbox") });

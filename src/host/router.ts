@@ -121,7 +121,7 @@ import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
-import { isLmdb, storeSpec } from "../runtime/index-store.ts";
+import { isSet, parseRocksSpec, storeSpec } from "../runtime/index-store.ts";
 import { openStoreFile, storeExists } from "./stores.ts";
 import { rootOf } from "./install.ts";
 import { OVERLAY_ROLE } from "./manifest.ts";
@@ -134,12 +134,12 @@ import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type W
 import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
-import { DoorAnswered, Kernel } from "./kernel.ts";
+import { DoorAnswered, Kernel, KernelHost, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
 import { beaconEvent, beaconsOf, DEFAULT_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import { allocation, BILLING_HEAD, closedBy, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
@@ -179,6 +179,12 @@ export interface RouterOptions {
   home?: string;
   /** SKEIN_STORE (#96): the host's LMDB environment (a directory); a new instance's store is then its set there (host.db `lmdb:<dir>`, the set its handle). Unset: a file, <home>/instances/<handle>/runtime.db. */
   lmdbStore?: string;
+  /**
+   * SKEIN_STORE_ROCKSDB (#158): the host's RocksDB database (a directory), run by one
+   * `skein-kernel host` process this router starts (KernelHost): a new instance's store is its set
+   * there (host.db `rocksdb:<dir>`, the set its handle). Over `lmdbStore`.
+   */
+  rocksStore?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
   instanceOrigin?: string;
   /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
@@ -223,7 +229,7 @@ export interface RouterOptions {
 }
 
 interface Loaded {
-  row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface;
+  row: InstanceRow; kernel: KernelSurface; identity: string; wallet: WalletInterface;
   /** The genesis (its `libp2p`), and the dispatch table's tip as the libp2p node last followed it (#72, #77). */
   genesis: Record<string, unknown>;
   dispatchTip?: string;
@@ -396,8 +402,22 @@ export class Router {
   /** The host's provider keys (its billing key among them, #130). */
   private readonly providerKey: (name: ProviderName) => PrivateKey;
 
+  /** The one-process kernels this router holds (#158), by database directory. */
+  private kernelHosts = new Map<string, KernelHost>();
+
+  /** The `skein-kernel host` process for the RocksDB database at `dir` (#158), started on first use. */
+  private kernelHost(dir: string): KernelHost {
+    let h = this.kernelHosts.get(dir);
+    if (!h) {
+      h = KernelHost.acquire(dir, { command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say("kernel", l) });
+      this.kernelHosts.set(dir, h);
+    }
+    return h;
+  }
+
   constructor(o: RouterOptions) {
     this.o = o;
+    if (o.rocksStore) this.kernelHost(o.rocksStore); // started with the router: the host's reads go through it (stores.ts)
     this.image = new ImageChain({ db: o.db, history: historyOf(o.headersFeed), log: (l) => this.say("router", l) });
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
     this.feeds = new Feeds({
@@ -611,6 +631,9 @@ export class Router {
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
+    // #158: the one-process kernels released (the last holder's release stops the process: its database flushed).
+    await Promise.all([...this.kernelHosts.values()].map((h) => h.release()));
+    this.kernelHosts.clear();
     await Promise.all(closed);
   }
 
@@ -789,16 +812,19 @@ export class Router {
     const wallet = await this.o.walletFor(row);
     const identity = await rootIdentity(wallet);
     if (row.identity && row.identity !== identity) throw new Error(`its signer is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
-    const kernel = new Kernel({
+    const ko = {
       db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
-      log: (line) => this.say(handle, line),
-      emit: (o) => this.providers.deliver(handle, o),
-      http: (req) => this.http(req, handle),
-      exited: (code, signal) => {
+      log: (line: string) => this.say(handle, line),
+      emit: (o: Outgoing) => this.providers.deliver(handle, o),
+      http: (req: HttpRequest) => this.http(req, handle),
+      exited: (code: number | null, signal: string | null) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);
       },
-    });
+    };
+    // #158: a RocksDB set is an instance of the host's one kernel process (opened there: hydrate); else a serve process of its own.
+    const rocks = parseRocksSpec(ko.db);
+    const kernel: KernelSurface = rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
     let g: { identity?: unknown } | null;
     try {
       if (!(await kernel.store.log.tip())) {
@@ -996,6 +1022,7 @@ export class Router {
 
   /** host.db's `store` for a new instance (#96): its set in the host's LMDB environment (SKEIN_STORE), else its own file. */
   private newStore(handle: string): string {
+    if (this.o.rocksStore) return `rocksdb:${this.o.rocksStore}`; // #158
     return this.o.lmdbStore ? `lmdb:${this.o.lmdbStore}` : join(this.o.home ?? ".", "instances", handle, "runtime.db");
   }
 
@@ -1543,8 +1570,8 @@ export class Router {
     this.periods.delete(handle);
     this.o.db.forgetBilling(handle);
     this.o.db.remove(handle);
-    if (isLmdb(row.store)) {
-      // #96: the host never writes an LMDB environment; the set stays in it (its handle cannot be created again here).
+    if (isSet(row.store)) {
+      // #96, #158: the host never writes an LMDB environment or a RocksDB database; the set stays in it (its handle cannot be created again here).
       this.say("router", `${handle}: reclaimed (its set in ${row.store} left in place: the host writes no instance store)`);
       return;
     }

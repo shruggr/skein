@@ -20,7 +20,7 @@ import { MessageBoxClient } from "@bsv/message-box-client";
 import { AuthFetch, Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
-import { KERNEL_BIN } from "./kernel.ts";
+import { KERNEL_BIN, type Kernel } from "./kernel.ts";
 import { main } from "./cli.ts";
 import { sendPlan } from "../testapps.ts";
 import { testHost, until } from "./testhost.ts";
@@ -123,7 +123,7 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.ok(s1, "david's session: a record (head `frontdoor/sessions`)");
 
   // Kill both kernels: the next request hydrates a new process over the same store; the sessions are there.
-  const kill = async (handle: string) => { const k = (await h.router.hydrate(handle)).kernel; k.proc.kill("SIGKILL"); await k.exited(); };
+  const kill = async (handle: string) => { const k = (await h.router.hydrate(handle)).kernel as Kernel; k.proc.kill("SIGKILL"); await k.exited(); };
   await kill("david");
   await kill("alpha");
   seen.length = 0;

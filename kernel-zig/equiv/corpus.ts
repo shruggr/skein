@@ -34,7 +34,7 @@ import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/test
 import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { storeExists } from "../../src/host/stores.ts";
-import { LMDB_MODE, routerStore, storeFor } from "./backend.ts";
+import { LMDB_MODE, ROCKS_MODE, routerStore, storeFor } from "./backend.ts";
 
 type Json = Record<string, unknown>;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -113,13 +113,15 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
       // The owner's mailbox before the first agent's genesis (which names it): in the corpus too.
       first = name;
       await fs.rm(join(out, `${name}-david.db`), { force: true });
+      // #158, SKEIN_EQUIV_STORE=rocksdb: sets of one RocksDB database, out/<first agent>.rocksdb, in one `skein-kernel host`.
       if (LMDB_MODE) { env = join(out, `${name}.lmdb`); await fs.rm(env, { recursive: true, force: true }); }
-      mailbox("david", ownerId, env ? `lmdb:${env}` : join(out, `${name}-david.db`));
+      if (ROCKS_MODE) { env = join(out, `${name}.rocksdb`); await fs.rm(env, { recursive: true, force: true }); }
+      mailbox("david", ownerId, env ? `${scheme}${env}` : join(out, `${name}-david.db`));
       mailboxes.push(`${name}-david`);
-      if (env) specs.set(`${name}-david`, `lmdb:${env}#david`);
+      if (env) specs.set(`${name}-david`, `${scheme}${env}#david`);
     }
-    db.add(name, { store: env ? `lmdb:${env}` : join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
-    if (env) specs.set(name, `lmdb:${env}#${name}`);
+    db.add(name, { store: env ? `${scheme}${env}` : join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
+    if (env) specs.set(name, `${scheme}${env}#${name}`);
     await router.hydrate(name);
     const id = keys.get(name)!.toPublicKey().toString();
     handles.set(id, name);
@@ -142,7 +144,12 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     },
     /** The owner's mailbox: a box's messages. */
     list: (boxName: string) => boxOf(owner, ownerId, "david").list(boxName),
-    async done() { await router.settled(); await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true }); },
+    async done() {
+      await router.settled();
+      // #158: a RocksDB set is read through the running kernel process: whether a mailbox has a store, asked before it stops.
+      if (ROCKS_MODE && env) for (const m of mailboxes) if (specs.get(m)?.startsWith(`rocksdb:${env}#`) && storeExists(specs.get(m)!)) present.add(m);
+      await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true });
+    },
   };
   return h;
 }
@@ -164,6 +171,9 @@ function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: 
 }
 
 const made: string[] = [];
+const scheme = ROCKS_MODE ? "rocksdb:" : "lmdb:";
+/** #158: the mailboxes with a store, in RocksDB mode (asked while their host ran). */
+const present = new Set<string>();
 /** #96: a store's name → its LMDB set (lmdb:<env>#<handle>), in LMDB mode. */
 const specs = new Map<string, string>();
 const specOf = (n: string) => specs.get(n) ?? join(out, `${n}.db`);
@@ -387,5 +397,5 @@ const mailboxes: string[] = [];
   made.push("gen-fuel");
 }
 
-for (const m of mailboxes) if (storeExists(specOf(m))) made.push(m);
+for (const m of mailboxes) if (ROCKS_MODE ? present.has(m) : storeExists(specOf(m))) made.push(m);
 process.stdout.write(made.map(specOf).join("\n") + "\n");

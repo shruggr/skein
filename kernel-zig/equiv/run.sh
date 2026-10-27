@@ -12,6 +12,16 @@
 # host (SKEIN_EQUIV_STORE=lmdb, equiv/backend.ts); equiv/lmdb.ts checks the
 # member gate, the chain's set and times 8 instances writing at once. The
 # LMDB reader in node needs lmdb-js's data-v1 build (kernel-zig/README.md).
+# The one-process kernel (#158): replays.ts also replays every store into a
+# RocksDB set and migrates the Zig ones into one; the corpus, serve.ts,
+# chain.ts, overlay.ts, sync.ts, claim.ts, host.ts and git-clone.ts run once
+# more with every host's instances sets of one RocksDB database inside ONE
+# `skein-kernel host` process (SKEIN_EQUIV_STORE=rocksdb), their sets replayed
+# after the process stopped; equiv/pool.ts checks the worker pool (8
+# instances interleaved = serial = SQLite; 1 worker; a call beside a blocked
+# step; the gate; replay after stop) and prints its timings. A RocksDB
+# database's host-read socket is <db dir>/kernel.sock: keep $TMPDIR short
+# (a Unix socket path is at most 107 bytes).
 # Run from anywhere; needs node (26) and the repo's node_modules; for the
 # component cases (issue #34) wasm-tools and the preview1 adapter (README,
 # "Components"), else those are skipped with a note. Never
@@ -57,6 +67,16 @@ mapfile -t genl < "$work/gen-lmdb.list"
 "${node[@]}" "$kz/equiv/replays.ts" "${genl[@]}" || status=1
 echo "timing: the corpus driven on SQLite $((t1 - t0)) ms, on LMDB $((t4 - t3)) ms (replays.ts after it: $((t2 - t1)) ms over the SQLite stores, $(( $(ms) - t4 )) ms over the LMDB sets; each replays every store on both backends)"
 rm -rf "$work/gen-lmdb"
+
+echo "== the same corpus on RocksDB (#158): each host's instances sets of one database inside one skein-kernel host process, replayed after it stopped"
+rm -rf "$work/gen-rocks"
+t5=$(ms)
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen-rocks" > "$work/gen-rocks.list"
+t6=$(ms)
+mapfile -t genr < "$work/gen-rocks.list"
+"${node[@]}" "$kz/equiv/replays.ts" "${genr[@]}" || status=1
+echo "timing: the corpus driven on SQLite $((t1 - t0)) ms, on RocksDB (one process, the pool) $((t6 - t5)) ms"
+rm -rf "$work/gen-rocks"
 
 echo "== fuel by instrumentation (issue #35): the corpus replayed with every module counting its own fuel, as under V8"
 for db in "${gen[@]}"; do
@@ -165,6 +185,14 @@ echo "== the same on LMDB (#96): serve.ts, chain.ts, overlay.ts and sync.ts with
 for d in serve chain overlay sync; do
   SKEIN_EQUIV_STORE=lmdb "${node[@]}" "$kz/equiv/$d.ts" | grep -vE "^  \|" || status=1
 done
+
+echo "== the one-process kernel on RocksDB (#158): serve.ts, chain.ts, overlay.ts, sync.ts, claim.ts, host.ts and git-clone.ts with every host's instances sets of one RocksDB database in one skein-kernel host process (SKEIN_EQUIV_STORE=rocksdb), their sets replayed after it stopped"
+for d in serve chain overlay sync claim host git-clone; do
+  SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/$d.ts" | grep -vE "^  \|" || status=1
+done
+
+echo "== the worker pool (#158): 8 instances × 500 entries interleaved = serial = SQLite, with 1 worker too; a call beside a step blocked on the wallet sees the state as committed; the member gate and host/chain; each set replayed after the process stopped; timings"
+"${node[@]}" "$kz/equiv/pool.ts" || status=1
 
 echo "== the shared store (#96, #133): two instances in one LMDB environment — a block one put is absent for the other (has, get, a call of a program only the other holds; the host's lmdb-js reader too); a block under host/chain readable by both; each set's size its own; 8 instances writing at once, SQLite against LMDB"
 "${node[@]}" "$kz/equiv/lmdb.ts" || status=1

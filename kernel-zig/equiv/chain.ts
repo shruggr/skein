@@ -45,7 +45,7 @@ import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { storeSpec } from "../../src/runtime/index-store.ts";
-import { BACKEND, LMDB_MODE } from "./backend.ts";
+import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
@@ -78,7 +78,7 @@ const arcade = await FakeArcade.start();
 const afters: Array<() => unknown> = [];
 // The caller is the instance's owner (#79: the chain app's rows admit $owner and $self).
 const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
-const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey: callerKey, genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 }, lmdb: LMDB_MODE });
+const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey: callerKey, genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 }, lmdb: LMDB_MODE, rocks: ROCKS_MODE });
 let store = "";
 const bootStores: string[] = [];
 /** The app's checkout at the pinned commit (for its bin/chain.wasm in a system tree). */

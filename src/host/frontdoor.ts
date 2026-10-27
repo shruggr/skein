@@ -36,7 +36,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import { admit2 } from "./genesis.ts";
 import { DoorAnswered, type DoorAnswer } from "./door-answer.ts";
-import type { Kernel, RequestAnswer } from "./kernel.ts";
+import type { KernelSurface as Kernel, RequestAnswer } from "./kernel.ts";
 
 /** A raw request as the host appends it: `path` as the client signed it, `route` what the routes table sees. */
 export interface FrontRequest {

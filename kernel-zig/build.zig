@@ -11,6 +11,10 @@
 // (mdb.c, midl.c, lmdb.h, midl.h; its LICENSE and COPYRIGHT: the OpenLDAP
 // Public License 2.8). No system dependency, so the -Dcpu=baseline build for the
 // rack needs nothing new there. Not in the browser build.
+// RocksDB (#158, the one-process kernel's store, rocksdb_store.zig): the system
+// librocksdb through its C API (rocksdb/c.h), linked as sqlite3 is (jr: 11.1.1;
+// the rack: 10.1.3 — the rack's binary is built on the rack, README). Not in
+// the browser build.
 // The codecs (cid, cbor, mst, secp) are the SDK's (shruggr/skein-sdk, a Zig
 // package dependency by URL+hash in build.zig.zon, #75; with -Dwallet=false,
 // so the kernel never fetches bsvz). scripts/sdk-local.sh overrides it with
@@ -101,6 +105,7 @@ fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {
     m.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{wt}) });
     m.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libwasmtime.a", .{wt}) });
     m.linkSystemLibrary("sqlite3", .{});
+    m.linkSystemLibrary("rocksdb", .{});
     m.addIncludePath(b.path("vendor/lmdb"));
     // UBSan off for LMDB's C (Zig turns it on in Debug and ReleaseSafe): its page arithmetic is its own.
     m.addCSourceFiles(.{ .root = b.path("vendor/lmdb"), .files = &.{ "mdb.c", "midl.c" }, .flags = &.{ "-pthread", "-fno-sanitize=undefined", "-Wno-unused-parameter" } });

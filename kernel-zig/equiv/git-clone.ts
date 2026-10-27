@@ -55,7 +55,9 @@ import type { HttpRequest } from "../../src/host/providers.ts";
 import { fetchHttp } from "../../src/host/router.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { encode } from "../../src/runtime/cid.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { BACKEND, ROCKS_MODE } from "./backend.ts";
 import { gitCid, readBlob, lookup } from "../../src/runtime/tree.ts";
 import { GIT_APP } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -175,14 +177,14 @@ const network = async (r: HttpRequest) => { asked.push(r); return await fetchHtt
 // The ov-dyn record's routes (#143): the manifest's three, then the derived own box, /submit and the read /lookup.
 const OV_ROUTES = "mailbox register overlay, mailbox submit [kernel.beef] overlay, event  overlay, mailbox ov-dyn overlay, http /submit [kernel.beef] overlay.submit, http /lookup [ov-dyn.lookup] (read)";
 const afters: Array<() => unknown> = [];
-const h = await testHost({ after: (f) => afters.push(f) }, { http: network });
+const h = await testHost({ after: (f) => afters.push(f) }, { http: network, rocks: ROCKS_MODE });
 let store = "";
 try {
   h.mailbox("david", h.ownerId);
   const inst = h.instance("inst");
   await h.router.start();
   await h.install("inst", [GIT_APP]);
-  store = h.db.get("inst")!.store;
+  store = storeSpec(h.db.get("inst")!);
   const owner = new RawBox(h.owner, `${h.base}/@inst`);
   const mine = new RawBox(h.owner, h.origin("david"));
   const k = async () => (await h.router.hydrate("inst")).kernel;
@@ -333,5 +335,5 @@ try {
   if (!process.env.KEEP) await removeHome?.();
 }
 if (process.env.KEEP) process.stdout.write(`kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
-process.stdout.write(failures ? `git-clone: ${failures} FAILED\n` : "git-clone: all ok\n");
+process.stdout.write(failures ? `git-clone (${BACKEND}): ${failures} FAILED\n` : `git-clone (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

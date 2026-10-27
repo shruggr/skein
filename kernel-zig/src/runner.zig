@@ -34,6 +34,11 @@ pub const Runner = struct {
     /// SKEIN_REPLAY_MODULE): the same log replayed with a program's other build,
     /// e.g. its component, to compare the ABIs update by update. Never in serve.
     subst: ?struct { cid: []const u8, bytes: []const u8 } = null,
+    /// #158: `skein-kernel host` shares one runner among its workers — set, the cache is read and
+    /// filled under `mu` (a module is compiled outside it; a second compile of the same CID by a
+    /// racing worker is dropped for the first). Unset (serve, the tools, the browser): one thread.
+    io: ?std.Io = null,
+    mu: std.Io.Mutex = .init,
 
     pub fn init(gpa: std.mem.Allocator) !*Runner {
         const r = try gpa.create(Runner);
@@ -65,17 +70,32 @@ pub const Runner = struct {
     pub const LoadError = error{ NotInStore, BadHash, Compile, OutOfMemory, Store };
 
     /// A module from the store by CID, compiled once. `msg` gets the message on failure.
+    fn cached(r: *Runner, k: []const u8) ?*Compiled {
+        const io = r.io orelse return r.cache.get(k);
+        r.mu.lockUncancelable(io);
+        defer r.mu.unlock(io);
+        return r.cache.get(k);
+    }
+
+    /// Keep `c` under `k`, or (another worker kept one first) return that one.
+    fn keep(r: *Runner, k: []const u8, c: *Compiled) LoadError!*Compiled {
+        if (r.io) |io| r.mu.lockUncancelable(io);
+        defer if (r.io) |io| r.mu.unlock(io);
+        if (r.cache.get(k)) |had| return had; // the racing compile is leaked: once per module per process at most
+        r.cache.put(r.gpa.dupe(u8, k) catch return error.OutOfMemory, c) catch return error.OutOfMemory;
+        return c;
+    }
+
     pub fn load(r: *Runner, s: Store, a: std.mem.Allocator, cid: []const u8, msg: *[]const u8) LoadError!*Compiled {
         const k = cidm.format(a, cid) catch return error.OutOfMemory;
-        if (r.cache.get(k)) |c| return c;
+        if (r.cached(k)) |c| return c;
         if (r.subst) |sub| if (std.mem.eql(u8, sub.cid, cid)) {
             var em: []const u8 = "";
             const c = r.compile(sub.bytes, &em) catch {
                 msg.* = std.fmt.allocPrint(a, "WebAssembly.compile(): {s}", .{em}) catch "compile failed";
                 return error.Compile;
             };
-            r.cache.put(r.gpa.dupe(u8, k) catch return error.OutOfMemory, c) catch return error.OutOfMemory;
-            return c;
+            return r.keep(k, c);
         };
         const bytes = (s.bytes(a, cid) catch return error.Store) orelse {
             msg.* = std.fmt.allocPrint(a, "module not in store: {s} (skein-dev install puts it there)", .{k}) catch "module not in store";
@@ -91,8 +111,7 @@ pub const Runner = struct {
             msg.* = std.fmt.allocPrint(a, "WebAssembly.compile(): {s}", .{em}) catch "compile failed";
             return error.Compile;
         };
-        r.cache.put(r.gpa.dupe(u8, k) catch return error.OutOfMemory, c) catch return error.OutOfMemory;
-        return c;
+        return r.keep(k, c);
     }
 
     /// Instantiate and run a WASI command to exit (shell.ts runModule). Exit

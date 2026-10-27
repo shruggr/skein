@@ -34,7 +34,7 @@ import { HostDb } from "./instances.ts";
 import { Signer } from "./signer.ts";
 import { keyOfPeerId, peerIdOf } from "./p2p.ts";
 import { Router } from "./router.ts";
-import type { Kernel } from "./kernel.ts";
+import type { KernelSurface as Kernel } from "./kernel.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEMO_WASM = join(ROOT, "kernel-zig/test/p2p/p2p-demo.wasm");

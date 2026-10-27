@@ -52,7 +52,7 @@ import { DEFAULTS, nextEntry, type EntryBody } from "../runtime/log.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
-import type { Kernel } from "./kernel.ts";
+import type { KernelSurface as Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
 
 /** Session expiry (#33 part 2, #40): the instance's own policy, judged against the session record's stamp (a day). */

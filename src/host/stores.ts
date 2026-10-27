@@ -4,17 +4,35 @@
 // read only, through lmdb-js — with the kernel's member gate
 // (kernel-zig/src/lmdb_store.zig): a block is there if the set holds it, or
 // the chain's set does. The disk is the host's (src/runtime reads none).
+//
+// A set of the one-process kernel's RocksDB database, `rocksdb:<db dir>#<set>`
+// (#158), is read through that process — RocksDB lets no second process see
+// the live database — over its host-read socket (`<db dir>/kernel.sock`,
+// kernel-zig/src/host.zig): `get`/`has` by CID through the set's member gate
+// (the frame names the `set`: a block only another instance holds is absent,
+// as for an LMDB set), the set's `state` pointer, and `members` (the CIDs it
+// holds: a checkpoint's extras), the frames its stdin takes. The index reader here is
+// synchronous, so the socket is spoken from a worker thread the caller waits
+// on (Atomics.wait, the answer taken with receiveMessageOnPort). With no
+// kernel process running there, a read is refused: the host must run.
 
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fromBytes, type CID } from "../runtime/cid.ts";
-import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseLmdbSpec, type IndexStore } from "../runtime/index-store.ts";
+import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "node:worker_threads";
+import { decode, encode, fromBytes, type CID } from "../runtime/cid.ts";
+import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseLmdbSpec, parseRocksSpec, type IndexStore } from "../runtime/index-store.ts";
+import { KernelHost } from "./kernel.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 
 /** A store, whichever backend: a file (index-store.ts openStoreFile), or an LMDB set, read only. */
 export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): SqliteStore {
+  const r = parseRocksSpec(spec);
+  if (r) {
+    if (o.readOnly === false) throw new Error(`${spec}: a RocksDB set is read only here (the kernel writes it; the host never does)`);
+    return openRocksStore(r.dir, r.set);
+  }
   const l = parseLmdbSpec(spec);
   if (!l) return openFile(spec, o);
   if (o.readOnly === false) throw new Error(`${spec}: an LMDB set is read only here (the kernel writes it; the host never does)`);
@@ -23,6 +41,8 @@ export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): Sql
 
 /** Whether a store is there to read: the file; for an LMDB set, its state pointer (the kernel has committed). */
 export function storeExists(spec: string): boolean {
+  const r = parseRocksSpec(spec);
+  if (r) return rocksReader(r.dir).request({ op: "state", h: r.set }) != null;
   const l = parseLmdbSpec(spec);
   if (!l) return existsSync(spec);
   if (!existsSync(join(l.dir, "data.mdb"))) return false;
@@ -76,6 +96,16 @@ export function openLmdbStore(dir: string, set: string): IndexStore {
 
 /** Every block a store holds (a SQLite file's `blocks`; an LMDB set's members), for a checkpoint's extras. */
 export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Array }> {
+  const r = parseRocksSpec(spec);
+  if (r) {
+    // #158: the set's members, listed by the kernel; each block read through it.
+    const rd = rocksReader(r.dir);
+    for (const c of rd.request({ op: "members", set: r.set }) as CID[]) {
+      const bytes = rd.request({ op: "get", set: r.set, v: c });
+      if (bytes instanceof Uint8Array) yield { cid: c, bytes };
+    }
+    return;
+  }
   const l = parseLmdbSpec(spec);
   if (l) {
     const e = lmdbEnv(l.dir);
@@ -94,3 +124,99 @@ export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Ar
   } finally { db.close(); }
 }
 
+
+// ---------------------------------------------------------------- RocksDB, through the kernel (#158)
+
+/** The worker thread: speaks the host-read socket for a waiting caller (one request at a time). */
+const READER_WORKER = `
+const { workerData } = require("node:worker_threads");
+const net = require("node:net");
+const { sock, flag, port } = workerData;
+const i32 = new Int32Array(flag);
+let conn, buf = Buffer.alloc(0), pending = false;
+const done = (m) => { port.postMessage(m); Atomics.store(i32, 0, 1); Atomics.notify(i32, 0); };
+function connect(until) {
+  return new Promise((resolve, reject) => {
+    const c = net.createConnection(sock);
+    c.once("connect", () => {
+      c.removeAllListeners("error");
+      c.on("error", () => {});
+      c.on("close", () => { if (conn === c) conn = undefined; if (pending) { pending = false; done({ error: "the kernel's socket closed" }); } });
+      c.on("data", onData);
+      resolve(c);
+    });
+    c.once("error", (e) => { if (Date.now() < until) setTimeout(() => connect(until).then(resolve, reject), 50); else reject(e); });
+  });
+}
+function onData(d) {
+  buf = Buffer.concat([buf, d]);
+  while (buf.length >= 4) {
+    const n = buf.readUInt32BE(0);
+    if (buf.length < 4 + n) return;
+    const f = new Uint8Array(buf.subarray(4, 4 + n));
+    buf = buf.subarray(4 + n);
+    if (pending) { pending = false; done({ frame: f }); }
+  }
+}
+port.on("message", async ({ bytes, waitMs }) => {
+  try {
+    if (!conn) { buf = Buffer.alloc(0); conn = await connect(Date.now() + waitMs); }
+    pending = true;
+    const h = Buffer.alloc(4); h.writeUInt32BE(bytes.length);
+    conn.write(Buffer.concat([h, Buffer.from(bytes)]));
+  } catch (e) { done({ error: (e && e.code) || String(e) }); }
+});
+`;
+
+class RocksReader {
+  private flag = new Int32Array(new SharedArrayBuffer(4));
+  private port: MessagePort;
+  private worker: Worker;
+  private nextId = 1;
+  readonly dir: string;
+
+  constructor(dir: string) {
+    this.dir = dir;
+    const { port1, port2 } = new MessageChannel();
+    this.port = port1;
+    this.worker = new Worker(READER_WORKER, { eval: true, workerData: { sock: join(dir, "kernel.sock"), flag: this.flag.buffer, port: port2 }, transferList: [port2] });
+    this.worker.unref();
+    this.port.unref();
+  }
+
+  /** One frame to the kernel and its `ok`, synchronously. */
+  request(f: { op: string; h?: string; set?: string; v?: unknown }): unknown {
+    // The process this node process runs may still be starting: wait for its socket a while; else not at all.
+    const waitMs = KernelHost.running(this.dir) ? 15_000 : 0;
+    Atomics.store(this.flag, 0, 0);
+    this.port.postMessage({ bytes: encode({ id: this.nextId++, ...f }).bytes, waitMs });
+    if (Atomics.wait(this.flag, 0, 0, waitMs + 30_000) === "timed-out") throw new Error(`${this.dir}: the kernel's host-read socket did not answer`);
+    const m = receiveMessageOnPort(this.port)?.message as { frame?: Uint8Array; error?: string } | undefined;
+    if (!m || m.error !== undefined) throw new Error(`${this.dir}: a RocksDB set is read through the host's kernel process (skein-kernel host), and none answers at ${join(this.dir, "kernel.sock")} (${m?.error ?? "no answer"}): start the host (skein-host run)`);
+    const a = decode<{ ok?: unknown; error?: string }>(m.frame!);
+    if (typeof a.error === "string") throw new Error(`${this.dir}: ${a.error}`);
+    return a.ok;
+  }
+}
+
+const readers = new Map<string, RocksReader>();
+function rocksReader(dir: string): RocksReader {
+  let r = readers.get(dir);
+  if (!r) { r = new RocksReader(dir); readers.set(dir, r); }
+  return r;
+}
+
+/**
+ * A set of the one-process kernel's RocksDB database (#158), read only, through the kernel: blocks by
+ * CID through the set's gate (what the instance holds), the state pointer read on every state read.
+ */
+export function openRocksStore(dir: string, set: string): IndexStore {
+  const r = rocksReader(dir);
+  const asBytes = (v: unknown) => (v instanceof Uint8Array ? v : undefined);
+  return indexStoreOver({
+    get: (c) => asBytes(r.request({ op: "get", set, v: fromBytes(c) })),
+    has: (c) => r.request({ op: "has", set, v: fromBytes(c) }) === true,
+    pointer: () => { const p = r.request({ op: "state", h: set }) as CID | null | undefined; return p ? p.bytes : undefined; },
+    close: () => {},
+  });
+}

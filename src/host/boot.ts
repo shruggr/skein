@@ -46,7 +46,7 @@ import type { DispatchRow } from "../runtime/dispatch.ts";
 import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
 import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import { appIgnore } from "./install.ts";
-import type { Kernel } from "./kernel.ts";
+import type { KernelSurface as Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
 // The module and program-record helpers live in ../runtime/programs.ts (no node APIs: the plan uses them in a browser too, #92).
@@ -396,9 +396,19 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
  * any other store; the kernel processes the genesis at that first start.
  */
 export async function bootStore(o: { db: string; handle: string; domain: string; command?: string; env?: Record<string, string | undefined>; log?(line: string): void }, src: BootSource, c: Genesis2Config, time?: Stamp): Promise<Booted> {
-  const { Kernel } = await import("./kernel.ts");
+  const { Kernel, KernelHost } = await import("./kernel.ts");
   const { mkdirSync } = await import("node:fs");
   const { dirname } = await import("node:path");
+  const { parseRocksSpec } = await import("../runtime/index-store.ts");
+  // #158: a RocksDB set boots in the host's one kernel process (this node process's, shared with its router, or one of its own).
+  const rocks = parseRocksSpec(o.db);
+  if (rocks) {
+    const host = KernelHost.acquire(rocks.dir, { command: o.command, env: o.env, log: o.log });
+    try {
+      const k = await host.open({ db: o.db, handle: o.handle, domain: o.domain, log: o.log });
+      try { return await boot(k, src, c, time); } finally { await k.stop(); }
+    } finally { await host.release(); }
+  }
   if (!o.db.startsWith("lmdb:")) mkdirSync(dirname(o.db), { recursive: true }); // an LMDB set (#96): the kernel makes its environment
   const k = new Kernel({ db: o.db, handle: o.handle, domain: o.domain, command: o.command, env: o.env, log: o.log });
   try {

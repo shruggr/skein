@@ -30,6 +30,8 @@ test {
     _ = @import("billing.zig");
     _ = @import("grants.zig");
     _ = @import("lmdb_store.zig");
+    _ = @import("rocksdb_store.zig");
+    _ = @import("host.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {

@@ -367,7 +367,7 @@ export function hasStatePointer(path: string): boolean {
  * through sqlite.ts. (An LMDB set, `lmdb:<env dir>#<set>`: src/host/stores.ts.)
  */
 export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
-  if (isLmdb(path)) throw new Error(`${path}: an LMDB set is opened by src/host/stores.ts (openStoreFile there)`);
+  if (isSet(path)) throw new Error(`${path}: a set (LMDB, RocksDB) is opened by src/host/stores.ts (openStoreFile there)`);
   let fresh = true;
   try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it, and any other open failure throws there with its reason */ }
   if (fresh) return openStore(path, o);
@@ -613,9 +613,27 @@ export const CHAIN_SET = "host/chain";
 /** Whether host.db's `store` column names a set of an LMDB environment. */
 export function isLmdb(store: string): boolean { return store.startsWith(LMDB); }
 
-/** A row's store as the kernel's tools and `openStoreFile` name it: its path, or `lmdb:<env dir>#<handle>`. */
+/** host.db's `store` column for a set of the one-process kernel's RocksDB database (#158): `rocksdb:<db dir>` (the set: the row's handle). */
+export const ROCKSDB = "rocksdb:";
+
+/** Whether host.db's `store` column names a set of a RocksDB database (#158). */
+export function isRocks(store: string): boolean { return store.startsWith(ROCKSDB); }
+
+/** Whether a store is a set of a host's shared store (LMDB #96, RocksDB #158), not a file of its own. */
+export function isSet(store: string): boolean { return isLmdb(store) || isRocks(store); }
+
+/** A row's store as the kernel's tools and `openStoreFile` name it: its path, `lmdb:<env dir>#<handle>` or `rocksdb:<db dir>#<handle>`. */
 export function storeSpec(row: { store: string; handle: string }): string {
-  return isLmdb(row.store) ? `${row.store}#${row.handle}` : row.store;
+  return isSet(row.store) ? `${row.store}#${row.handle}` : row.store;
+}
+
+/** `rocksdb:<db dir>#<set>` → its parts (kernel-zig/src/any_store.zig parseRocksSpec); undefined for anything else. */
+export function parseRocksSpec(spec: string): { dir: string; set: string } | undefined {
+  if (!isRocks(spec)) return undefined;
+  const rest = spec.slice(ROCKSDB.length);
+  const i = rest.lastIndexOf("#");
+  if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: a RocksDB store is rocksdb:<db dir>#<set>`);
+  return { dir: rest.slice(0, i), set: rest.slice(i + 1) };
 }
 
 /** `lmdb:<env dir>#<set>` → its parts (kernel-zig/src/any_store.zig parseSpec); undefined for a path. */

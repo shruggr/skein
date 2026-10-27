@@ -47,7 +47,9 @@ import { planClaim } from "../../src/client/admin.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { masterKey, Signer } from "../../src/host/signer.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { BACKEND, ROCKS_MODE } from "./backend.ts";
 import { ownerCli, sendPlan } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import type { WalletInterface } from "@bsv/sdk";
@@ -76,6 +78,8 @@ const vars: Env["vars"] = {
   SKEIN_HOME: home, HOME: home, SKEIN_ROUTER_PORT: String(port), SKEIN_HOST_PORT: "0",
   // An instance's origin in the /@<handle> form: what the manager answers as its url, fetchable here.
   SKEIN_INSTANCE_ORIGIN: "http://127.0.0.1:{port}/@{handle}",
+  // #158: every instance a set of the host's RocksDB database, in its one `skein-kernel host` process.
+  ...(ROCKS_MODE ? { SKEIN_STORE_ROCKSDB: join(home, "store-rocksdb") } : {}),
 };
 const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (process.env.VERBOSE) process.stdout.write(`  | ${l}\n`); };
@@ -107,7 +111,7 @@ try {
   check(r.code === 0 && r.out.some((l) => /^the host skein: host@localhost/.test(l)), `a second init says which instance is the host skein: ${r.out.join(" ")}`);
   r = await cli(["list"]);
   check(r.out.some((l) => /^host@localhost\thost\tenabled\t/.test(l)), "skein-host list names it: kind host, enabled");
-  stores.push(db.get("host")!.store);
+  stores.push(storeSpec(db.get("host")!));
 
   host = await runHost(db, { vars, out, err: out });
   const router = host.router;
@@ -170,8 +174,8 @@ try {
   check(!!alice && alice.status === "enabled" && alice.identity === res?.identity, `alice exists, published, her identity as answered (${alice?.identity?.slice(0, 8)})`);
   const aliceRows = await kernelRows("alice");
   check(aliceRows.map((x) => x.address).join(",") === "objects,head,dispatch,peers,grant" && (await holders("alice")).join(",") === clientId, "alice is claimed by the client's own signed claim: the client is root, her claim route gone");
-  stores.push(alice!.store);
-  const s = openStoreFile(alice!.store, { readOnly: true });
+  stores.push(storeSpec(alice!));
+  const s = openStoreFile(storeSpec(alice!), { readOnly: true });
   const first: Array<Record<string, unknown>> = [];
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
   check(first[0]?.transport === "local", "the forwarded claim is alice's first entry after her genesis: her hostname was published after it");
@@ -228,5 +232,5 @@ try {
   if (failures && process.env.VERBOSE !== undefined) for (const l of lines.slice(-80)) process.stdout.write(`  | ${l}\n`);
   if (!process.env.KEEP) await fs.rm(home, { recursive: true, force: true });
 }
-process.stdout.write(failures ? `host: ${failures} FAILED\n` : "host: all ok\n");
+process.stdout.write(failures ? `host (${BACKEND}): ${failures} FAILED\n` : `host (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

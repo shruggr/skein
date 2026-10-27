@@ -62,7 +62,8 @@ import { dirSource } from "../../src/host/boot.ts";
 import { isBeefEnvelope, isBeefRecord, wireOf, type BeefEnvelope, type BeefRecord } from "../../src/runtime/beef.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { buildTree, derive } from "../../src/runtime/index-store.ts";
+import { buildTree, derive, parseRocksSpec } from "../../src/runtime/index-store.ts";
+import { KernelHost } from "../../src/host/kernel.ts";
 import { openStoreFile, storeBlocks } from "../../src/host/stores.ts";
 import { BACKEND, specFor, storeFor } from "./backend.ts";
 import { libp2pKey, peerIdOf } from "../../src/host/p2p.ts";
@@ -1208,6 +1209,9 @@ await arcade74.close();
 // edges (nor does the header): no token is a `child` edge target, and no edge in the map is `child` / `prev` /
 // `merkleroot`. The nodes still link forward. The TS reader derives the kernel's edges map key for key.
 if (report.ok === true) {
+  // #158: a RocksDB set is read through the host's kernel process, so one runs for the read (the routers are stopped).
+  const rocks = parseRocksSpec(db);
+  const kh = rocks ? KernelHost.acquire(rocks.dir, { command: kernel, env: { SKEIN_HOME: home } }) : undefined;
   const v = openStoreFile(db, { readOnly: true });
   const d = await derive(v);
   const children: boolean[] = [];
@@ -1220,6 +1224,7 @@ if (report.ok === true) {
   const noNodeEdges = d.pairs.edges.every(([, x]) => !["child", "prev", "merkleroot"].includes((x as [string])[0]));
   report.edges = { sameRoot: String(buildTree(d.pairs.edges).root) === String((v as unknown as { state(): { roots: { edges: CID } } }).state().roots.edges), children, noNodeEdges, forward };
   await v.close();
+  await kh?.release();
 }
 
 process.stdout.write("== overlay services (#36, #79)\n");

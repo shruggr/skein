@@ -50,7 +50,9 @@ import { main } from "../../src/host/cli.ts";
 import { appCheckout, CHAIN_GIT_SITE, GIT_APP, ownerCli, sendPlan } from "../../src/testapps.ts";
 import { dirSource } from "../../src/host/boot.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { BACKEND, ROCKS_MODE } from "./backend.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -62,7 +64,7 @@ const hex = (b: unknown) => b instanceof Uint8Array ? Buffer.from(b).toString("h
 
 /** An instance's genesis record, read from its store file (read-only, beside the kernel). */
 async function genesisOf(handle: string): Promise<Record<string, unknown> | undefined> {
-  const s = openStoreFile(h.db.get(handle)!.store, { readOnly: true });
+  const s = openStoreFile(storeSpec(h.db.get(handle)!), { readOnly: true });
   try {
     for await (const { entry } of s.log.entries(0)) return await s.get((entry as { genesis: CID }).genesis) as Record<string, unknown>;
     return undefined;
@@ -70,14 +72,14 @@ async function genesisOf(handle: string): Promise<Record<string, unknown> | unde
 }
 
 const afters: Array<() => unknown> = [];
-const h = await testHost({ after: (f) => afters.push(f) });
+const h = await testHost({ after: (f) => afters.push(f) }, { rocks: ROCKS_MODE });
 const stores: string[] = [];
 try {
   h.mailbox("david", h.ownerId);
   const booted = await h.image("inst");
   const inst = h.db.get("inst")!.identity!;
   await h.router.start();
-  stores.push(h.db.get("inst")!.store);
+  stores.push(storeSpec(h.db.get("inst")!));
   const k = async (handle = "inst") => (await h.router.hydrate(handle)).kernel;
   const rows = async (handle = "inst") => (await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>;
   const kernelRows = async (handle = "inst") => (await rows(handle)).filter((r) => r.program === "kernel").map((r) => String(r.address));
@@ -193,7 +195,7 @@ try {
   // ------------------------------------------------ an instance with root held refuses a claim
   h.instance("owned");
   await h.router.hydrate("owned");
-  stores.push(h.db.get("owned")!.store);
+  stores.push(storeSpec(h.db.get("owned")!));
   const ownedId = h.db.get("owned")!.identity!;
   await new RawBox(h.owner, `${h.base}/@owned`).send(ownedId, "dispatch", { op: "add", row: { transport: "mailbox", address: "claim", program: "kernel", fn: "claim" } });
   await h.router.settled();
@@ -214,7 +216,7 @@ try {
   // ------------------------------------------------ a claim signed before the instance existed (#127)
   await h.image("fresh2");
   await h.router.hydrate("fresh2");
-  stores.push(h.db.get("fresh2")!.store);
+  stores.push(storeSpec(h.db.get("fresh2")!));
   const signer = PrivateKey.fromRandom(), signerId = signer.toPublicKey().toString();
   const lines3 = h.lines.length;
   // A message naming no recipient in another box is not a claim: the front door refuses it.
@@ -242,5 +244,5 @@ try {
   }
   if (!process.env.KEEP) await removeHome?.();
 }
-process.stdout.write(failures ? `claim: ${failures} FAILED\n` : "claim: all ok\n");
+process.stdout.write(failures ? `claim (${BACKEND}): ${failures} FAILED\n` : `claim (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

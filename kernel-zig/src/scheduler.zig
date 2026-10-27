@@ -475,6 +475,19 @@ pub const Runtime = struct {
         rt.live.clearRetainingCapacity();
     }
 
+    /// Free the runtime (#158: `skein-kernel host` frees an instance the host closes). Stopped first;
+    /// what the outbox still held is dropped (handed over again at the next start: reoffer).
+    pub fn deinit(rt: *Runtime) void {
+        rt.stop();
+        rt.flushOutbox();
+        rt.outbox.deinit();
+        rt.live.deinit();
+        rt.stepping.deinit();
+        rt.sessions.deinit();
+        rt.life.deinit();
+        rt.gpa.destroy(rt);
+    }
+
     /// The boxes the route table's `mailbox` and `event` routes route ("*" aside) plus the genesis's `collect`.
     pub fn boxes(rt: *Runtime, a: std.mem.Allocator) ![]const []const u8 {
         try rt.loadGenesis();
@@ -999,7 +1012,9 @@ pub const Runtime = struct {
         rt.flushOutbox();
     }
 
-    var last_error: []const u8 = "";
+    // Per thread (#158: `skein-kernel host` steps instances on a pool of workers): the message of
+    // the error the entry being processed on this thread failed with.
+    threadlocal var last_error: []const u8 = "";
     fn errText(rt: *Runtime, err: anyerror) []const u8 {
         _ = rt;
         return if (last_error.len > 0) last_error else @errorName(err);
@@ -3023,11 +3038,11 @@ pub const Runtime = struct {
         const st = stepOf(imp);
         const a = st.a;
         if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
-        const loaded = try loadCallee(st.rt, imp, a, prog);
+        const loaded = try loadCallee(st.rt, st.rt.store, imp, a, prog);
         // #77: the callee's writes are the step's, in the callee's own write scope.
         try st.progs.append(.{ .record = loaded.record, .cid = prog });
         defer _ = st.progs.pop();
-        var ctx = st.rt.callContext(a, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
+        var ctx = st.rt.callContext(a, st.rt.store, st.rt.genesis, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
         var extra = cbor.MapBuilder.init(a);
         try extra.put("thread", cbor.cidv(st.origin));
         try extra.put("step", cbor.int(st.n));
@@ -3046,11 +3061,11 @@ pub const Runtime = struct {
 
     const Callee = struct { mod: *runner.Compiled, name: []const u8, record: Value };
 
-    fn loadCallee(rt: *Runtime, imp: *program.Imports, a: std.mem.Allocator, prog: []const u8) program.Err!Callee {
-        const p = rt.store.getOpt(a, prog);
+    fn loadCallee(rt: *Runtime, store: Store, imp: *program.Imports, a: std.mem.Allocator, prog: []const u8) program.Err!Callee {
+        const p = store.getOpt(a, prog);
         if (!programs.isProgram(p) or !hasWasm(p.?)) return imp.failFmt("call: {s} is not a wasm program record in the store", .{fmtCid(a, prog)});
         var msg: []const u8 = "";
-        const mod = rt.runner.load(rt.store, a, programs.wasmOf(p.?).?, &msg) catch |err| return switch (err) {
+        const mod = rt.runner.load(store, a, programs.wasmOf(p.?).?, &msg) catch |err| return switch (err) {
             error.NotInStore, error.BadHash, error.Compile => imp.failFmt("call: {s}", .{msg}),
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("call: {s}", .{@errorName(err)}),
@@ -3074,8 +3089,9 @@ pub const Runtime = struct {
     /// The input a called program reads (`kind: "call"`): what it is asked,
     /// by whom, and the instance it runs in — the genesis's facts and the
     /// dispatch table as it stands (#77).
-    fn callContext(rt: *Runtime, a: std.mem.Allocator, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !cbor.MapBuilder {
-        const g = rt.genesis orelse return error.NoGenesis;
+    fn callContext(rt: *Runtime, a: std.mem.Allocator, store: Store, genesis: ?Value, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !cbor.MapBuilder {
+        _ = rt;
+        const g = genesis orelse return error.NoGenesis;
         var m = cbor.MapBuilder.init(a);
         try m.put("kind", cbor.string("call"));
         try m.put("fn", cbor.string(func));
@@ -3091,7 +3107,7 @@ pub const Runtime = struct {
         try m.put("peers", g.get("peers"));
         try m.put("defaults", g.get("defaults"));
         try m.put("names", g.get("names"));
-        try m.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
+        try m.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, store)) orelse &.{}));
         return m;
     }
 
@@ -3106,7 +3122,18 @@ pub const Runtime = struct {
     /// so a call is not deterministic and nothing replays it. Fuel is limited
     /// by `callFuelLimit` and reported.
     pub fn call(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !CallResult {
-        return (try rt.callIn(a, prog, func, arg, caller, now, null)).result;
+        try rt.loadGenesis();
+        return (try rt.callIn(a, rt.store, rt.genesis, rt.cursor, prog, func, arg, caller, now, null)).result;
+    }
+
+    /// The same call (#40) over `view`, a store other than the runtime's (#158: `skein-kernel host`
+    /// runs a call on any worker against the state as committed — a read-only index at the state
+    /// pointer, rocksdb_store.zig View — while the instance's step may run on another): its genesis,
+    /// its cursor (the entries after it are `pending`) and its state are the view's. Nothing of the
+    /// runtime's working state is read or written, only its runner, peers and identity-free config.
+    pub fn callOver(rt: *Runtime, a: std.mem.Allocator, view: Store, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !CallResult {
+        const g: ?Value = if ((try view.logTip(a)) != null) logm.genesisOf(a, view) catch null else null;
+        return (try rt.callIn(a, view, g, try view.cursorGet(), prog, func, arg, caller, now, null)).result;
     }
 
     pub const FilterResult = struct { ok: bool, result: []const u8 = "", err: []const u8 = "", fuel: u64, puts: std.StringHashMap([]const u8) };
@@ -3117,16 +3144,16 @@ pub const Runtime = struct {
     /// door keeps those its `pass` names).
     pub fn callFiltered(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, at: i64, request: Value) !FilterResult {
         const seed = try cbor.cidOfValue(a, request);
-        const r = try rt.callIn(a, prog, func, arg, null, at, seed);
+        try rt.loadGenesis();
+        const r = try rt.callIn(a, rt.store, rt.genesis, rt.cursor, prog, func, arg, null, at, seed);
         return .{ .ok = r.result.ok, .result = r.result.result, .err = r.result.err, .fuel = r.result.fuel, .puts = r.puts };
     }
 
     /// A call (#40), or (`seed`: #143) a filter's in the deterministic profile.
-    fn callIn(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64, seed_of: ?[]const u8) !struct { result: CallResult, puts: std.StringHashMap([]const u8) } {
-        try rt.loadGenesis();
-        var cs = CallState{ .rt = rt, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = undefined, .random = undefined };
-        if (rt.genesis == null) return .{ .result = .{ .ok = false, .err = "call: no genesis", .fuel = 0 }, .puts = cs.overlay };
-        var meter = engine.Meter.init(callFuelLimit(rt.genesis));
+    fn callIn(rt: *Runtime, a: std.mem.Allocator, store: Store, genesis: ?Value, cursor: i64, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64, seed_of: ?[]const u8) !struct { result: CallResult, puts: std.StringHashMap([]const u8) } {
+        var cs = CallState{ .rt = rt, .store = store, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = undefined, .random = undefined };
+        if (genesis == null) return .{ .result = .{ .ok = false, .err = "call: no genesis", .fuel = 0 }, .puts = cs.overlay };
+        var meter = engine.Meter.init(callFuelLimit(genesis));
         cs.meter = &meter;
         if (seed_of) |sd| {
             cs.random = syscalls.Entropy.init(sd, prog);
@@ -3137,13 +3164,13 @@ pub const Runtime = struct {
         }
         cs.clock.drive(@as(i128, now) * 1_000_000);
         cs.clock.meter = &meter;
-        var ctx = try rt.callContext(a, func, arg, caller, now);
+        var ctx = try rt.callContext(a, store, genesis, func, arg, caller, now);
         if (seed_of == null) {
             var pend = std.array_list.Managed(Value).init(a);
-            for (try rt.store.logFrom(a, rt.cursor)) |c| try pend.append(cbor.cidv(c));
+            for (try store.logFrom(a, cursor)) |c| try pend.append(cbor.cidv(c));
             try ctx.put("pending", .{ .array = pend.items });
         } else try ctx.put("filter", .{ .bool = true });
-        try ctx.put("state", cbor.optCid(try rt.store.state(a)));
+        try ctx.put("state", cbor.optCid(try store.state(a)));
         cs.input = try cbor.encode(a, ctx.value());
         var host = callHost;
         host.ctx = &cs;
@@ -3152,7 +3179,7 @@ pub const Runtime = struct {
         cs.svc = &svc;
         cs.host = &host;
         var imp = program.Imports{ .host = &host, .alloc = a };
-        const loaded = loadCallee(rt, &imp, a, prog) catch |err| switch (err) {
+        const loaded = loadCallee(rt, store, &imp, a, prog) catch |err| switch (err) {
             error.Failed => return .{ .result = .{ .ok = false, .err = imp.last_error, .fuel = 0 }, .puts = cs.overlay },
             else => return err,
         };
@@ -3170,6 +3197,8 @@ pub const Runtime = struct {
     /// A call's world: the records it put (in memory only), its clock, its random, its fuel.
     const CallState = struct {
         rt: *Runtime,
+        /// What the call reads: the runtime's store, or (#158) a view of it as committed.
+        store: Store,
         a: std.mem.Allocator,
         overlay: std.StringHashMap([]const u8),
         meter: *engine.Meter,
@@ -3220,7 +3249,7 @@ pub const Runtime = struct {
     fn cGet(imp: *program.Imports, c: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
         if (cs.overlay.get(c)) |b| return b;
-        return (cs.rt.store.bytes(cs.a, c) catch return imp.failWith("store error")) orelse notFound(imp, c);
+        return (cs.store.bytes(cs.a, c) catch return imp.failWith("store error")) orelse notFound(imp, c);
     }
     fn cPut(imp: *program.Imports, bytes: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
@@ -3260,7 +3289,7 @@ pub const Runtime = struct {
     /// The edges into a record (#42), as the index holds them (a call keeps nothing).
     fn cEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
         const cs = callOf(imp);
-        return program.edgesRead(cs.a, cs.rt.store, to, rel, &.{}) catch |err| switch (err) {
+        return program.edgesRead(cs.a, cs.store, to, rel, &.{}) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
@@ -3268,7 +3297,7 @@ pub const Runtime = struct {
     fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const cs = callOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(cs.a, name)});
-        return heads.headTree(cs.a, cs.rt.store, name) catch imp.failWith("store error");
+        return heads.headTree(cs.a, cs.store, name) catch imp.failWith("store error");
     }
     /// The signer, answered by the host and not recorded (a call is never replayed).
     fn cWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
@@ -3286,7 +3315,7 @@ pub const Runtime = struct {
         const cs = callOf(imp);
         const a = cs.a;
         if (cs.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
-        const loaded = try loadCallee(cs.rt, imp, a, prog);
+        const loaded = try loadCallee(cs.rt, cs.store, imp, a, prog);
         const outer = cbor.decode(a, cs.input) catch return imp.failWith("call: bad input");
         var m = cbor.MapBuilder.init(a);
         for (outer.map) |e| {

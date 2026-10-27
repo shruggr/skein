@@ -25,7 +25,14 @@
 // source's and whose replay must come to z1's state. A source may itself be
 // an LMDB set, `lmdb:<env dir>#<set>`: read in place (read only).
 //
-//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | lmdb:<dir>#<set>>…
+// RocksDB (#158): the same log is also replayed into a set of a fresh RocksDB
+// database (the same report and dump as z1), and a SQLite source the Zig
+// kernel wrote, or an LMDB set, is migrated into one (`skein-kernel migrate
+// --into rocksdb:<dir>`: the same dump; its replay z1's state). A source may
+// be a RocksDB set, `rocksdb:<db dir>#<set>`, read in place once the host
+// process that wrote it is stopped (one process per database).
+//
+//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | lmdb:<dir>#<set> | rocksdb:<dir>#<set>>…
 //
 // SQLite sources are copied first (with their -wal), never opened in place.
 
@@ -85,7 +92,7 @@ function dumpDiff(x: Dump, y: Dump, what: string): string[] {
 
 /** A file the Zig kernel wrote in the current format (its state record has `format`). */
 function isZigStore(db: string): boolean {
-  if (db.startsWith("lmdb:")) {
+  if (db.startsWith("lmdb:") || db.startsWith("rocksdb:")) {
     if (run(["fuel", db]).status !== 0) return false;
     const x = dump(db);
     return x.updates.some((u) => u[3] !== null) || !x.chains.some((c) => c[3] === "thread");
@@ -105,14 +112,16 @@ let allSame = true;
 for (const source of sources) {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-replay-"));
   const lmdbSource = source.startsWith("lmdb:");
-  const src = lmdbSource ? source : join(work, "src.db");
-  if (!lmdbSource) {
+  const rocksSource = source.startsWith("rocksdb:");
+  const setSource = lmdbSource || rocksSource;
+  const src = setSource ? source : join(work, "src.db");
+  if (!setSource) {
     copyFileSync(source, src);
     if (existsSync(`${source}-wal`)) copyFileSync(`${source}-wal`, `${src}-wal`);
     const d = new DatabaseSync(src); d.exec("PRAGMA wal_checkpoint(TRUNCATE)"); d.close();
   }
   const z1 = join(work, "z1.db"), z2 = join(work, "z2.db");
-  const name = lmdbSource ? `${source.slice(source.lastIndexOf("#") + 1)} (lmdb set)` : `${basename(dirname(source))}/${basename(source)}`;
+  const name = setSource ? `${source.slice(source.lastIndexOf("#") + 1)} (${lmdbSource ? "lmdb" : "rocksdb"} set)` : `${basename(dirname(source))}/${basename(source)}`;
 
   let t0 = Date.now();
   const r1 = run(["replay", src, z1]);
@@ -187,7 +196,7 @@ for (const source of sources) {
   }
   // #96: migrate — a SQLite source the Zig kernel wrote, into a set: the same dump; its replay the same state.
   let migrated = "";
-  if (!lmdbSource && zigSource) {
+  if (!setSource && zigSource) {
     const zm = `lmdb:${join(work, "menv")}#migrated`;
     const m = run(["migrate", "--from", src, "--into", join(work, "menv"), "--set", "migrated"]);
     if (m.status !== 0) diffs.push(`migrate failed (exit ${m.status}): ${m.stderr.slice(0, 300)}`);
@@ -200,6 +209,31 @@ for (const source of sources) {
       if (!md.length) migrated = " · migrated to LMDB: the same dump and replay";
     }
   }
+  // #158: RocksDB — the same log replayed into a set of a fresh database; a Zig source (a file, an LMDB set) migrated into one.
+  t0 = Date.now();
+  const zr = `rocksdb:${join(work, "rdb")}#replay`;
+  const rr = run(["replay", src, zr]);
+  const msr = Date.now() - t0;
+  if (rr.status !== 0) diffs.push(`replay into RocksDB failed (exit ${rr.status}): ${rr.stderr.slice(0, 300)}`);
+  else {
+    const jr = JSON.parse(rr.stdout);
+    for (const k of ["lines", "state"] as const) if (JSON.stringify(jr[k]) !== JSON.stringify(j1[k])) diffs.push(`RocksDB replay ${k} differ from SQLite's`);
+    if (jr.index.record !== j1.index.record) diffs.push(`state record: RocksDB ${jr.index.record} vs SQLite ${j1.index.record}`);
+    diffs.push(...dumpDiff(dump(zr), d1, "RocksDB replay vs SQLite replay"));
+  }
+  if (!rocksSource && zigSource) {
+    const zm = `rocksdb:${join(work, "mrdb")}#migrated`;
+    const m = run(["migrate", "--from", src, "--into", `rocksdb:${join(work, "mrdb")}`, "--set", "migrated"]);
+    if (m.status !== 0) diffs.push(`migrate into RocksDB failed (exit ${m.status}): ${m.stderr.slice(0, 300)}`);
+    else {
+      const md = dumpDiff(dump(src), dump(zm), "source vs migrated (RocksDB)");
+      diffs.push(...md);
+      const rm = run(["replay", zm, join(work, "zrm.db")]);
+      if (rm.status !== 0) diffs.push(`replay of the RocksDB-migrated set failed (exit ${rm.status})`);
+      else if (JSON.parse(rm.stdout).index.record !== j1.index.record) diffs.push(`the RocksDB-migrated set's replay ends at ${JSON.parse(rm.stdout).index.record}, the source's at ${j1.index.record}`);
+      if (!md.length) migrated += " · migrated to RocksDB: the same dump and replay";
+    }
+  }
   const n = d1.entries.length;
   const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
   // A store with no thread ran no step: only its genesis (a mailbox nothing was delivered to: a handshake writes
@@ -209,7 +243,7 @@ for (const source of sources) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);
   } else {
-    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into LMDB ${msl} ms, the same)${fromSource}${migrated}\n`);
+    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into LMDB ${msl} ms, into RocksDB ${msr} ms, the same)${fromSource}${migrated}\n`);
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
