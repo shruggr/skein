@@ -58,12 +58,13 @@ import { HTTPSOverlayBroadcastFacilitator, LookupResolver, MerklePath, P2PKH, Pr
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
-import { DatabaseSync } from "node:sqlite";
 import { dirSource } from "../../src/host/boot.ts";
 import { isBeefEnvelope, isBeefRecord, wireOf, type BeefEnvelope, type BeefRecord } from "../../src/runtime/beef.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
+import { buildTree, derive } from "../../src/runtime/index-store.ts";
+import { openStoreFile, storeBlocks } from "../../src/host/stores.ts";
+import { BACKEND, specFor, storeFor } from "./backend.ts";
 import { libp2pKey, peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { RawBox } from "../../src/client/raw.ts";
@@ -81,7 +82,7 @@ const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dc
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));
-const db = join(home, "instances/overlay/runtime.db");
+const db = specFor(home, "overlay");
 const key = (h: string) => new PrivateKey(h, 16);
 const report: Record<string, unknown> = {};
 let failures = 0;
@@ -317,13 +318,13 @@ async function steakOf(file: string, txid: string): Promise<unknown> {
 // ---------------------------------------------------------------- the router
 
 const hostDb = new HostDb(join(home, "host.db"));
-hostDb.add("overlay", { store: db });
+hostDb.add("overlay", { store: storeFor(home, "overlay") });
 // #57: the same tree again, fed the token transaction by GossipSub instead of POST /submit.
-const gossipDb = join(home, "instances/gossip/runtime.db");
-hostDb.add("gossip", { store: gossipDb });
+const gossipDb = specFor(home, "gossip");
+hostDb.add("gossip", { store: storeFor(home, "gossip") });
 // #57: the transient-failure case.
-const gateDb = join(home, "instances/gate/runtime.db");
-hostDb.add("gate", { store: gateDb });
+const gateDb = specFor(home, "gate");
+hostDb.add("gate", { store: storeFor(home, "gate") });
 const owner = key("2222").toPublicKey().toString();
 // The host's Arcade (#58, #65): the chain app broadcasts (an event), the host posts it; Arcade's answer and statuses come back as status messages, proofs as events.
 const arcade = await FakeArcade.start();
@@ -350,9 +351,9 @@ async function entriesSince(handle: string, from: number): Promise<Array<{ cid: 
 }
 // #73: a fourth instance, on a router with no Arcade — no status provider in its address book (its `status` row
 // left out), so no status ever arrives: the chain app answers only at the proof.
-const noarcDb = join(home, "instances/noarc/runtime.db");
+const noarcDb = specFor(home, "noarc");
 const noarcHostDb = new HostDb(join(home, "noarc-host.db"));
-noarcHostDb.add("noarc", { store: noarcDb });
+noarcHostDb.add("noarc", { store: storeFor(home, "noarc") });
 const noarcRouter = new Router({
   db: noarcHostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   answerWaitMs: 300,
@@ -463,9 +464,8 @@ try {
     const pointer = pointerOf(envelope);
     const v = openStoreFile(db, { readOnly: true });
     try {
-      const d = new DatabaseSync(db, { readOnly: true });
       let holding = 0, total = 0;
-      try { for (const row of d.prepare("SELECT bytes FROM blocks").iterate() as Iterable<{ bytes: Uint8Array }>) { total++; if (Buffer.from(row.bytes).indexOf(Buffer.from(wire)) >= 0) holding++; } } finally { d.close(); }
+      for (const row of storeBlocks(db)) { total++; if (Buffer.from(row.bytes).indexOf(Buffer.from(wire)) >= 0) holding++; }
       const pr = pointer ? await k.store.get(pointer) as unknown as BeefRecord : undefined;
       const back = envelope && pr && isBeefRecord(pr) ? await wireOf(envelope, pr, async (c) => await v.bytes(c)) : undefined;
       const txs = await headMap(k, "chain/state", "txs");
@@ -590,12 +590,9 @@ try {
   // A resubmission is a dupe: nothing new. #121: a held transaction submitted again writes no block — its
   // transactions, its BUMP's bytes and its pointer record are the ones the store holds (content-addressed, once).
   const heldBlocks = () => {
-    const d = new DatabaseSync(db, { readOnly: true });
-    try {
-      let n = 0;
-      for (const row of d.prepare("SELECT cid FROM blocks").iterate() as Iterable<{ cid: Uint8Array }>) { const c = CID.decode(row.cid); if (c.code === 0xb1 || c.code === 0xb0 || c.code === 0x55) n++; }
-      return n;
-    } finally { d.close(); }
+    let n = 0;
+    for (const { cid: c } of storeBlocks(db)) if (c.code === 0xb1 || c.code === 0xb0 || c.code === 0x55) n++;
+    return n;
   };
   await router.settled();
   const held0 = heldBlocks();
@@ -992,7 +989,7 @@ const freePort = () => new Promise<number>((resolve, reject) => {
 });
 const G = ["ga", "gb", "gc"] as const;
 type GH = typeof G[number];
-const gDb: Record<GH, string> = { ga: join(home, "instances/ga/runtime.db"), gb: join(home, "instances/gb/runtime.db"), gc: join(home, "instances/gc/runtime.db") };
+const gDb: Record<GH, string> = { ga: specFor(home, "ga"), gb: specFor(home, "gb"), gc: specFor(home, "gc") };
 const p2pSigner = new Signer(new PrivateKey("a77e57", 16));
 const gossipTree = (dir: string, topics: string[]) => {
   cpSync(sys, dir, { recursive: true });
@@ -1011,7 +1008,7 @@ try {
   const idOf = (h: GH) => peerIdOf(p2pSigner.peerKey(h)).toString();
   for (const h of G) {
     const hdb = new HostDb(join(home, `${h}-host.db`));
-    hdb.add(h, { store: gDb[h] });
+    hdb.add(h, { store: storeFor(home, h) });
     g[h] = {
       hdb,
       r: new Router({
@@ -1331,5 +1328,5 @@ replay(noarcDb, "#73: the no-Arcade instance's store replays to itself exactly")
 if (report.g74ok === true) for (const h of G) replay(gDb[h], `#74: ${h}'s store replays to itself exactly`);
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });
-process.stdout.write(failures ? `overlay: ${failures} FAILED\n` : "overlay: all ok\n");
+process.stdout.write(failures ? `overlay (${BACKEND}): ${failures} FAILED\n` : `overlay (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

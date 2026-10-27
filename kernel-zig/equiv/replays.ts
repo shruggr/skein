@@ -18,9 +18,16 @@
 // and a source the Zig kernel wrote itself (equiv/serve.ts; format 1) is
 // reproduced exactly by its replay.
 //
-//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db>…
+// Both backends (#96): the same log is also replayed into a set of a fresh
+// LMDB environment, which must come to the same report and dump as z1 (the
+// same state CID, the same CIDs); a SQLite source the Zig kernel wrote is
+// also migrated into a set (`skein-kernel migrate`), whose dump must be the
+// source's and whose replay must come to z1's state. A source may itself be
+// an LMDB set, `lmdb:<env dir>#<set>`: read in place (read only).
 //
-// Sources are copied first (with their -wal), never opened in place.
+//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | lmdb:<dir>#<set>>…
+//
+// SQLite sources are copied first (with their -wal), never opened in place.
 
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -78,6 +85,11 @@ function dumpDiff(x: Dump, y: Dump, what: string): string[] {
 
 /** A file the Zig kernel wrote in the current format (its state record has `format`). */
 function isZigStore(db: string): boolean {
+  if (db.startsWith("lmdb:")) {
+    if (run(["fuel", db]).status !== 0) return false;
+    const x = dump(db);
+    return x.updates.some((u) => u[3] !== null) || !x.chains.some((c) => c[3] === "thread");
+  }
   const d = new DatabaseSync(db, { readOnly: true });
   try {
     const t = d.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
@@ -92,12 +104,15 @@ function isZigStore(db: string): boolean {
 let allSame = true;
 for (const source of sources) {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-replay-"));
-  const src = join(work, "src.db");
-  copyFileSync(source, src);
-  if (existsSync(`${source}-wal`)) copyFileSync(`${source}-wal`, `${src}-wal`);
-  { const d = new DatabaseSync(src); d.exec("PRAGMA wal_checkpoint(TRUNCATE)"); d.close(); }
+  const lmdbSource = source.startsWith("lmdb:");
+  const src = lmdbSource ? source : join(work, "src.db");
+  if (!lmdbSource) {
+    copyFileSync(source, src);
+    if (existsSync(`${source}-wal`)) copyFileSync(`${source}-wal`, `${src}-wal`);
+    const d = new DatabaseSync(src); d.exec("PRAGMA wal_checkpoint(TRUNCATE)"); d.close();
+  }
   const z1 = join(work, "z1.db"), z2 = join(work, "z2.db");
-  const name = `${basename(dirname(source))}/${basename(source)}`;
+  const name = lmdbSource ? `${source.slice(source.lastIndexOf("#") + 1)} (lmdb set)` : `${basename(dirname(source))}/${basename(source)}`;
 
   let t0 = Date.now();
   const r1 = run(["replay", src, z1]);
@@ -151,11 +166,39 @@ for (const source of sources) {
     d.close();
   }
   let fromSource = "";
-  if (isZigStore(src)) {
+  const zigSource = isZigStore(src);
+  if (zigSource) {
     const ds = dump(src);
     const sd = dumpDiff(ds, d1, "source vs replay");
     diffs.push(...sd);
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
+  }
+  // #96: the other backend — the same log replayed into a set of a fresh LMDB environment.
+  t0 = Date.now();
+  const zl = `lmdb:${join(work, "env")}#replay`;
+  const rl = run(["replay", src, zl]);
+  const msl = Date.now() - t0;
+  if (rl.status !== 0) diffs.push(`replay into LMDB failed (exit ${rl.status}): ${rl.stderr.slice(0, 300)}`);
+  else {
+    const jl = JSON.parse(rl.stdout);
+    for (const k of ["lines", "state"] as const) if (JSON.stringify(jl[k]) !== JSON.stringify(j1[k])) diffs.push(`LMDB replay ${k} differ from SQLite's`);
+    if (jl.index.record !== j1.index.record) diffs.push(`state record: LMDB ${jl.index.record} vs SQLite ${j1.index.record}`);
+    diffs.push(...dumpDiff(dump(zl), d1, "LMDB replay vs SQLite replay"));
+  }
+  // #96: migrate — a SQLite source the Zig kernel wrote, into a set: the same dump; its replay the same state.
+  let migrated = "";
+  if (!lmdbSource && zigSource) {
+    const zm = `lmdb:${join(work, "menv")}#migrated`;
+    const m = run(["migrate", "--from", src, "--into", join(work, "menv"), "--set", "migrated"]);
+    if (m.status !== 0) diffs.push(`migrate failed (exit ${m.status}): ${m.stderr.slice(0, 300)}`);
+    else {
+      const md = dumpDiff(dump(src), dump(zm), "source vs migrated");
+      diffs.push(...md);
+      const rm = run(["replay", zm, join(work, "zm.db")]);
+      if (rm.status !== 0) diffs.push(`replay of the migrated set failed (exit ${rm.status})`);
+      else if (JSON.parse(rm.stdout).index.record !== j1.index.record) diffs.push(`the migrated set's replay ends at ${JSON.parse(rm.stdout).index.record}, the source's at ${j1.index.record}`);
+      if (!md.length) migrated = " · migrated to LMDB: the same dump and replay";
+    }
   }
   const n = d1.entries.length;
   const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
@@ -166,7 +209,7 @@ for (const source of sources) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);
   } else {
-    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms)${fromSource}\n`);
+    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into LMDB ${msl} ms, the same)${fromSource}${migrated}\n`);
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }

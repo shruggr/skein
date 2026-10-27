@@ -1,4 +1,5 @@
-// `skein-kernel replay <source.db> <out.db>`: the log alone into a fresh store,
+// `skein-kernel replay <source.db> <out.db>`: the log alone into a fresh store
+// (either backend: a path, or lmdb:<env dir>#<set>, any_store.zig),
 // a runtime with no wallet, attested answers served from the source's records
 // (the replay path the TypeScript runtime had, deleted in #55). The fresh
 // store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR
@@ -18,7 +19,7 @@ const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const tree = @import("tree.zig");
 const beefm = @import("beef.zig");
-const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const AnyStore = @import("any_store.zig").AnyStore;
 const Value = cbor.Value;
 
 const Capture = struct {
@@ -40,7 +41,7 @@ pub fn wasmDir(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
 }
 
 /// skein-dev install: the pinned modules from the wasm directory, checked against their CIDs.
-pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*const fn (line: []const u8) void) !void {
+pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: AnyStore, say: ?*const fn (line: []const u8) void) !void {
     const s = ss.store();
     const dir = try wasmDir(gpa, io);
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -75,7 +76,7 @@ pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*cons
 }
 
 /// log.ts copyLog: the entries exactly as written and the records they name.
-pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void {
+pub fn copyLog(a: std.mem.Allocator, from: AnyStore, to: AnyStore) !void {
     const src = from.store();
     const dst = to.store();
     const g = try logm.genesisOf(a, src);
@@ -195,9 +196,9 @@ fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import(
 }
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const u8) !u8 {
-    const src = try SqliteStore.openReadOnly(gpa, source);
+    const src = try AnyStore.openReadOnly(gpa, io, source);
     defer src.close();
-    const dst = try SqliteStore.open(gpa, io, out);
+    const dst = try AnyStore.open(gpa, io, out);
     defer dst.close();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -227,9 +228,9 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const
     try w.appendSlice("{\"lines\":[");
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
     try dst.store().commit();
-    const st = dst.ix.stats();
+    const st = dst.ix().stats();
     try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{
-        if (tip.len > 0) try cidm.format(a, tip) else "", st.states, st.commits, st.nodes, st.node_bytes, try cidm.format(a, try dst.ix.stateCid(a)),
+        if (tip.len > 0) try cidm.format(a, tip) else "", st.states, st.commits, st.nodes, st.node_bytes, try cidm.format(a, try dst.ix().stateCid(a)),
     });
     try std.Io.File.stdout().writeStreamingAll(io, o.items);
     return 0;

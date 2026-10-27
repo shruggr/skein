@@ -11,7 +11,7 @@ const cbor = @import("cbor");
 const cidm = @import("cid");
 const programs = @import("programs.zig");
 const dump = @import("dump.zig");
-const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const AnyStore = @import("any_store.zig").AnyStore;
 const Value = cbor.Value;
 
 pub const Burn = struct { fuel: u64 = 0, steps: u64 = 0 };
@@ -23,8 +23,8 @@ pub const Totals = struct {
 };
 
 /// Fuel per thread from the updates whose input entry is `since` or later.
-pub fn totals(a: std.mem.Allocator, ss: *SqliteStore, since: i64) !Totals {
-    const ix = ss.ix;
+pub fn totals(a: std.mem.Allocator, ss: AnyStore, since: i64) !Totals {
+    const ix = ss.ix();
     const s = ss.store();
     var entry_n = std.StringHashMap(i64).init(a);
     for (try ix.all(a, .log)) |kv| try entry_n.put(kv.value.cid, dump.num(kv.key));
@@ -53,7 +53,7 @@ pub fn totals(a: std.mem.Allocator, ss: *SqliteStore, since: i64) !Totals {
     return .{ .threads = list.items, .total = total };
 }
 
-fn programName(a: std.mem.Allocator, ss: *SqliteStore, origin: []const u8) []const u8 {
+fn programName(a: std.mem.Allocator, ss: AnyStore, origin: []const u8) []const u8 {
     const s = ss.store();
     const o = (s.get(a, origin) catch null) orelse return "?";
     const pc = Value.cidOf(o.get("program")) orelse return "?";
@@ -63,7 +63,7 @@ fn programName(a: std.mem.Allocator, ss: *SqliteStore, origin: []const u8) []con
 }
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8, since: i64) !u8 {
-    const ss = try SqliteStore.openReadOnly(gpa, path);
+    const ss = try AnyStore.openReadOnly(gpa, io, path);
     defer ss.close();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();

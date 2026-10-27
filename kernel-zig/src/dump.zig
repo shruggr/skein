@@ -1,4 +1,4 @@
-// `skein-kernel dump <store.db>`: a store's derived state as JSON, read
+// `skein-kernel dump <store.db | lmdb:<env dir>#<set>>`: a store's derived state as JSON, read
 // through the index (issue #30) — the store's own state record, or, for a
 // file in the format before #30, the maps imported from its tables in memory.
 // CIDs in their base32 text form.
@@ -15,7 +15,7 @@ const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
 const index = @import("index.zig");
-const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const AnyStore = @import("any_store.zig").AnyStore;
 const Value = cbor.Value;
 
 pub fn num(k: []const u8) i64 {
@@ -74,9 +74,9 @@ fn isIndexBlock(a: std.mem.Allocator, c: []const u8, bytes: []const u8) bool {
 }
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
-    const ss = try SqliteStore.openReadOnly(gpa, path);
+    const ss = try AnyStore.openReadOnly(gpa, io, path);
     defer ss.close();
-    const ix = ss.ix;
+    const ix = ss.ix();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();

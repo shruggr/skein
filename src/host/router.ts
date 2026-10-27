@@ -121,7 +121,8 @@ import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
-import { openStoreFile } from "../runtime/index-store.ts";
+import { isLmdb, storeSpec } from "../runtime/index-store.ts";
+import { openStoreFile, storeExists } from "./stores.ts";
 import { rootOf } from "./install.ts";
 import { OVERLAY_ROLE } from "./manifest.ts";
 import { appHead } from "./plan.ts";
@@ -176,6 +177,8 @@ export interface RouterOptions {
   answerWaitMs?: number;
   /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
+  /** SKEIN_STORE (#96): the host's LMDB environment (a directory); a new instance's store is then its set there (host.db `lmdb:<dir>`, the set its handle). Unset: a file, <home>/instances/<handle>/runtime.db. */
+  lmdbStore?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
   instanceOrigin?: string;
   /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
@@ -447,8 +450,8 @@ export class Router {
         deliver: (h, peer, beef) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef }),
         header: async (h, height) => {
           const row = this.o.db.get(h);
-          if (!row || !existsSync(row.store)) return undefined;
-          const st = openStoreFile(row.store, { readOnly: true });
+          if (!row || !storeExists(storeSpec(row))) return undefined;
+          const st = openStoreFile(storeSpec(row), { readOnly: true });
           try { return await chainHeader(st, height); } finally { st.close(); }
         },
         request: (h, peer, body) => p2pHost.request(h, peer, SYNC_PROTOCOL, body),
@@ -466,7 +469,7 @@ export class Router {
     this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
     this.events = new EventStreams({
-      open: (h) => { const row = this.o.db.get(h); return row && existsSync(row.store) ? openStoreFile(row.store, { readOnly: true }) : undefined; },
+      open: (h) => { const row = this.o.db.get(h); return row && storeExists(storeSpec(row)) ? openStoreFile(storeSpec(row), { readOnly: true }) : undefined; },
     });
     this.providers = new Providers({
       keyOf,
@@ -787,7 +790,7 @@ export class Router {
     const identity = await rootIdentity(wallet);
     if (row.identity && row.identity !== identity) throw new Error(`its signer is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
     const kernel = new Kernel({
-      db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
+      db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
       emit: (o) => this.providers.deliver(handle, o),
       http: (req) => this.http(req, handle),
@@ -817,17 +820,17 @@ export class Router {
       throw e;
     }
     // #119: the apps' subscriptions, read from the log (the kernel writes nothing for them).
-    const subs = await this.foldSubscriptions(row.store).catch((e) => { this.say(handle, `libp2p: the subscriptions not read: ${(e as Error).message}`); return [] as Subscription[]; });
+    const subs = await this.foldSubscriptions(storeSpec(row)).catch((e) => { this.say(handle, `libp2p: the subscriptions not read: ${(e as Error).message}`); return [] as Subscription[]; });
     // #126: the apps' beacons, read from the log the same way.
-    const beacons = await this.foldBeacons(row.store).catch((e) => { this.say(handle, `libp2p: the beacons not read: ${(e as Error).message}`); return [] as Beacon[]; });
+    const beacons = await this.foldBeacons(storeSpec(row)).catch((e) => { this.say(handle, `libp2p: the beacons not read: ${(e as Error).message}`); return [] as Beacon[]; });
     // #138: the apps' liveness, read from the log the same way.
-    const live = await this.readLiveness(row.store).catch((e) => { this.say(handle, `libp2p: the liveness not read: ${(e as Error).message}`); return [] as Live[]; });
+    const live = await this.readLiveness(storeSpec(row)).catch((e) => { this.say(handle, `libp2p: the liveness not read: ${(e as Error).message}`); return [] as Live[]; });
     const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs, beacons, live };
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
     // shruggr/skein#112: the wants standing in the log, asked again.
-    if (this.sync) this.sync.standing(handle, await this.foldWants(row.store).catch((e) => { this.say(handle, `sync: the wants not read: ${(e as Error).message}`); return [] as Want[]; }));
+    if (this.sync) this.sync.standing(handle, await this.foldWants(storeSpec(row)).catch((e) => { this.say(handle, `sync: the wants not read: ${(e as Error).message}`); return [] as Want[]; }));
     await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
@@ -841,8 +844,8 @@ export class Router {
    */
   async subscribes(handle: string, box: string, sender?: string): Promise<boolean> {
     const row = this.o.db.get(handle);
-    if (!row || !existsSync(row.store)) return false;
-    const s = openStoreFile(row.store, { readOnly: true });
+    if (!row || !storeExists(storeSpec(row))) return false;
+    const s = openStoreFile(storeSpec(row), { readOnly: true });
     try {
       const rows = await currentDispatch(s);
       return !!rows?.some((r) => sender !== undefined ? takesMail(r, box) : takesEvent(r, box));
@@ -863,7 +866,7 @@ export class Router {
     const identity = await rootIdentity(await this.o.walletFor(row));
     // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
     const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
-    const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
+    const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
   }
@@ -957,8 +960,8 @@ export class Router {
     if (!claim && o.needsClaim) claimOf(undefined);
     if (claim) claimProblem(claim, owner);
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
-    const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
-    if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
+    const store = this.newStore(handle);
+    if (storeExists(storeSpec({ store, handle }))) throw new Error(`handle ${handle}: a store is at ${storeSpec({ store, handle })} already`);
     this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain() }); // H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
@@ -991,6 +994,11 @@ export class Router {
     }
   }
 
+  /** host.db's `store` for a new instance (#96): its set in the host's LMDB environment (SKEIN_STORE), else its own file. */
+  private newStore(handle: string): string {
+    return this.o.lmdbStore ? `lmdb:${this.o.lmdbStore}` : join(this.o.home ?? ".", "instances", handle, "runtime.db");
+  }
+
   /** createInstance's image `mailbox` (#113). */
   private async createMailbox(handle: string, owner: string, o: { publish?: boolean; domain?: string }): Promise<{ handle: string; identity: string; url: string }> {
     const had = this.o.db.get(handle);
@@ -1004,8 +1012,8 @@ export class Router {
     }
     const mine = this.o.db.list().find((r) => r.kind === "mailbox" && r.owner === owner);
     if (mine) throw new Error(`${short(owner)} has a mailbox instance here already: ${mine.handle}`);
-    const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
-    if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
+    const store = this.newStore(handle);
+    if (storeExists(storeSpec({ store, handle }))) throw new Error(`handle ${handle}: a store is at ${storeSpec({ store, handle })} already`);
     this.o.db.add(handle, { store, status: "disabled", kind: "mailbox", owner, ...(o.domain ? { domain: o.domain } : {}) });
     await this.bootRow(handle, { kind: "code" });
     const identity = this.o.db.get(handle)!.identity!;
@@ -1130,14 +1138,14 @@ export class Router {
 
   /** #138: the apps' liveness, folded from the instance's log (liveness.ts livenessOf), the store file read-only. */
   private async readLiveness(store: string): Promise<Live[]> {
-    if (!this.p2p || !existsSync(store)) return [];
+    if (!this.p2p || !storeExists(store)) return [];
     const s = openStoreFile(store, { readOnly: true });
     try { return await livenessOf(s); } finally { s.close(); }
   }
 
   /** #126: the apps' beacons, folded from the instance's log (p2p.ts beaconsOf), the store file read-only. */
   private async foldBeacons(store: string): Promise<Beacon[]> {
-    if (!this.p2p || !existsSync(store)) return [];
+    if (!this.p2p || !storeExists(store)) return [];
     const s = openStoreFile(store, { readOnly: true });
     try { return await beaconsOf(s); } finally { s.close(); }
   }
@@ -1148,7 +1156,7 @@ export class Router {
    * the store file opened read-only beside the kernel, as `subscribes` reads it).
    */
   private async foldSubscriptions(store: string): Promise<Subscription[]> {
-    if (!this.p2p || !existsSync(store)) return [];
+    if (!this.p2p || !storeExists(store)) return [];
     const s = openStoreFile(store, { readOnly: true });
     try { return await subscriptionsOf(s); } finally { s.close(); }
   }
@@ -1268,7 +1276,7 @@ export class Router {
 
   /** shruggr/skein#112: the overlays' standing wants, folded from the instance's log (`want` minus `unwant`). */
   private async foldWants(store: string): Promise<Want[]> {
-    if (!this.sync || !existsSync(store)) return [];
+    if (!this.sync || !storeExists(store)) return [];
     const s = openStoreFile(store, { readOnly: true });
     try { return foldWants(await emittedEvents(s, (rec) => { const e = wantEvent(rec); return "refused" in e ? undefined : e; })); } finally { s.close(); }
   }
@@ -1335,8 +1343,8 @@ export class Router {
     // #141: on subscribing, the headers it lacks first — from its tip (its chain state's, else its image's) to the host's.
     const backfill = async () => {
       const row = this.o.db.get(handle);
-      if (!row || !existsSync(row.store)) return [];
-      const s = openStoreFile(row.store, { readOnly: true });
+      if (!row || !storeExists(storeSpec(row))) return [];
+      const s = openStoreFile(storeSpec(row), { readOnly: true });
       let tip: Awaited<ReturnType<typeof skeinTip>>;
       try { tip = await skeinTip(s); } finally { s.close(); }
       return await this.image.after(tip);
@@ -1535,6 +1543,11 @@ export class Router {
     this.periods.delete(handle);
     this.o.db.forgetBilling(handle);
     this.o.db.remove(handle);
+    if (isLmdb(row.store)) {
+      // #96: the host never writes an LMDB environment; the set stays in it (its handle cannot be created again here).
+      this.say("router", `${handle}: reclaimed (its set in ${row.store} left in place: the host writes no instance store)`);
+      return;
+    }
     await removeStore(row.store);
     this.say("router", `${handle}: reclaimed (its store ${row.store} deleted)`);
   }
@@ -1635,9 +1648,9 @@ export class Router {
     if (!/^0[23][0-9a-f]{64}$/.test(key)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "key: an identity key (33 bytes, hex)" });
     const out: Array<{ handle: string; identity: string; url: string }> = [];
     for (const row of this.o.db.list("enabled")) {
-      if (row.kind === "mailbox" || !row.identity || !existsSync(row.store)) continue;
+      if (row.kind === "mailbox" || !row.identity || !storeExists(storeSpec(row))) continue;
       let roots: string[];
-      const s = openStoreFile(row.store, { readOnly: true });
+      const s = openStoreFile(storeSpec(row), { readOnly: true });
       try { roots = await rootOf(s); } catch { roots = []; } finally { s.close(); }
       if (roots.includes(key)) out.push({ handle: row.handle, identity: row.identity, url: this.originOf(row.handle) });
     }

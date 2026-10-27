@@ -36,6 +36,7 @@ import { InferPeer } from "../../src/peers/infer.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
+import { BACKEND, routerStore, specFor, storeFor } from "./backend.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
@@ -54,7 +55,7 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
 const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 
 const db = new HostDb(join(home, "host.db"));
-db.add("zigtest", { store: join(home, "instances/zigtest/runtime.db") });
+db.add("zigtest", { store: storeFor(home, "zigtest") });
 const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), crontest: key("9999"), david: key("7777"), infer: key("8888") };
 const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
@@ -63,7 +64,7 @@ const make = (fuel?: string): Router => new Router({
   db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   // No host skein here (#113): the handles resolve over host.db (a fixture).
   discovery: fakeDiscovery(db, () => router),
-  owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } }, ...routerStore(home),
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 let router = make();
@@ -144,7 +145,7 @@ try {
   await router.stop();
 
   // Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
-  db.add("fueltest", { store: join(home, "instances/fueltest/runtime.db") });
+  db.add("fueltest", { store: storeFor(home, "fueltest") });
   router = make(LIMIT);
   await listen(router);
   await router.start();
@@ -158,7 +159,7 @@ try {
 
   // The in-step clock (issue #38): entry stamp + fuel × 1 ns. A 50 ms busy-wait on the clock
   // (qjs Date.now, python time.monotonic) ends on its own, under the same fuel limit.
-  db.add("clocktest", { store: join(home, "instances/clocktest/runtime.db") });
+  db.add("clocktest", { store: storeFor(home, "clocktest") });
   await router.hydrate("clocktest");
   const ct = db.get("clocktest")!.identity!;
   await install("clocktest", [SHELL_APP]);
@@ -183,7 +184,7 @@ try {
   await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/test/cron-demo/cron-demo.wasm")));
   await fs.writeFile(join(tree, "bin/messagebox.wasm"), readFileSync(join(here, "../../wasm/messagebox.wasm")));
   await fs.writeFile(join(tree, "etc/dispatch.json"), JSON.stringify([{ address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" }, { transport: "event", address: ":ack", program: "messagebox" }]));
-  db.add("crontest", { store: join(home, "instances/crontest/runtime.db") });
+  db.add("crontest", { store: storeFor(home, "crontest") });
   const src = await dirSource(tree);
   await router.bootRow("crontest", { kind: "tree", root: src.root, objects: src.objects });
   await router.hydrate("crontest");
@@ -207,7 +208,7 @@ try {
 }
 db.close();
 
-const fuelDb = join(home, "instances/fueltest/runtime.db");
+const fuelDb = specFor(home, "fueltest");
 const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
 check(fr.status === 0 && fr.stdout.split("\n").some((l) => l.startsWith(`${LIMIT}\t1\t`) && l.endsWith("\tshell")), "skein-kernel fuel: the shell's one step burnt exactly the limit");
 
@@ -217,15 +218,15 @@ const [qjsLine, pyLine] = (waited?.stdout ?? "").trim().split("\n").map((l) => l
 const ms = (x?: string) => Number(x);
 check(waited?.exitCode === 0 && qjsLine?.[0] === "qjs" && ms(qjsLine[1]) >= 50 && ms(qjsLine[1]) < 60 && qjsLine[2] === "true", `a qjs busy-wait on Date.now for 50 ms ends, 50 ms of fuel later (${JSON.stringify(waited ?? null).slice(0, 200)})`);
 check(pyLine?.[0] === "python" && ms(pyLine[1]) >= 50 && ms(pyLine[1]) < 60, `a python busy-wait on time.monotonic for 50 ms ends (${waited?.stdout?.trim()})`);
-const clockDb = join(home, "instances/clocktest/runtime.db");
+const clockDb = specFor(home, "clocktest");
 const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
 const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
 check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb, join(home, "instances/crontest/runtime.db")], { encoding: "utf8" });
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), specFor(home, "zigtest"), fuelDb, clockDb, specFor(home, "crontest")], { encoding: "utf8" });
 process.stdout.write(r.stdout);
 check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 4, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
-process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");
+process.stdout.write(failures ? `serve (${BACKEND}): ${failures} FAILED\n` : `serve (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

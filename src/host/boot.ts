@@ -399,7 +399,7 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
   const { Kernel } = await import("./kernel.ts");
   const { mkdirSync } = await import("node:fs");
   const { dirname } = await import("node:path");
-  mkdirSync(dirname(o.db), { recursive: true });
+  if (!o.db.startsWith("lmdb:")) mkdirSync(dirname(o.db), { recursive: true }); // an LMDB set (#96): the kernel makes its environment
   const k = new Kernel({ db: o.db, handle: o.handle, domain: o.domain, command: o.command, env: o.env, log: o.log });
   try {
     return await boot(k, src, c, time);

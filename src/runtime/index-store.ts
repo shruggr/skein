@@ -7,7 +7,12 @@
 // - `openStoreFile(path)`: the right reader for a store file — this one when
 //   the file has the state pointer, else sqlite.ts's (a store of blocks the
 //   tools write, or a file from before #30). The explorer, skein-dev and
-//   skein-host open files through it.
+//   skein-host open files through it. A store may instead be a set of the
+//   host's LMDB environment (#96, #133): `lmdb:<env dir>#<set>` (`storeSpec`
+//   makes it from host.db's `store` column, `lmdb:<env dir>`, and the row's
+//   handle) — read directly, read only, by src/host/stores.ts (lmdb-js: the
+//   disk is the host's), over `indexStoreOver` here, with the kernel's member
+//   gate (kernel-zig/src/lmdb_store.zig).
 // - `indexStore(db)`: the `Store` interface over the maps, read only (blocks
 //   may be added: they are a key→bytes map). The pointer is read on every
 //   call, so a reader beside a live kernel follows it.
@@ -359,9 +364,10 @@ export function hasStatePointer(path: string): boolean {
 /**
  * A store file, whichever format it is in: the new format (#30) through the
  * index, read only (blocks may be added unless `readOnly`); any other
- * through sqlite.ts.
+ * through sqlite.ts. (An LMDB set, `lmdb:<env dir>#<set>`: src/host/stores.ts.)
  */
 export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
+  if (isLmdb(path)) throw new Error(`${path}: an LMDB set is opened by src/host/stores.ts (openStoreFile there)`);
   let fresh = true;
   try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it, and any other open failure throws there with its reason */ }
   if (fresh) return openStore(path, o);
@@ -381,13 +387,36 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): In
   const blockHas = db.prepare("SELECT 1 AS x FROM blocks WHERE cid = ?");
   const blockPut = o.readOnly ? undefined : db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)");
   const pointer = db.prepare("SELECT cid FROM pointers WHERE name = 'state'");
-  const get = (c: CID) => blockGet.get(c.bytes)?.bytes as Uint8Array | undefined;
+  return indexStoreOver({
+    get: (c) => blockGet.get(c)?.bytes as Uint8Array | undefined,
+    has: (c) => blockHas.get(c) !== undefined,
+    put: blockPut ? (c, b) => { blockPut.run(c, b); } : undefined,
+    pointer: () => pointer.get()?.cid as Uint8Array | undefined,
+    close: () => db.close(),
+  });
+}
+
+/**
+ * What the index reader needs of a backend (as index.zig's `Backend`): blocks by binary CID, the
+ * state pointer (read on every call: a reader beside a live kernel follows it), a put if writable.
+ */
+export interface Blocks {
+  get(cid: Uint8Array): Uint8Array | undefined;
+  has(cid: Uint8Array): boolean;
+  put?(cid: Uint8Array, bytes: Uint8Array): void;
+  pointer(): Uint8Array | undefined;
+  close(): void;
+}
+
+export function indexStoreOver(src: Blocks): IndexStore {
+  const blockPut = src.put;
+  const get = (c: CID) => src.get(c.bytes);
   const trees = new Trees(get);
   let last: State | undefined;
   const state = (): State => {
-    const r = pointer.get();
+    const r = src.pointer();
     if (!r) throw new Error("no state pointer");
-    const c = fromBytes(r.cid as Uint8Array);
+    const c = fromBytes(r);
     if (!last || !last.cid.equals(c)) last = readState(get, c);
     return last;
   };
@@ -418,13 +447,13 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): In
     async put(value: Block) {
       if (!blockPut) throw new ReadOnly("put");
       const b = encode(value);
-      blockPut.run(b.cid.bytes, b.bytes);
+      blockPut(b.cid.bytes, b.bytes);
       return b.cid;
     },
     async get<T extends Block = Block>(cid: CID) { return display(block<T>(cid)) as T; },
-    async has(cid) { return blockHas.get(cid.bytes) !== undefined; },
+    async has(cid) { return src.has(cid.bytes); },
     async bytes(cid) { const b = get(cid); if (!b) throw new NotFound(fmt(cid)); return b; },
-    async putBlock(cid, bytes) { if (!blockPut) throw new ReadOnly("putBlock"); blockPut.run(cid.bytes, bytes); },
+    async putBlock(cid, bytes) { if (!blockPut) throw new ReadOnly("putBlock"); blockPut(cid.bytes, bytes); },
     async putMessage() { throw new ReadOnly("putMessage"); },
     async findByPrefix(prefix) {
       return [...trees.range(root("chains"))].map(([k]) => fromBytes(k)).filter((c) => fmt(c).startsWith(prefix));
@@ -569,9 +598,33 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): In
       },
     },
 
-    async close() { db.close(); },
+    async close() { src.close(); },
   };
   return store;
+}
+
+// ---------------------------------------------------------------- the LMDB environment (#96, #133)
+
+/** host.db's `store` column for a set of the host's LMDB environment: `lmdb:<env dir>` (the set: the row's handle). */
+export const LMDB = "lmdb:";
+/** The chain's member set (#133): readable by every set (kernel-zig/src/lmdb_store.zig CHAIN_SET). */
+export const CHAIN_SET = "host/chain";
+
+/** Whether host.db's `store` column names a set of an LMDB environment. */
+export function isLmdb(store: string): boolean { return store.startsWith(LMDB); }
+
+/** A row's store as the kernel's tools and `openStoreFile` name it: its path, or `lmdb:<env dir>#<handle>`. */
+export function storeSpec(row: { store: string; handle: string }): string {
+  return isLmdb(row.store) ? `${row.store}#${row.handle}` : row.store;
+}
+
+/** `lmdb:<env dir>#<set>` → its parts (kernel-zig/src/any_store.zig parseSpec); undefined for a path. */
+export function parseLmdbSpec(spec: string): { dir: string; set: string } | undefined {
+  if (!isLmdb(spec)) return undefined;
+  const rest = spec.slice(LMDB.length);
+  const i = rest.lastIndexOf("#");
+  if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: an LMDB store is lmdb:<env dir>#<set>`);
+  return { dir: rest.slice(0, i), set: rest.slice(i + 1) };
 }
 
 export { readStrKey, cidLen };

@@ -23,6 +23,7 @@
 //   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+//   skein-host migrate-store <handle>   #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE)
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
 // store: its objects pre-filled, its genesis from the system tree (or a
 // checkpoint restored). `system` writes the stock system as such a tree;
@@ -103,6 +104,9 @@
 //   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
 //   SKEIN_HOST_PORT       the host page (/) and roster (/roster.json) on 127.0.0.1, default 4600
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
+//   SKEIN_STORE           #96: the host's LMDB environment (a directory, e.g. $SKEIN_HOME/store): a new instance's store is
+//                         its set there (host.db `lmdb:<dir>`; the set its handle), its kernel given SKEIN_STORE. Unset: a file
+//                         per instance, $SKEIN_HOME/instances/<handle>/runtime.db. Existing rows keep theirs until migrate-store
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
@@ -119,19 +123,21 @@
 //                         appended to the image, which a chaintracks URL's history (`…/tip/stream` → `…/headers`)
 //                         fills from genesis at start
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
-import { DatabaseSync } from "node:sqlite";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
-import { Kernel } from "./kernel.ts";
+import { Kernel, KERNEL_BIN } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
-import { openStoreFile } from "../runtime/index-store.ts";
+import { isLmdb, storeSpec } from "../runtime/index-store.ts";
+import { openStoreFile, storeBlocks, storeExists } from "./stores.ts";
+import { spawnSync } from "node:child_process";
+import { connect } from "node:net";
 import type { Store } from "../runtime/store.ts";
 import { masterKey, Signer } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
@@ -182,6 +188,8 @@ const USAGE = `usage:
   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+  skein-host migrate-store <handle>                       #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE); the row then
+                                                          names the set, the file kept beside as runtime.db.migrated-<date>. With the host stopped
 settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
 dispatch rows, the address book, a directory into main) are the client's: \`skein install|dispatch|… --instance <handle>\``;
 
@@ -217,7 +225,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) {
-          f.store ??= join(home, "instances", handle, "runtime.db");
+          f.store ??= env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
@@ -306,6 +314,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
         return await systemCmd(rest, env);
       case "pack":
         return await packCmd(db, rest, env);
+      case "migrate-store":
+        return await migrateStoreCmd(db, rest, env);
       default:
         env.err(USAGE);
         return 2;
@@ -635,8 +645,8 @@ async function rosterCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
 function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promise<void> } {
   const given = env.store?.(row);
   if (given) return { blocks: given };
-  if (!existsSync(row.store)) return {};
-  const s = openStoreFile(row.store, { readOnly: true });
+  if (!storeExists(storeSpec(row))) return {};
+  const s = openStoreFile(storeSpec(row), { readOnly: true });
   return { blocks: s, close: () => s.close() };
 }
 
@@ -682,6 +692,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     network: hostNetwork(v),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
+    ...(v.SKEIN_STORE ? { lmdbStore: resolve(v.SKEIN_STORE) } : {}),
     // #142: settings host.env may give (the environment's are read where they are used, too).
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
     ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
@@ -758,8 +769,8 @@ async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; 
   const spec = v.boot!;
   if (existsSync(spec) && statSync(spec).isDirectory()) return await imageSource(resolve(spec));
   const root = parseCid(spec);
-  const path = v.from ?? row.store;
-  if (!existsSync(path)) throw new Error(`--boot ${spec}: no store at ${path} to read the tree from (--from)`);
+  const path = v.from ?? storeSpec(row);
+  if (!storeExists(path)) throw new Error(`--boot ${spec}: no store at ${path} to read the tree from (--from)`);
   const s = openStoreFile(path, { readOnly: true });
   // The objects are read now: the row's own store is about to be written by its kernel.
   const blocks = new MemBlocks();
@@ -801,18 +812,11 @@ function isIndexBlock(cid: CID, bytes: Uint8Array): boolean {
   return v[1].length > 0 && v[1].every((e: unknown) => Array.isArray(e) && e.length === 3 && e[0] instanceof Uint8Array && (e[2] === null || !!CIDClass.asCID(e[2])));
 }
 
-/** Every block of a store file except the index's (nodes and state records): a checkpoint's extras candidates. */
-function looseRecords(path: string): Array<{ cid: CID; bytes: Uint8Array }> {
-  const db = new DatabaseSync(path, { readOnly: true });
-  try {
-    const out: Array<{ cid: CID; bytes: Uint8Array }> = [];
-    for (const r of db.prepare("SELECT cid, bytes FROM blocks").all() as Array<{ cid: Uint8Array; bytes: Uint8Array }>) {
-      const cid = CIDClass.decode(new Uint8Array(r.cid));
-      const bytes = new Uint8Array(r.bytes);
-      if (!isIndexBlock(cid, bytes)) out.push({ cid, bytes });
-    }
-    return out;
-  } finally { db.close(); }
+/** Every block of a store except the index's (nodes and state records): a checkpoint's extras candidates. A file, or an LMDB set's members (#96). */
+function looseRecords(spec: string): Array<{ cid: CID; bytes: Uint8Array }> {
+  const out: Array<{ cid: CID; bytes: Uint8Array }> = [];
+  for (const { cid, bytes } of storeBlocks(spec)) if (!isIndexBlock(cid, bytes)) out.push({ cid, bytes });
+  return out;
 }
 
 /** `skein-host pack <handle|dir|tree-cid> <out>`: a packet (packet.ts) of a system tree or, with --checkpoint, a whole instance. */
@@ -826,14 +830,14 @@ async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   let scope: CID, objects: Objects, close = () => {}, extras: Array<{ cid: CID; bytes: Uint8Array }> | undefined;
   const row = db.get(what);
   if (row) {
-    if (!existsSync(row.store)) { env.err(`skein-host pack: ${row.handle} has no store yet`); return 1; }
-    const s = openStoreFile(row.store, { readOnly: true }) as ReturnType<typeof openStoreFile> & { state?(): { cid: CID } };
+    if (!storeExists(storeSpec(row))) { env.err(`skein-host pack: ${row.handle} has no store yet`); return 1; }
+    const s = openStoreFile(storeSpec(row), { readOnly: true }) as ReturnType<typeof openStoreFile> & { state?(): { cid: CID } };
     close = () => s.close();
     objects = anyOf(storeObjects(s), wasmDirObjects(WASM_DIR));
     if (v.checkpoint) {
       if (!s.state) { env.err(`skein-host pack: ${row.handle}'s store predates the state record (#30)`); close(); return 1; }
       scope = s.state().cid;
-      extras = looseRecords(row.store);
+      extras = looseRecords(storeSpec(row));
     } else if (v.tree) scope = parseCid(v.tree);
     else {
       // The system tree it booted from, else its `main`.
@@ -867,6 +871,42 @@ async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     env.err(`skein-host pack: ${(e as Error).message}`);
     return 1;
   } finally { close(); }
+}
+
+/** Whether something answers on the control socket (a running host holds its instances' kernels). */
+function controlAlive(sock: string): Promise<boolean> {
+  if (!existsSync(sock)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const c = connect(sock);
+    c.once("connect", () => { c.destroy(); resolve(true); });
+    c.once("error", () => resolve(false));
+  });
+}
+
+/**
+ * `skein-host migrate-store <handle>` (#96): the row's runtime.db copied into its set of the host's
+ * LMDB environment (SKEIN_STORE) by `skein-kernel migrate` (blocks, the state pointer, the size); the
+ * row then names the set (`lmdb:<dir>`) and the file is kept beside, renamed
+ * runtime.db.migrated-<date> (never deleted here). Only with the host stopped: its kernel would
+ * hold the store; a running host (its control socket or router answering) is refused.
+ */
+async function migrateStoreCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const [handle, ...more] = rest;
+  if (!handle || more.length) { env.err(USAGE); return 2; }
+  const dir = env.vars.SKEIN_STORE ? resolve(env.vars.SKEIN_STORE) : undefined;
+  if (!dir) { env.err("skein-host migrate-store: SKEIN_STORE (the host's LMDB environment, a directory) is not set"); return 2; }
+  const row = db.get(handle);
+  if (!row) { env.err(`skein-host migrate-store: no instance ${handle}`); return 1; }
+  if (isLmdb(row.store)) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
+  if (!existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
+  if (await controlAlive(join(homeOf(env.vars), CONTROL_SOCKET)) || await routerAt(env.vars)) { env.err("skein-host migrate-store: the host is running (its kernel holds the store): stop it first, migrate, then start it"); return 1; }
+  const r = spawnSync(env.vars.SKEIN_KERNEL_BIN || KERNEL_BIN, ["migrate", "--from", row.store, "--into", dir, "--set", handle], { encoding: "utf8", maxBuffer: 1 << 26 });
+  if (r.status !== 0) { env.err(`skein-host migrate-store ${handle}: ${(r.stderr || r.stdout || `exit ${r.status}`).trim()}`); return 1; }
+  const kept = `${row.store}.migrated-${new Date().toISOString().slice(0, 10)}`;
+  for (const ext of ["", "-wal", "-shm"]) if (existsSync(`${row.store}${ext}`)) renameSync(`${row.store}${ext}`, `${kept}${ext}`);
+  db.add(handle, { store: `lmdb:${dir}` });
+  env.out(`${handle}: migrated into lmdb:${dir} (set ${handle}) ${r.stdout.trim()} · the file kept as ${kept}`);
+  return 0;
 }
 
 /**

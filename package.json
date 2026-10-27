@@ -43,6 +43,7 @@
     "@libp2p/websockets": "10.1.21",
     "@multiformats/multiaddr": "13.0.3",
     "libp2p": "3.3.11",
+    "lmdb": "3.5.7",
     "multiformats": "^14.0.5"
   },
   "devDependencies": {

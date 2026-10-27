@@ -35,7 +35,9 @@ import { Beef, MerklePath, P2PKH, PrivateKey, Script, Transaction, UnlockingScri
 import { CID } from "multiformats/cid";
 import { ownerCli } from "../../src/testapps.ts";
 import { RawBox } from "../../src/client/raw.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { BACKEND, routerStore, storeFor } from "./backend.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
@@ -140,12 +142,12 @@ function router(h: Name): Router {
   if (!dbs[h]) {
     mkdirSync(homeOf(h), { recursive: true });
     dbs[h] = new HostDb(join(homeOf(h), "host.db"));
-    dbs[h]!.add(h, { store: join(homeOf(h), `instances/${h}/runtime.db`) });
+    dbs[h]!.add(h, { store: storeFor(homeOf(h), h) });
   }
   return new Router({
     db: dbs[h]!, walletFor: (row) => ephemeralWallet(key(walletKeys[row.handle]!)), home: homeOf(h), owner, idleMs: 0,
     providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000,
-    kernel: { command: kernel, env: { SKEIN_HOME: homeOf(h) } }, libp2pDiscoveryMs: 300,
+    kernel: { command: kernel, env: { SKEIN_HOME: homeOf(h) } }, ...routerStore(homeOf(h)), libp2pDiscoveryMs: 300,
     genesis: { defaults: { walletNetwork: "regtest" } },
     arc: { url: arcade.url, token: "the-host-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 500, max: 2000 },
     libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports[h]}`], bootstrap: names.filter((x) => x !== h).map(addr), dht: "off", relays: [], mdns: false },
@@ -153,7 +155,7 @@ function router(h: Name): Router {
   });
 }
 const r = (h: Name) => routers[h]!;
-const storeOf = (h: Name) => dbs[h]!.get(h)!.store;
+const storeOf = (h: Name) => storeSpec(dbs[h]!.get(h)!);
 const stores: string[] = [];
 
 // The chain: the funding transaction mined at 1, then one token per block.
@@ -315,5 +317,5 @@ try {
   }
 }
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });
-process.stdout.write(failures ? `sync: ${failures} FAILED\n` : "sync: all ok\n");
+process.stdout.write(failures ? `sync (${BACKEND}): ${failures} FAILED\n` : `sync (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

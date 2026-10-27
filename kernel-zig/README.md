@@ -48,6 +48,19 @@ commands with `mise exec --` or activate mise).
   `~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api`. The static
   `libwasmtime.a` is linked: the binary needs nothing of it at run time.
 - **SQLite**: the system `libsqlite3` (3.38 or later, for JSON1).
+- **LMDB** (#96): vendored and compiled in, `vendor/lmdb/` — OpenLDAP's
+  liblmdb at the tag `LMDB_0.9.36` (commit 028f61b6, github.com/LMDB/lmdb:
+  `mdb.c`, `midl.c`, `lmdb.h`, `midl.h`), under the OpenLDAP Public License
+  2.8 (`vendor/lmdb/LICENSE`, `COPYRIGHT`). No system library: the rack's
+  `zig build --release -Dcpu=baseline` needs nothing new there.
+- **lmdb-js** for the host's reader of an LMDB environment (`lmdb` 3.5.7 in
+  package.json): its prebuilt binaries link LMDB 0.9.90 (data format 2,
+  LMDB's 1.0 line), which cannot open a 0.9.x environment (it crashes on
+  one); its **data-v1 build** links 0.9.29 and reads the kernel's
+  environment, beside running kernels. Build it once after `npm ci`:
+  `LMDB_DATA_V1=true npm rebuild lmdb --build-from-source` (node-gyp, a C
+  compiler). Only an LMDB store loads it (`src/host/stores.ts`, which
+  refuses another build with this message); SQLite hosts never do.
 
 ```
 cd kernel-zig
@@ -504,6 +517,44 @@ are renamed `legacy_*`; opened read only (a replay's source, `dump`), the
 import stays in memory. A store whose old index is stale is refused (nothing
 rebuilds it any more: `skein-dev rebuild` went with the TS runtime, #55).
 
+**The shared host store** (#96, #133; `lmdb_store.zig`). Beside one SQLite
+file per instance (the default, unchanged), a host may keep every instance in
+**one LMDB environment**, a directory (`$SKEIN_HOME/store`: `data.mdb`,
+`lock.mdb`) opened by each `skein-kernel serve` of the host and read by the
+host directly (lmdb-js). Three tables: `blocks` (cid → bytes, each block once,
+never overwritten), `members` (`<set>‖0x00‖cid` → ∅) and `pointers`
+(`<set>‖0x00‖name` → cid). A **set** is an instance's handle; its members are
+its **read gate**: `has`/`bytes` answer through the set, then through the
+reserved set `host/chain` (the host's chain service writes it, #156; nothing
+does yet) — a block only another set holds is absent. A put writes the block
+if it is new and adds the membership; a new membership adds the block's
+length to the set's `size` pointer (u64 BE: #130's measure, the set's share).
+The index above it is the same: the same records, the same state CIDs (the
+format number unchanged). A commit is one write transaction (the index's
+begin … commit); a put outside one is its own. Flags: `MDB_NOTLS`,
+`MDB_NOMETASYNC` (one flush per commit, the meta page's deferred: a system
+crash may undo the last commit, never corrupt), map size 1 TiB (address space;
+nothing on disk until used), 4096 reader slots. One writer at a time across
+the environment: the instances' commits serialize there.
+
+- `serve`: `SKEIN_STORE=<env dir>` → the set named by its handle
+  (`SKEIN_HANDLE` before `@`); unset → the SQLite file as before.
+- The tools (`replay`, `dump`, `fuel`, `shell`) take a path, or
+  `lmdb:<env dir>#<set>` (`any_store.zig`).
+- `skein-kernel migrate --from <runtime.db> --into <env dir> --set <handle>`:
+  every block, then the state pointer (in batches; the pointer last, so a
+  half-copied set has no state); a set with a state already, or a source in
+  an older format, refused. `skein-host migrate-store <handle>` runs it with
+  the host stopped, renames the file `runtime.db.migrated-<date>` (kept) and
+  sets the row's `store` to `lmdb:<dir>`.
+- The host: `SKEIN_STORE` in host.env makes each **new** instance a set
+  (host.db `store` = `lmdb:<env dir>`, the set its handle); its kernel gets
+  `SKEIN_STORE`, a file's kernel never does. Every host-side read
+  (`openStoreFile`, `storeExists` in `src/host/stores.ts`; `storeSpec` in
+  `index-store.ts`, which touches no disk itself) takes
+  `lmdb:<env dir>#<set>` and reads through the same gate. The host writes no
+  instance store: a reclaimed LMDB instance's set is left in the environment.
+
 **From TypeScript** (`src/runtime/index-store.ts`): a read-only `Store` over
 the maps (the pointer re-read on every call, so it follows a live kernel),
 used by the explorer and `skein-dev` (`rebuild` is refused on such a store:
@@ -904,6 +955,8 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `equiv/site.ts` (#92) | the management site (shruggr/skein-site, an app since #125: installed in the host skein with the owner's root row, its page at `/site/`) in headless Chrome, served by the host skein of a host as `skein-host run` runs it, with a wallet in the tab over a test key (`?key=`) funded through a stand-in for the 1sat services (one block's header, a broadcast that accepts — the only stand-in): create alice from the page (the onboarding app's route), nothing written into the wallet, the page opens alice's view (she serves no page: #125); the git app installed from the tree her image carries, then app-demo by hash (a local repository over `git http-backend`) — the clone's answer read from its thread, the record rebuilt in the page, the prompt approved, head + dispatch + start — and app-demo answers; the explorer renders her log (0 the genesis, 1 the claim) and dispatch table, another key's read refused; Your skeins is the host's answer (`GET /skeins?key=`, from the skeins' grants): the host skein and alice; the host skein's page lists alice; (#103) a handle registered from the page — the host's certificate kept in the wallet (`acquireCertificate`, direct), listed by `listCertificates`, "Your handles" resolving it, the Inbox prefilled with its messagebox; (#104) its profile set from the page (signed by the wallet, written to the mailbox instance), served by resolve, shown as signed by your key, found by "Find a handle"; (#99) a BRC-169 delivery listed and synced into the wallet; the stores replayed | all ok; every store reproduced exactly |
 | `equiv/chain.ts` (#78) | the chain module, shruggr/skein-chain at a pinned commit (or `$SKEIN_CHAIN_DIR`), installed by the owner's messages on a host with a fake Arcade (its broadcaster and `$status` provider) and called by its owner (#79: its rows take `event`, `$self` and `$owner`; a stranger is refused): the feed's headers; `ingest` proven → answered at once; `ingest` unproven → broadcast (the Arcade gets it) → `accepted` (the status provider's RECEIVED) → `proven` (Arcade's MINED proof, its header first), each an answer to the same request, a second watcher told too; refused by Arcade → `rejected`; `status`/`proof` reads by message and as a kernel call; then the same app at boot from a system tree (the default files, `bin/chain.wasm`, its rows, the default scope `chain/`); both stores replayed | all ok; both reproduced exactly |
 | `equiv/image-chain.ts` (#132) | the image carries the header chain: a fake chaintracks (history by height and a tip stream) with N regtest headers before the host starts and M more on its stream; the host builds the default image's chain part from genesis and grows it per header; a skein created from the image holds `chain/headers` and `chain/tip`; the chain app (shruggr/skein-chain 0.4.0) installed by the owner; the next header the first it takes, its chain state then every header from genesis (no feed replay); `skein-host add --image default` from the same image; replayed | all ok; reproduced exactly |
+| both backends (#96) | every store `replays.ts` checks also replayed into a set of a fresh LMDB environment (the same report, state CID and dump — the same CIDs) and, a SQLite one, migrated (`skein-kernel migrate`: the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts` and `sync.ts` run again with every host's instances sets of one environment (`SKEIN_EQUIV_STORE=lmdb`), their sets replayed the same way; run.sh prints the corpus's wall time on each | all identical |
+| `equiv/lmdb.ts` (#96, #133) | two instances in one environment: a record and a program only bob put are absent for alice (her kernel's `has`/`get`, her `call` of the program; the host's lmdb-js reader too); a block both put in both sets; a block under `host/chain` (written straight into the environment, `equiv/lmdb-env.ts`) readable by both kernels and the reader; each set's size the sum of its own members' bytes; 8 instances on one router writing N entries and N blocks each at once, SQLite against LMDB (`SKEIN_EQUIV_BENCH_DIR` for a disk) | all ok; the timing printed |
 | `equiv/serve.ts` | `serve` as the host drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their mailbox instances: genesis, the shell app and the chat app installed (#83), a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a host restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
 A replay comparison (`equiv/replays.ts`) requires z1 and z2 to be the
@@ -934,6 +987,7 @@ re-genesis when they move to this build).
 | `json.zig` | JSON.stringify quoting, Number::toString, RFC 8785 (`envelope.ts jcs`) |
 | `secp.zig` | BRC-42 "anyone" keys, ECDSA verify as @bsv/sdk (`identity.ts`) |
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
+| `lmdb_store.zig`, `any_store.zig`, `migrate.zig`, `vendor/lmdb/` | the shared host store (#96, #133): a set of one LMDB environment, its member gate and `host/chain`; either backend for serve and the tools; `skein-kernel migrate`; LMDB 0.9.36 |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `dispatch.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, the dispatch table (#77; `src/runtime/dispatch.ts` reads it), `programs.ts`, `syscalls.ts` |
 | `engine.zig`, `engine_wasmtime.zig` | the engine interface; wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |

@@ -21,7 +21,8 @@ import { RawBox } from "./client/raw.ts";
 import { WASM_DIR, wasmDirObjects } from "./host/boot.ts";
 import { HostDb } from "./host/instances.ts";
 import { fetchApp, instanceView, readApp, shellProgram, type InstanceView } from "./host/install.ts";
-import { openStoreFile } from "./runtime/index-store.ts";
+import { storeSpec } from "./runtime/index-store.ts";
+import { openStoreFile, storeExists } from "./host/stores.ts";
 import type { Store } from "./runtime/store.ts";
 
 export interface PinnedApp { name: string; repo: string; rev: string; dir?: string }
@@ -97,8 +98,8 @@ export async function viewOf(h: Pick<InstallHost, "home">, handle: string): Prom
   const row = db.get(handle);
   db.close();
   if (!row) throw new Error(`no instance ${handle}`);
-  if (!existsSync(row.store)) throw new Error(`${handle}: no store at ${row.store} yet (hydrate it first)`);
-  const s = openStoreFile(row.store, { readOnly: true });
+  if (!storeExists(storeSpec(row))) throw new Error(`${handle}: no store at ${storeSpec(row)} yet (hydrate it first)`);
+  const s = openStoreFile(storeSpec(row), { readOnly: true });
   try { return { ...(await instanceView(s)), close: () => s.close() }; } catch (e) { s.close(); throw e; }
 }
 

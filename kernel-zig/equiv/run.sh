@@ -5,6 +5,13 @@
 # exactness Zig against Zig (issue #5: from fuel on the Zig kernel is its own
 # reference) over a generated corpus (format 2, issue #33: written by the Zig
 # kernel as the router drives it) and over the stores `serve` writes.
+# Both store backends (#96): every store replays.ts checks is also replayed
+# into an LMDB environment (the same state CID and CIDs) and, a SQLite one,
+# migrated into one; the corpus, serve.ts, chain.ts, overlay.ts and sync.ts
+# run a second time with their instances as sets of one LMDB environment per
+# host (SKEIN_EQUIV_STORE=lmdb, equiv/backend.ts); equiv/lmdb.ts checks the
+# member gate, the chain's set and times 8 instances writing at once. The
+# LMDB reader in node needs lmdb-js's data-v1 build (kernel-zig/README.md).
 # Run from anywhere; needs node (26) and the repo's node_modules; for the
 # component cases (issue #34) wasm-tools and the preview1 adapter (README,
 # "Components"), else those are skipped with a note. Never
@@ -32,10 +39,24 @@ echo "== shell: host-go's cases (the shell app's shell program, #83)"
 echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
 "${node[@]}" "$kz/equiv/git.ts" | grep -E "^(ok|FAIL)|failed$|all ok" || status=1 # pipefail: git.ts's status counts
 
+ms() { echo $(( $(date +%s%N) / 1000000 )); }
 echo "== replay, Zig against Zig: a generated corpus (format 2, written by the Zig kernel through the router)"
+t0=$(ms)
 "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen" > "$work/gen.list"
+t1=$(ms)
 mapfile -t gen < "$work/gen.list"
 "${node[@]}" "$kz/equiv/replays.ts" "${gen[@]}" || status=1
+t2=$(ms)
+
+echo "== the same corpus on LMDB (#96): each host's instances sets of one environment, replayed (on both backends) to themselves exactly"
+rm -rf "$work/gen-lmdb"
+t3=$(ms)
+SKEIN_EQUIV_STORE=lmdb "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen-lmdb" > "$work/gen-lmdb.list"
+t4=$(ms)
+mapfile -t genl < "$work/gen-lmdb.list"
+"${node[@]}" "$kz/equiv/replays.ts" "${genl[@]}" || status=1
+echo "timing: the corpus driven on SQLite $((t1 - t0)) ms, on LMDB $((t4 - t3)) ms (replays.ts after it: $((t2 - t1)) ms over the SQLite stores, $(( $(ms) - t4 )) ms over the LMDB sets; each replays every store on both backends)"
+rm -rf "$work/gen-lmdb"
 
 echo "== fuel by instrumentation (issue #35): the corpus replayed with every module counting its own fuel, as under V8"
 for db in "${gen[@]}"; do
@@ -139,5 +160,13 @@ echo "== billing (#130): two skeins from the default image (its wallet, no route
 
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
+
+echo "== the same on LMDB (#96): serve.ts, chain.ts, overlay.ts and sync.ts with every host's instances sets of one LMDB environment (SKEIN_EQUIV_STORE=lmdb), their stores replayed on both backends"
+for d in serve chain overlay sync; do
+  SKEIN_EQUIV_STORE=lmdb "${node[@]}" "$kz/equiv/$d.ts" | grep -vE "^  \|" || status=1
+done
+
+echo "== the shared store (#96, #133): two instances in one LMDB environment — a block one put is absent for the other (has, get, a call of a program only the other holds; the host's lmdb-js reader too); a block under host/chain readable by both; each set's size its own; 8 instances writing at once, SQLite against LMDB"
+"${node[@]}" "$kz/equiv/lmdb.ts" || status=1
 
 exit $status

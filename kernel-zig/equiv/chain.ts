@@ -44,6 +44,8 @@ import { ownerCli } from "../../src/testapps.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { BACKEND, LMDB_MODE } from "./backend.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
@@ -76,7 +78,7 @@ const arcade = await FakeArcade.start();
 const afters: Array<() => unknown> = [];
 // The caller is the instance's owner (#79: the chain app's rows admit $owner and $self).
 const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
-const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey: callerKey, genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 } });
+const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey: callerKey, genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 }, lmdb: LMDB_MODE });
 let store = "";
 const bootStores: string[] = [];
 /** The app's checkout at the pinned commit (for its bin/chain.wasm in a system tree). */
@@ -96,7 +98,7 @@ try {
   const owner = new RawBox(h.owner, `${h.base}/@ch`);
   await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
   await h.router.settled();
-  store = h.db.get("ch")!.store;
+  store = storeSpec(h.db.get("ch")!);
   const k = async () => (await h.router.hydrate("ch")).kernel;
   const record = async (name: string) => {
     const kk = await k();
@@ -257,7 +259,7 @@ try {
   await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: h.origin("caller") });
   for (const raw of [h1, h2]) await h.router.admitEvent("boot", "chain", { kind: "header", raw });
   await h.router.settled();
-  const bootStore = h.db.get("boot")!.store;
+  const bootStore = storeSpec(h.db.get("boot")!);
   const bootBox = new RawBox(callerWallet, `${h.base}/@boot`);
   const child3 = new Transaction();
   child3.addInput({ sourceTransaction: fund, sourceOutputIndex: 2, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
@@ -292,5 +294,5 @@ try {
   }
   if (!process.env.KEEP) await removeHome?.();
 }
-process.stdout.write(failures ? `chain: ${failures} FAILED\n` : "chain: all ok\n");
+process.stdout.write(failures ? `chain (${BACKEND}): ${failures} FAILED\n` : `chain (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

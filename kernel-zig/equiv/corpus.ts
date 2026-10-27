@@ -33,6 +33,8 @@ import { DEFAULTS } from "../../src/runtime/log.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
+import { storeExists } from "../../src/host/stores.ts";
+import { LMDB_MODE, routerStore, storeFor } from "./backend.ts";
 
 type Json = Record<string, unknown>;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -84,7 +86,7 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     // No host skein here (#113): the handles resolve over host.db (a fixture).
     discovery: fakeDiscovery(db, () => router),
     owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,
-    fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+    fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } }, ...routerStore(home),
     log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); },
   });
   await router.listen(0);
@@ -99,9 +101,11 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   /** A mailbox instance for identity `whose`: its row (a fixture's; its genesis at first hydration). */
   const mailbox = (name: string, whose: string, store?: string) => {
     keys.set(name, key());
-    db.add(name, { kind: "mailbox", owner: whose, store: store ?? join(home, "instances", name, "runtime.db"), identity: keys.get(name)!.toPublicKey().toString() });
+    db.add(name, { kind: "mailbox", owner: whose, store: store ?? storeFor(home, name), identity: keys.get(name)!.toPublicKey().toString() });
   };
   let first: string | undefined;
+  // #96, SKEIN_EQUIV_STORE=lmdb: the host's agents and the owner's mailbox are sets of one environment, out/<first agent>.lmdb.
+  let env: string | undefined;
   const add = async (name: string) => {
     keys.set(name, key());
     await fs.rm(join(out, `${name}.db`), { force: true });
@@ -109,10 +113,13 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
       // The owner's mailbox before the first agent's genesis (which names it): in the corpus too.
       first = name;
       await fs.rm(join(out, `${name}-david.db`), { force: true });
-      mailbox("david", ownerId, join(out, `${name}-david.db`));
+      if (LMDB_MODE) { env = join(out, `${name}.lmdb`); await fs.rm(env, { recursive: true, force: true }); }
+      mailbox("david", ownerId, env ? `lmdb:${env}` : join(out, `${name}-david.db`));
       mailboxes.push(`${name}-david`);
+      if (env) specs.set(`${name}-david`, `lmdb:${env}#david`);
     }
-    db.add(name, { store: join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
+    db.add(name, { store: env ? `lmdb:${env}` : join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
+    if (env) specs.set(name, `lmdb:${env}#${name}`);
     await router.hydrate(name);
     const id = keys.get(name)!.toPublicKey().toString();
     handles.set(id, name);
@@ -157,6 +164,9 @@ function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: 
 }
 
 const made: string[] = [];
+/** #96: a store's name → its LMDB set (lmdb:<env>#<handle>), in LMDB mode. */
+const specs = new Map<string, string>();
+const specOf = (n: string) => specs.get(n) ?? join(out, `${n}.db`);
 /** The owners' mailbox instances: in the corpus if anything was delivered there (it has a store). */
 const mailboxes: string[] = [];
 
@@ -377,5 +387,5 @@ const mailboxes: string[] = [];
   made.push("gen-fuel");
 }
 
-for (const m of mailboxes) if (await fs.stat(join(out, `${m}.db`)).then(() => true, () => false)) made.push(m);
-process.stdout.write(made.map((n) => join(out, `${n}.db`)).join("\n") + "\n");
+for (const m of mailboxes) if (storeExists(specOf(m))) made.push(m);
+process.stdout.write(made.map(specOf).join("\n") + "\n");

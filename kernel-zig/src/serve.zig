@@ -27,7 +27,7 @@ const scheduler = @import("scheduler.zig");
 const replay = @import("replay.zig");
 const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
-const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const AnyStore = @import("any_store.zig").AnyStore;
 const Value = cbor.Value;
 
 var sig_pipe: [2]std.posix.fd_t = .{ -1, -1 };
@@ -63,7 +63,7 @@ fn die(comptime fmt: []const u8, args: anytype) noreturn {
 
 const Server = struct {
     gpa: std.mem.Allocator,
-    ss: *SqliteStore,
+    ss: AnyStore,
     store: storem.Store,
     rt: *scheduler.Runtime,
     to_peer: std.Io.File,
@@ -420,7 +420,6 @@ const Server = struct {
 pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     io = process_io;
     const home = envm.get("SKEIN_HOME") orelse try std.fmt.allocPrint(gpa, "{s}/.skein", .{envm.get("HOME") orelse "."});
-    const db_path = envm.get("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
     const handle_full = envm.get("SKEIN_HANDLE") orelse "skein@localhost";
     var handle: []const u8 = handle_full;
     var domain: []const u8 = "localhost";
@@ -429,6 +428,10 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         const rest = handle_full[i + 1 ..];
         domain = rest[0 .. std.mem.indexOfScalar(u8, rest, '@') orelse rest.len];
     }
+    // The store (#96): SKEIN_STORE names the host's LMDB environment, this instance's set its handle;
+    // unset, the SQLite file SKEIN_DB, default $SKEIN_HOME/runtime.db.
+    const lmdb_dir = envm.get("SKEIN_STORE");
+    const db_path = if (lmdb_dir) |d| try std.fmt.allocPrint(gpa, "lmdb:{s}#{s}", .{ d, handle }) else envm.get("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
 
     // Signals.
     if (std.posix.errno(std.posix.system.pipe2(&sig_pipe, .{ .CLOEXEC = true, .NONBLOCK = true })) != .SUCCESS) die("{s}@{s}: pipe2 failed", .{ handle, domain });
@@ -439,8 +442,8 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     std.posix.sigaction(std.posix.SIG.PIPE, &ign, null);
 
     // The store, with the pinned modules installed.
-    if (std.fs.path.dirname(db_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
-    const ss = SqliteStore.open(gpa, io, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
+    if (lmdb_dir == null) if (std.fs.path.dirname(db_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
+    const ss = AnyStore.open(gpa, io, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
     replay.install(gpa, io, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
 
     const r = try runner.Runner.init(gpa);

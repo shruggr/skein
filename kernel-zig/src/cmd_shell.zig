@@ -12,10 +12,10 @@ const Value = cbor.Value;
 const shell = @import("shell.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
-const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const AnyStore = @import("any_store.zig").AnyStore;
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, db: []const u8, program: ?[]const u8) !void {
-    const ss = try SqliteStore.open(gpa, io, db);
+    const ss = try AnyStore.open(gpa, io, db);
     defer ss.close();
     const s = ss.store();
     const r = try runner.Runner.init(gpa);

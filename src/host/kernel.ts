@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
+import { parseLmdbSpec } from "../runtime/index-store.ts";
 import type { Entry } from "../runtime/log.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
@@ -47,7 +48,7 @@ import { DoorAnswered, doorAnswer } from "./door-answer.ts";
 export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
 export interface KernelOptions {
-  /** The store file. */
+  /** The store file, or a set of the host's LMDB environment, `lmdb:<env dir>#<handle>` (#96: the kernel gets SKEIN_STORE). */
   db: string;
   handle: string;
   domain: string;
@@ -82,8 +83,13 @@ export class Kernel {
   constructor(o: KernelOptions) {
     this.o = o;
     if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
+    // #96: an LMDB set's kernel gets SKEIN_STORE (its set is its handle); a file's gets SKEIN_DB and never a SKEIN_STORE.
+    const env: Record<string, string | undefined> = { ...process.env, ...o.env, SKEIN_HANDLE: `${o.handle}@${o.domain}` };
+    const lmdb = parseLmdbSpec(o.db);
+    if (lmdb && lmdb.set !== o.handle) throw new Error(`kernel ${o.handle}: its LMDB set is its handle, not ${lmdb.set}`);
+    if (lmdb) { env.SKEIN_STORE = lmdb.dir; delete env.SKEIN_DB; } else { env.SKEIN_DB = o.db; delete env.SKEIN_STORE; }
     this.proc = spawn(o.command ?? KERNEL_BIN, ["serve"], {
-      env: { ...process.env, ...o.env, SKEIN_DB: o.db, SKEIN_HANDLE: `${o.handle}@${o.domain}` },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let partial = "";

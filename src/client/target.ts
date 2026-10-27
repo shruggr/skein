@@ -22,7 +22,8 @@ import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
 import type { WalletInterface } from "@bsv/sdk";
 import { encode } from "../runtime/cid.ts";
-import { openStoreFile } from "../runtime/index-store.ts";
+import { storeSpec } from "../runtime/index-store.ts";
+import { openStoreFile, storeExists } from "../host/stores.ts";
 import type { IndexStore } from "../runtime/index-store.ts";
 import { CONTROL_SOCKET, controlRequest } from "../host/control.ts";
 import { homeOf, type Vars } from "../host/hostenv.ts";
@@ -80,8 +81,8 @@ export function localTarget(vars: Vars, handle: string, wallet: WalletInterface)
   const sock = join(home, CONTROL_SOCKET);
   const opened: Array<{ close(): void }> = [];
   const openOnce = (): IndexStore & { close(): void } => {
-    if (!existsSync(row.store)) throw new Error(`${handle}: no store at ${row.store} yet`);
-    return openStoreFile(row.store, { readOnly: true }) as unknown as IndexStore & { close(): void };
+    if (!storeExists(storeSpec(row))) throw new Error(`${handle}: no store at ${storeSpec(row)} yet`);
+    return openStoreFile(storeSpec(row), { readOnly: true }) as unknown as IndexStore & { close(): void };
   };
   // A view's store stays open while the view is used (until close).
   const open = (): IndexStore => { const s = openOnce(); opened.push(s); return s; };

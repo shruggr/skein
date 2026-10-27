@@ -65,8 +65,10 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"] } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"]; lmdb?: boolean } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
+  // #96: o.lmdb — every instance a set of one LMDB environment, <home>/store (host.db `lmdb:<dir>`), else a file each.
+  const storeOf = (handle: string) => (o.lmdb ? `lmdb:${join(home, "store")}` : join(home, "instances", handle, "runtime.db"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
@@ -84,6 +86,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
     // #130: what the host bills (billing.ts); none: it bills no one.
     ...(o.billing ? { billing: o.billing } : {}),
+    ...(o.lmdb ? { lmdbStore: join(home, "store") } : {}),
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
     discovery: fakeDiscovery(db, () => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
@@ -100,7 +103,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
      * genesis at first hydration (the owner's mailbox must exist first to be
      * named in it). Its identity key (hex).
      */
-    instance(handle: string) { db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
+    instance(handle: string) { db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
     /** The same as `instance`, by its old name (for tests written before the rename). */
     agent(handle: string) { return h.instance(handle); },
     /**
@@ -110,11 +113,11 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
      * (src/testapps.ts sendPlan of planClaim, #127): its sender owns it.
      */
     async image(handle: string, dir = join(ROOT, "images/default")) {
-      db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() });
+      db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() });
       return await router.bootRow(handle, await imageSource(dir), { image: true });
     },
     /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
-    mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); },
+    mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() }); },
     /**
      * The host skein (#90, #113, #142): `host` from the host image (the
      * default image with the onboarding app), its genesis naming the owner
