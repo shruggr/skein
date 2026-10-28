@@ -305,16 +305,26 @@ pub const RocksStore = struct {
         return init(alloc, db, false, set, db.read_only);
     }
 
+    /// The `host/chain` set (#156) for the host chain's tracker (host_chain.zig): written through
+    /// the backend alone — its index never loads or writes a state record of its own.
+    pub fn openChain(alloc: std.mem.Allocator, db: *Db) !*RocksStore {
+        return initWith(alloc, db, false, CHAIN_SET, db.read_only, true);
+    }
+
     fn init(alloc: std.mem.Allocator, db: *Db, owns_db: bool, set: []const u8, read_only: bool) !*RocksStore {
+        return initWith(alloc, db, owns_db, set, read_only, false);
+    }
+
+    fn initWith(alloc: std.mem.Allocator, db: *Db, owns_db: bool, set: []const u8, read_only: bool, bare: bool) !*RocksStore {
         if (set.len == 0 or std.mem.indexOfScalar(u8, set, 0) != null) return error.BadSet;
         const s = try alloc.create(RocksStore);
         errdefer alloc.destroy(s);
         const prefix = try std.mem.concat(alloc, u8, &.{ set, "\x00" });
         errdefer alloc.free(prefix);
         s.* = .{ .db = db, .owns_db = owns_db, .alloc = alloc, .ix = undefined, .read_only = read_only, .prefix = prefix, .pending = .init(alloc), .pending_ptr = .init(alloc) };
-        s.ix = try index.Index.init(alloc, s.backend(), read_only);
+        s.ix = try index.Index.init(alloc, s.backend(), read_only or bare);
         errdefer s.ix.deinit();
-        _ = try s.ix.load();
+        if (!bare) _ = try s.ix.load();
         return s;
     }
 
@@ -368,7 +378,8 @@ pub const RocksStore = struct {
 
     // -------------------------------------------------------- the backend
 
-    fn backend(s: *RocksStore) index.Backend {
+    /// The backend under the store's index (host_chain.zig writes the host chain through it, #156).
+    pub fn backend(s: *RocksStore) index.Backend {
         return .{ .ctx = s, .vt = &backend_vt };
     }
 

@@ -196,7 +196,8 @@ pub const SqliteStore = struct {
 
     // -------------------------------------------------------- the backend
 
-    fn backend(s: *SqliteStore) index.Backend {
+    /// The backend under the store's index (host_chain.zig writes the host chain through it, #156).
+    pub fn backend(s: *SqliteStore) index.Backend {
         return .{ .ctx = s, .vt = &backend_vt };
     }
 

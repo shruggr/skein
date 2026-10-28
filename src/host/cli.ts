@@ -23,6 +23,8 @@
 //   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+//   skein-host chain [handle]          #156: the host chain's tip — height, hash, record — the RocksDB database's
+//                                     (SKEIN_STORE_ROCKSDB; through the running kernel process), else <handle>'s own store's
 //   skein-host migrate-store <handle>   #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE)
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
 // store: its objects pre-filled, its genesis from the system tree (or a
@@ -142,7 +144,7 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
 import { isLmdb, isRocks, storeSpec } from "../runtime/index-store.ts";
-import { openStoreFile, storeBlocks, storeExists } from "./stores.ts";
+import { openStoreFile, readHostChain, storeBlocks, storeExists } from "./stores.ts";
 import { spawnSync } from "node:child_process";
 import { connect } from "node:net";
 import type { Store } from "../runtime/store.ts";
@@ -195,6 +197,8 @@ const USAGE = `usage:
   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+  skein-host chain [handle]                               #156: the host chain's tip (height, hash, record): the RocksDB database's
+                                                          (SKEIN_STORE_ROCKSDB, through the running kernel process), else <handle>'s own store's
   skein-host migrate-store <handle>                       #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE); the row then
                                                           names the set, the file kept beside as runtime.db.migrated-<date>. With the host stopped
 settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
@@ -323,6 +327,17 @@ export async function main(argv: string[], given: Env): Promise<number> {
         return await packCmd(db, rest, env);
       case "migrate-store":
         return await migrateStoreCmd(db, rest, env);
+      case "chain": {
+        // #156: the host chain's tip (a RocksDB host's: one per host; a serve instance's: in its own store).
+        const [handle] = rest;
+        const row = handle ? db.get(handle) : undefined;
+        if (handle && !row) { env.err(`skein-host chain: no instance ${handle}`); return 1; }
+        const spec = row ? storeSpec(row) : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}#host/chain` : undefined;
+        if (!spec) { env.err("skein-host chain: a handle (its own store's host chain), or SKEIN_STORE_ROCKSDB (the host's)"); return 2; }
+        const c = readHostChain(spec);
+        env.out(c ? `${c.height}\t${c.hash}\t${c.root.toString()}` : "no host chain");
+        return 0;
+      }
       default:
         env.err(USAGE);
         return 2;

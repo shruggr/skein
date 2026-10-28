@@ -134,7 +134,7 @@ import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type W
 import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
-import { DoorAnswered, Kernel, KernelHost, type KernelSurface } from "./kernel.ts";
+import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
 import { beaconEvent, beaconsOf, DEFAULT_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
@@ -369,6 +369,8 @@ export class Router {
   readonly certifier: ProtoWallet;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
+  /** #156: the host chain record each running instance was last sent (a `chain` event), by handle; cleared at each start. */
+  private sentChain = new Map<string, string>();
   /** Rows being created (#90): hydrated before their hostname is published (disabled until claimed). */
   private unpublished = new Set<string>();
   private queues = new Map<string, Promise<unknown>>();
@@ -409,7 +411,7 @@ export class Router {
   private kernelHost(dir: string): KernelHost {
     let h = this.kernelHosts.get(dir);
     if (!h) {
-      h = KernelHost.acquire(dir, { command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say("kernel", l) });
+      h = KernelHost.acquire(dir, { command: this.o.kernel?.command, env: this.kernelEnv(), log: (l) => this.say("kernel", l) });
       this.kernelHosts.set(dir, h);
     }
     return h;
@@ -421,7 +423,7 @@ export class Router {
     this.image = new ImageChain({ db: o.db, history: historyOf(o.headersFeed), log: (l) => this.say("router", l) });
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
     this.feeds = new Feeds({
-      admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
+      headers: (h, box, raws) => this.chainHeaders(h, box, raws), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
     });
     this.cron = new Cron({
@@ -791,6 +793,86 @@ export class Router {
     return next;
   }
 
+  // ---------------------------------------------------------------- the host chain (#156)
+
+  /**
+   * The network the host chain is on: SKEIN_NETWORK (`network`), else the genesis defaults'
+   * `walletNetwork` (a test host's), else the kernel's default (main).
+   */
+  chainNetwork(): string | undefined {
+    const d = this.o.genesis?.defaults as { walletNetwork?: unknown } | undefined;
+    return this.o.network ?? (typeof d?.walletNetwork === "string" ? d.walletNetwork : undefined);
+  }
+
+  /** The kernels' environment: the configured one, and the host chain's network (#156). */
+  private kernelEnv(): Record<string, string | undefined> | undefined {
+    const net = this.chainNetwork();
+    return net ? { ...this.o.kernel?.env, SKEIN_NETWORK: net } : this.o.kernel?.env;
+  }
+
+  /**
+   * A run of headers from a feed for `handle` (#156): into the host chain — the one kernel
+   * process's for a RocksDB set (an instance not running is not hydrated for it: it gets the
+   * chain at its next start), the instance's own serve kernel's otherwise — then, when the
+   * record changed for it, the `chain` event.
+   */
+  async chainHeaders(handle: string, box: string, raws: Uint8Array[]): Promise<void> {
+    const row = this.o.db.get(handle);
+    if (!row) return;
+    const rocks = parseRocksSpec(storeSpec(row));
+    let tip: HostChainTip;
+    if (rocks) {
+      tip = await this.kernelHost(rocks.dir).chainHeaders(raws);
+      const l = this.loaded.get(handle);
+      if (!l || l.kernel.gone) return;
+    } else {
+      tip = await (await this.hydrate(handle)).kernel.chainHeaders(raws);
+    }
+    await this.chainEvent(handle, box, tip);
+  }
+
+  /** The `chain` event (#156) for `handle` in `box`, unless it was sent that record already since its start. */
+  private async chainEvent(handle: string, box: string, tip: HostChainTip): Promise<void> {
+    const key = tip.root.toString();
+    if (this.sentChain.get(handle) === key) return;
+    this.sentChain.set(handle, key);
+    try {
+      await this.admitEvent(handle, box, { kind: "chain", root: tip.root, height: tip.height });
+    } catch (e) {
+      if (this.sentChain.get(handle) === key) this.sentChain.delete(handle);
+      throw e;
+    }
+  }
+
+  /**
+   * Fresh-host bootstrap (#156): the host chain empty and the instance's tree (its head `main`,
+   * an image's) carrying `chain/headers`: those imported into the host chain before the
+   * instance's first event. A tree with none, or a host chain with a tip: nothing.
+   */
+  private async chainBootstrap(handle: string, kernel: KernelSurface): Promise<void> {
+    if (await kernel.chainTip()) return;
+    const tree = await kernel.call("head", "main") as CID | null;
+    if (!tree || tree.code !== 0x78) return;
+    try {
+      const t0 = Date.now();
+      const got = await kernel.chainImport(tree);
+      this.say("router", `host chain: ${got.added} headers imported from ${handle}'s image (tip ${got.height}, ${Date.now() - t0} ms)`);
+    } catch (e) {
+      const m = (e as Error).message;
+      if (!/NoChain|NotEmpty/.test(m)) this.say(handle, `host chain: the image's chain not imported: ${m}`);
+    }
+  }
+
+  /** At start (and once an app takes box `chain` — an install): the host chain's current record, as the `chain` event. */
+  private async chainBirth(handle: string): Promise<void> {
+    const l = this.loaded.get(handle);
+    if (!l || l.kernel.gone) return;
+    const rows = l.rows ?? (await l.kernel.dispatch()).rows;
+    if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
+    const tip = await l.kernel.chainTip();
+    if (tip) await this.chainEvent(handle, DEFAULT_BOX, tip);
+  }
+
   // ---------------------------------------------------------------- hydration
 
   /** The instance's kernel, started (and its genesis written) if it is not loaded. */
@@ -813,7 +895,7 @@ export class Router {
     const identity = await rootIdentity(wallet);
     if (row.identity && row.identity !== identity) throw new Error(`its signer is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
     const ko = {
-      db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
+      db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.kernelEnv(),
       log: (line: string) => this.say(handle, line),
       emit: (o: Outgoing) => this.providers.deliver(handle, o),
       http: (req: HttpRequest) => this.http(req, handle),
@@ -836,6 +918,8 @@ export class Router {
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
+      // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
+      await this.chainBootstrap(handle, kernel);
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
@@ -855,6 +939,9 @@ export class Router {
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
+    // #156: the host chain as it stands, once at each start (not awaited: an admit made here would wait on this load).
+    this.sentChain.delete(handle);
+    void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the start event not sent: ${(e as Error).message}`));
     // shruggr/skein#112: the wants standing in the log, asked again.
     if (this.sync) this.sync.standing(handle, await this.foldWants(storeSpec(row)).catch((e) => { this.say(handle, `sync: the wants not read: ${(e as Error).message}`); return [] as Want[]; }));
     await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
@@ -892,7 +979,7 @@ export class Router {
     const identity = await rootIdentity(await this.o.walletFor(row));
     // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
     const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
-    const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
+    const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.kernelEnv(), log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
   }
@@ -1378,6 +1465,8 @@ export class Router {
     };
     void this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined, want ? backfill : undefined);
     this.say("router", `${handle}: ${want ? "subscribed to" : "unsubscribed from"} the host's headers feed ${url}`);
+    // #156: an app that takes box `chain` installed into a running instance: the host chain as it stands, now.
+    if (want) void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the install event not sent: ${(e as Error).message}`));
   }
 
   /** Follow the host's headers feed for an instance whose status changed (#102): its table read again. */

@@ -86,6 +86,12 @@ pub const AnyStore = union(enum) {
             inline else => |x| x.store(),
         };
     }
+    /// The backend under the index (the host chain's tracker writes through it, #156).
+    pub fn backend(s: AnyStore) index.Backend {
+        return switch (s) {
+            inline else => |x| x.backend(),
+        };
+    }
     pub fn ix(s: AnyStore) *index.Index {
         return switch (s) {
             inline else => |x| x.ix,

@@ -108,6 +108,42 @@ function isZigStore(db: string): boolean {
   } finally { d.close(); }
 }
 
+/**
+ * #156: `d` (the dump of the SQLite file `db`) without the host chain's blocks: every host chain record
+ * (`{kind: "host-chain"}`) the file holds and every block it reaches (its map nodes, its headers); the
+ * index-node count less the ones among them.
+ */
+function withoutHostChain(d: Dump, db: string): Dump {
+  const f = new DatabaseSync(db, { readOnly: true });
+  try {
+    const held = new Set<string>();
+    const queue: CID[] = [];
+    for (const row of f.prepare("SELECT cid, bytes FROM blocks").all() as Array<{ cid: Uint8Array; bytes: Uint8Array }>) {
+      const c = CID.decode(row.cid);
+      if (c.code !== 0x71) continue;
+      try { if ((dagCbor.decode(row.bytes) as { kind?: unknown })?.kind === "host-chain") queue.push(c); } catch { /* not a record */ }
+    }
+    const links = (v: unknown, out: CID[]) => {
+      const c = CID.asCID(v);
+      if (c) { out.push(c); return; }
+      if (Array.isArray(v)) for (const x of v) links(x, out);
+      else if (v && typeof v === "object" && !(v instanceof Uint8Array)) for (const x of Object.values(v)) links(x, out);
+    };
+    while (queue.length) {
+      const c = queue.pop()!;
+      const k = c.toString();
+      if (held.has(k)) continue;
+      held.add(k);
+      if (c.code !== 0x71) continue;
+      const row = f.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(c.bytes) as { bytes: Uint8Array } | undefined;
+      if (row) links(dagCbor.decode(row.bytes), queue);
+    }
+    const blocks = d.blocks.filter((b) => !held.has(b));
+    const index = [...held].filter((b) => !d.blocks.includes(b) && f.prepare("SELECT 1 FROM blocks WHERE cid = ?").get(CID.parse(b).bytes)).length;
+    return { ...d, blocks, indexBlocks: d.indexBlocks - index };
+  } finally { f.close(); }
+}
+
 let allSame = true;
 for (const source of sources) {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-replay-"));
@@ -178,7 +214,9 @@ for (const source of sources) {
   const zigSource = isZigStore(src);
   if (zigSource) {
     const ds = dump(src);
-    const sd = dumpDiff(ds, d1, "source vs replay");
+    // #156: a RocksDB set reads the host chain through the host/chain set, which is not its own; the
+    // replay (a fresh file) holds the blocks its `chain` events name. Compared without those.
+    const sd = dumpDiff(ds, rocksSource ? withoutHostChain(d1, z1) : d1, "source vs replay");
     diffs.push(...sd);
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
   }

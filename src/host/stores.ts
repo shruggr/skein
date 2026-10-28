@@ -94,6 +94,48 @@ export function openLmdbStore(dir: string, set: string): IndexStore {
   });
 }
 
+/** The host chain as it stands (#156): its record's CID, tip height and hash; undefined when empty. */
+export type HostChain = { root: CID; height: number; hash: string };
+
+/**
+ * The host chain a store sees (#156): a RocksDB database's (the kernel process's `chain` frame over
+ * its host-read socket), or a SQLite file's or an LMDB set's own (a serve instance's: the pointer
+ * `host/chain` and the record it names, read directly).
+ */
+export function readHostChain(spec: string): HostChain | undefined {
+  const r = parseRocksSpec(spec);
+  if (r) {
+    const v = rocksReader(r.dir).request({ op: "chain" }) as { root: CID; height: number | bigint; hash: string } | null;
+    return v ? { root: v.root, height: Number(v.height), hash: v.hash } : undefined;
+  }
+  let ptr: Uint8Array | undefined;
+  let get: (c: Uint8Array) => Uint8Array | undefined;
+  const l = parseLmdbSpec(spec);
+  if (l) {
+    if (!existsSync(join(l.dir, "data.mdb"))) return undefined;
+    const e = lmdbEnv(l.dir);
+    e.pointers.resetReadTxn();
+    ptr = e.pointers.get(Buffer.concat([setPrefix(l.set), Buffer.from("host/chain")]));
+    get = (c) => e.blocks.get(c);
+  } else {
+    if (!existsSync(spec)) return undefined;
+    const db = new DatabaseSync(spec, { readOnly: true });
+    try {
+      const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
+      ptr = t ? db.prepare("SELECT cid FROM pointers WHERE name = 'host/chain'").get()?.cid as Uint8Array | undefined : undefined;
+      if (!ptr) return undefined;
+      const b = db.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(ptr)?.bytes as Uint8Array | undefined;
+      get = () => b;
+    } finally { db.close(); }
+  }
+  if (!ptr) return undefined;
+  const bytes = get(ptr);
+  if (!bytes) return undefined;
+  const v = decode<{ tip?: { height: number | bigint; hash: string } }>(bytes);
+  if (!v.tip) return undefined;
+  return { root: fromBytes(ptr), height: Number(v.tip.height), hash: v.tip.hash };
+}
+
 /** Every block a store holds (a SQLite file's `blocks`; an LMDB set's members), for a checkpoint's extras. */
 export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Array }> {
   const r = parseRocksSpec(spec);

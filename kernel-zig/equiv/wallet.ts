@@ -71,7 +71,7 @@ const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFi
 const WALLET_CID = encode(WALLET).cid;
 // The chain app (#78, #79): SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -225,7 +225,7 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
   const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
   // A heavier branch arrives as one run (its first header alone is no heavier than ours): one `header` event with `raws`.
-  for (const inst of ["wallettest", "payee"]) await h.router.admitEvent(inst, "chain", { kind: "header", raws: [alt103, alt104] });
+  for (const inst of ["wallettest", "payee"]) await h.router.chainHeaders(inst, "chain", [alt103, alt104]);
   await until("the reorg's rebroadcast", async () => { await h.router.settled(); return arcade.posts.slice(posts).some((p) => FakeArcade.txOf(p).id("hex") === reorg.spend) ? true : undefined; });
   const after = await owned({ op: "list", includeSpent: true });
   out.reorg = {
@@ -277,9 +277,9 @@ try {
 
   // Headers 1..102 on the feed: the chain app's (box chain, its `event` row), not the wallet's.
   for (const raw of headers) await feedHeader(raw);
-  const tip = await resultWhere("the chain app at 102", (res) => res.event === "header" && res.tip === 102, 60_000, view, CHAIN);
-  await resultWhere("the payee's chain app at 102", (res) => res.event === "header" && res.tip === 102, 60_000, payeeView, CHAIN);
-  report.headers = [tip.result.event, tip.result.tip];
+  const tip = await resultWhere("the chain app at 102", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 102, 60_000, view, CHAIN);
+  await resultWhere("the payee's chain app at 102", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 102, 60_000, payeeView, CHAIN);
+  report.headers = [tip.result.event, (tip.result.chain as { height?: number } | undefined)?.height];
   report.walletTookNoHeader = (await updates(view)).length === 0;
 
   // The owner pays the instance (BRC-29): internalized, then the chain app takes it (and broadcasts it).
@@ -329,8 +329,8 @@ try {
   // Mined at 103: the header, then MINED with the merkle path: both chain apps prove it, both threads finish.
   const h103 = mine(prev, internal(spendTxid), 1_790_000_000 + 103 * 600);
   await feedHeader(h103);
-  await resultWhere("header 103", (res) => res.event === "header" && res.tip === 103, 30_000, view, CHAIN);
-  await resultWhere("the payee's header 103", (res) => res.event === "header" && res.tip === 103, 30_000, payeeView, CHAIN);
+  await resultWhere("header 103", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 103, 30_000, view, CHAIN);
+  await resultWhere("the payee's header 103", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 103, 30_000, payeeView, CHAIN);
   const path = new MerklePath(103, [[{ offset: 0, hash: spendTxid, txid: true }]]);
   arcade.emit(spendTxid, { txStatus: "MINED", blockHash: display(sha256d(h103)), blockHeight: 103, merklePath: path.toHex() });
   const mined = await answered("proven", spendThread, (x) => x.outcome === "proven");
@@ -415,7 +415,7 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
-check(eq(report.headers, ["header", 102]) && report.walletTookNoHeader === true, `headers 1..102 from the host's feed reach the chain app; the wallet takes none (#79) (${JSON.stringify(report.headers)})`);
+check(eq(report.headers, ["chain", 102]) && report.walletTookNoHeader === true, `headers 1..102 from the host's feed reach the chain app (the host chain's chain events, #156); the wallet takes none (#79) (${JSON.stringify(report.headers)})`);
 check(eq(report.internalize, [true, "unproven", "waiting", "accepted"]), `a BRC-29 payment internalized, handed to the chain app (it broadcasts it), the thread answered accepted (${JSON.stringify(report.internalize)})`);
 const c = (report.create ?? {}) as Record<string, unknown>;
 check(c.state === "waiting" && c.awaiting === true && c.outcome === "pending" && eq(c.ingest, ["mail", true, "chain", "ingest", 1]), `createAction: signed; its step emits one message — {fn: ingest} to the instance itself in box chain — and no broadcast of its own; the thread awaits it (${JSON.stringify(c)})`);

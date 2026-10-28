@@ -28,6 +28,7 @@ const replay = @import("replay.zig");
 const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const AnyStore = @import("any_store.zig").AnyStore;
+const host_chain = @import("host_chain.zig");
 const Value = cbor.Value;
 
 var sig_pipe: [2]std.posix.fd_t = .{ -1, -1 };
@@ -78,6 +79,8 @@ const Server = struct {
     answers: std.AutoHashMap(i64, []u8),
     /// The host's `answer` requests not yet answered (#66): each waits on a request entry's thread.
     waiters: std.array_list.Managed(Waiter),
+    /// The host chain (#156): a serve instance's is in its own store (the pointer `host/chain`).
+    hc: host_chain.HostChain = undefined,
 
     const Waiter = struct { id: i64, entry: []u8, until: i64 };
 
@@ -285,6 +288,11 @@ const Server = struct {
         } else if (eq(u8, op, "byEnvelope")) {
             const c = Value.cidOf(v) orelse return error.BadRequest;
             s.reply(a, id, cbor.optCid(try s.store.byEnvelope(a, c)) orelse .null, null, null);
+        } else if (host_chain.isOp(op)) {
+            // #156: the host chain's three frames (headers, chain-import, chain); a serve instance's
+            // host chain is in its own store, which also holds an image's blocks (no other set to read).
+            const ans = host_chain.run(&s.hc, a, op, v, null) catch |err| return s.reply(a, id, null, try std.fmt.allocPrint(a, "{s}: {s}", .{ op, @errorName(err) }), null);
+            s.reply(a, id, ans, null, null);
         } else if (eq(u8, op, "admit")) {
             const entry = v.get("entry") orelse return error.BadRequest;
             const res = try s.rt.admit(a, entry, v.get("request"));
@@ -461,6 +469,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         .domain = domain,
         .db_path = db_path,
     };
+    server.hc = host_chain.HostChain.init(ss.backend(), host_chain.hostNetwork() catch die("{s}@{s}: SKEIN_NETWORK is main, test or regtest", .{ handle, domain }), io);
     server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
         .ctx = &server,
         .wallet = Server.pWallet,

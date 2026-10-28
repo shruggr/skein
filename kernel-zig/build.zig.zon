@@ -4,11 +4,11 @@
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x60166c03cdab6314,
     .dependencies = .{
-        // The SDK (shruggr/skein-sdk, #75): the codecs. -Dwallet=false (sdkImports
-        // in build.zig) so the kernel never fetches bsvz.
+        // The SDK (shruggr/skein-sdk, #75): the codecs, and natively the `chain` module (the
+        // host chain, #156; it brings bsvz). -Dwallet=false (sdkImports in build.zig).
         .skein_sdk = .{
-            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.7.2.tar.gz",
-            .hash = "skein_sdk-0.7.2-YroFBKaLGQAQCOjDrzx58GMqHk4f-6x20MxJuxWeD9Ye",
+            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.12.0.tar.gz",
+            .hash = "skein_sdk-0.12.0-YroFBJARGwCl0tO0ugkkN_N5u1RwHJzgrTFgAPmHES6k",
         },
     },
     .paths = .{

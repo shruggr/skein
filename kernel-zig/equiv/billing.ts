@@ -49,7 +49,7 @@ import { stateOf, type BillingConfig } from "../../src/host/billing.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;

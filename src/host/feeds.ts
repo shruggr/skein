@@ -1,9 +1,13 @@
 // Router-held feeds (#33 part 2, #29's revision): long-lived subscriptions the
-// router keeps on behalf of instances, each of whose items is admitted into
-// the subscribed instance as a plain `event` entry (Router.admitEvent) — the
-// event records of docs/WALLET.md:
+// router keeps on behalf of instances. A headers feed's headers go to the
+// host chain (#156): the header chain the host keeps once, in its kernel
+// process (`headers` frames, kernel.ts; a serve instance's in its own store);
+// on a changed record the subscribed instance is sent the event
 //
-//   header {kind: "header", raw: bytes(80)}
+//   chain {kind: "chain", root: <the host chain record>, height}
+//
+// in its box (Router.chainHeaders: one `headers` run per SSE event, the
+// backfill's in runs of 2016; the per-instance `header` events are gone).
 //
 // (The broadcaster's proofs travel the same way, #65: {kind: "proof",
 // subject, txid, path, …} in box `chain`, arc.ts; its other statuses are
@@ -30,8 +34,8 @@
 // header it brings grows the default image's chain part (image-chain.ts).
 //
 // `box` defaults to "chain" (the wallet's sender-less subscription). Nothing
-// here judges an item: the instance's own chain tracker validates headers and
-// proofs. One SSE connection per URL, fanned out to every subscriber;
+// here judges an item: the kernel's host chain tracker validates headers (and
+// the chain app proofs). One SSE connection per URL, fanned out to every subscriber;
 // reconnects with exponential backoff (and `Last-Event-ID`); each instance's
 // queue of items not yet admitted holds at most `maxQueue` (the oldest go
 // first, logged).
@@ -50,8 +54,8 @@ import * as Digest from "multiformats/hashes/digest";
 export type FeedSpec = { kind: "headers"; url: string; box?: string };
 
 export interface FeedsOptions {
-  /** Admit one event record into `handle`'s box (Router.admitEvent). */
-  admit(handle: string, box: string, event: Record<string, unknown>): Promise<unknown>;
+  /** A run of headers (parents first) for `handle`'s box: into the host chain, the event on a change (Router.chainHeaders, #156). */
+  headers(handle: string, box: string, raws: Uint8Array[]): Promise<unknown>;
   log?(source: string, line: string): void;
   /** Items waiting for admission per instance (default 1000). */
   maxQueue?: number;
@@ -257,9 +261,9 @@ export class SseStream {
 // ---------------------------------------------------------------- the header feeds
 
 interface Sse { stream: SseStream; subscribers: Map<string, string> }
-interface Queue { items: Array<{ box: string; event: Record<string, unknown> }>; running: boolean; dropped: number; /** #141: a backfill is being read: items queue, none is admitted. */ held?: boolean }
+interface Queue { items: Array<{ box: string; raws: Uint8Array[] }>; running: boolean; dropped: number; /** #141: a backfill is being read: items queue, none is admitted. */ held?: boolean }
 
-/** Headers per backfill event (#141): the chain app takes a run, `{kind: "header", raws}`, parents first. */
+/** Headers per backfill run (#141): one `headers` frame each, parents first (#156). */
 export const BACKFILL_RUN = 2016;
 
 export class Feeds {
@@ -298,9 +302,9 @@ export class Feeds {
     return backfill().then((raws) => {
       if (!raws.length) return;
       const have = new Set(raws.map((r) => Buffer.from(r).toString("hex")));
-      q.items = q.items.filter((x) => !(x.event.kind === "header" && x.event.raw instanceof Uint8Array && have.has(Buffer.from(x.event.raw).toString("hex"))));
+      q.items = q.items.map((x) => ({ ...x, raws: x.raws.filter((r) => !have.has(Buffer.from(r).toString("hex"))) })).filter((x) => x.raws.length > 0);
       const runs: Queue["items"] = [];
-      for (let i = 0; i < raws.length; i += BACKFILL_RUN) runs.push({ box: spec.box ?? DEFAULT_BOX, event: { kind: "header", raws: raws.slice(i, i + BACKFILL_RUN) } });
+      for (let i = 0; i < raws.length; i += BACKFILL_RUN) runs.push({ box: spec.box ?? DEFAULT_BOX, raws: raws.slice(i, i + BACKFILL_RUN) });
       q.items.unshift(...runs);
       this.say(handle, `feed: ${raws.length} header${raws.length === 1 ? "" : "s"} it lacks pushed first (the backfill), then the live stream`);
     }).catch((e) => this.say(handle, `feed: the backfill not read: ${(e as Error).message}`)).finally(() => {
@@ -369,10 +373,10 @@ export class Feeds {
     await Promise.all(streams);
   }
 
-  /** Queue an event for `handle` (bounded), and drain the queue serially. */
-  push(handle: string, box: string, event: Record<string, unknown>): void {
+  /** Queue a run of headers for `handle` (bounded), and drain the queue serially. */
+  push(handle: string, box: string, raws: Uint8Array[]): void {
     const q = this.queue(handle);
-    q.items.push({ box, event });
+    q.items.push({ box, raws });
     const max = this.o.maxQueue ?? 1000;
     if (q.items.length > max) {
       const n = q.items.length - max;
@@ -390,8 +394,8 @@ export class Feeds {
     q.running = true;
     try {
       while (q.items.length && !this.stopped && !q.held) {
-        const { box, event } = q.items.shift()!;
-        try { await this.o.admit(handle, box, event); } catch (e) { this.say(handle, `feed: ${String(event.kind)} not admitted: ${(e as Error).message}`); }
+        const { box, raws } = q.items.shift()!;
+        try { await this.o.headers(handle, box, raws); } catch (e) { this.say(handle, `feed: ${raws.length} header${raws.length === 1 ? "" : "s"} not taken: ${(e as Error).message}`); }
       }
     } finally { q.running = false; }
   }
@@ -401,6 +405,6 @@ export class Feeds {
     const hs = headersOf(data, (why) => { dropped = true; this.say("router", `feed ${url}: ${why}`); });
     if (!hs.length) { if (!dropped) this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
     this.listeners.get(url)?.(hs);
-    for (const [handle, box] of subscribers) for (const raw of hs) this.push(handle, box, { kind: "header", raw });
+    for (const [handle, box] of subscribers) this.push(handle, box, hs);
   }
 }

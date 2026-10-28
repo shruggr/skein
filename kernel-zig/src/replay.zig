@@ -107,6 +107,11 @@ pub fn copyLog(a: std.mem.Allocator, from: AnyStore, to: AnyStore) !void {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
         };
+        // #156: a `chain` event names the host chain's record: it and the blocks it reaches (its map
+        // nodes, its headers), as the source reads them (the host/chain exception), beside it.
+        if (Value.cidOf(e.get("event"))) |x| if (src.getOpt(a, x)) |ev| if (std.mem.eql(u8, Value.str(ev.get("kind")) orelse "", "chain")) {
+            if (Value.cidOf(ev.get("root"))) |root| try copyHostChain(a, src, dst, root);
+        };
         // A message's body (#40), beside its record.
         if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
             if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
@@ -160,6 +165,25 @@ fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @impor
         },
         .map => |m| for (m) |e| try copyLinked(a, src, dst, e.value),
         .array => |xs| for (xs) |x| try copyLinked(a, src, dst, x),
+        else => {},
+    }
+}
+
+/// The host chain record `c` (#156) and every block it reaches — dag-cbor nodes and the headers
+/// (bitcoin-block) they link — not already in `dst` (a subtree held is held whole).
+fn copyHostChain(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, c: []const u8) anyerror!void {
+    if (try dst.has(c)) return;
+    const b = (try src.bytes(a, c)) orelse return error.NotFound;
+    try dst.putBlock(c, b);
+    if (cidm.codecOf(c) != cidm.DAG_CBOR) return;
+    try copyChainLinks(a, src, dst, cbor.decode(a, b) catch return);
+}
+
+fn copyChainLinks(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
+    switch (v) {
+        .cid => |c| try copyHostChain(a, src, dst, c),
+        .array => |xs| for (xs) |x| try copyChainLinks(a, src, dst, x),
+        .map => |es| for (es) |e| try copyChainLinks(a, src, dst, e.value),
         else => {},
     }
 }

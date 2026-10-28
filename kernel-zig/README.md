@@ -71,6 +71,11 @@ commands with `mise exec --` or activate mise).
   families, write batches, pinned gets, iterators with an upper bound, LRU
   cache, bloom filter, `flush_wal`); not checked against 10.1.3's header. Not
   in the browser build.
+- **skein-sdk** (by tag URL and hash in `build.zig.zon`): the codecs (`cid`,
+  `cbor`, `mst`, `secp`) and, in the native build only, the `chain` module
+  (as `chainlib`: the host chain's tracker, #156), which brings bsvz (the
+  SDK's lazy dependency, fetched by URL and hash). `-Dwallet=false`: the
+  wallet module is never built.
 
 ```
 cd kernel-zig
@@ -667,6 +672,41 @@ CID; through a set's gate if the frame names `set`, else any block),
   file (or an LMDB set) into the database (`skein-kernel migrate --into
   rocksdb:<db dir>`), host stopped.
 
+### The host chain (issue #156)
+
+The header chain is the host's, held once and kept by the kernel process
+(`host_chain.zig`, over skein-sdk's `chain.host`: `Chain.add` with its checks
+and the heavier-branch rule, `image.loadMaps`). `skein-kernel host` writes it
+into the set `host/chain` of its database (every instance reads it through
+the chain exception, #133); `serve` writes it into its one instance's own
+store (SQLite; an LMDB serve instance's own set). Its record, under the
+pointer `host/chain`:
+
+```
+{kind: "host-chain", network, maps: {headers, heights}, tip: {height, hash}}
+```
+
+Three host-level frames (no `h`; on `serve`'s stdin too), run in order on the
+host process's own chain thread (an import of a whole chain takes seconds):
+
+| op | v | answers |
+|---|---|---|
+| `headers` | `{raws: [bytes]}`, parents first | `{root, height, hash, added, replaced}`; nothing new: nothing written, the record as it stands; a run that does not connect: refused |
+| `chain-import` | `{set, root}`: an image tree the instance `set` holds | the same; refused `NotEmpty` when the host chain has a tip, `NoChain` when the tree has no `chain/headers` |
+| `chain` | — | `{root, height, hash}` or null; also on the host-read socket (`skein-host chain`) |
+
+The network is `SKEIN_NETWORK` (default main; the router passes the host's).
+Writes serialize on one mutex; reads are by CID. The router (`feeds.ts`,
+`router.ts`) sends a `headers` frame per feed event (the backfill in runs of
+2016) and, on a changed record, the event `{kind: "chain", root, height}` in
+box `chain` to each subscribed running instance; once at each start and when
+an app taking box `chain` is installed; and `chain-import` from the
+instance's tree (its head `main`) when the host chain is empty, before its
+first event. The chain app (shruggr/skein-chain 0.7.0) points its state's
+`headers` and `heights` at the record (`State.pointAt`). `skein-kernel
+replay` copies, beside a `chain` event, the record and the blocks it reaches
+into the fresh store.
+
 ### How serve is put together (issue #33)
 
 ```
@@ -1055,7 +1095,8 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `equiv/git-clone.ts` (#91) | deploy by hash: the git app (shruggr/skein-git at a pinned commit, or `$SKEIN_GIT_DIR`) installed; a local repository (app-demo, and a commit without its manifest) served by `git http-backend` under node:http, the fetch provider's network real (`fetchHttp`); the owner's `git.clone {url, hash}` → the advertisement and one shallow pack (protocol v2, `maxBytes` on both), the commit and its tree kept, no head moved, `{tree, app}` answered in the owner's mailbox; the manifest read out of the stored tree by CID; `readStoredApp` + `planInstall` rebuild the same record CID (and an install of the checkout would write it too), nothing to send by `objects`; `head` + `dispatch` + `start`, the app's tick and a call answered; a hash not held (`not-found`), a server sending another commit's pack (`mismatch`), a non-http URL and a short hash (`bad-args`), no repository (`not-git`), no manifest (`no-manifest`); the clone again carries the installed app's state; a stranger refused; replayed | all ok; reproduced exactly |
 | `equiv/site.ts` (#92) | the management site (shruggr/skein-site, an app since #125: installed in the host skein with the owner's root row, its page at `/site/`) in headless Chrome, served by the host skein of a host as `skein-host run` runs it, with a wallet in the tab over a test key (`?key=`) funded through a stand-in for the 1sat services (one block's header, a broadcast that accepts — the only stand-in): create alice from the page (the onboarding app's route), nothing written into the wallet, the page opens alice's view (she serves no page: #125); the git app installed from the tree her image carries, then app-demo by hash (a local repository over `git http-backend`) — the clone's answer read from its thread, the record rebuilt in the page, the prompt approved, head + dispatch + start — and app-demo answers; the explorer renders her log (0 the genesis, 1 the claim) and dispatch table, another key's read refused; Your skeins is the host's answer (`GET /skeins?key=`, from the skeins' grants): the host skein and alice; the host skein's page lists alice; (#103) a handle registered from the page — the host's certificate kept in the wallet (`acquireCertificate`, direct), listed by `listCertificates`, "Your handles" resolving it, the Inbox prefilled with its messagebox; (#104) its profile set from the page (signed by the wallet, written to the mailbox instance), served by resolve, shown as signed by your key, found by "Find a handle"; (#99) a BRC-169 delivery listed and synced into the wallet; the stores replayed | all ok; every store reproduced exactly |
 | `equiv/chain.ts` (#78) | the chain module, shruggr/skein-chain at a pinned commit (or `$SKEIN_CHAIN_DIR`), installed by the owner's messages on a host with a fake Arcade (its broadcaster and `$status` provider) and called by its owner (#79: its rows take `event`, `$self` and `$owner`; a stranger is refused): the feed's headers; `ingest` proven → answered at once; `ingest` unproven → broadcast (the Arcade gets it) → `accepted` (the status provider's RECEIVED) → `proven` (Arcade's MINED proof, its header first), each an answer to the same request, a second watcher told too; refused by Arcade → `rejected`; `status`/`proof` reads by message and as a kernel call; then the same app at boot from a system tree (the default files, `bin/chain.wasm`, its rows, the default scope `chain/`); both stores replayed | all ok; both reproduced exactly |
-| `equiv/image-chain.ts` (#132) | the image carries the header chain: a fake chaintracks (history by height and a tip stream) with N regtest headers before the host starts and M more on its stream; the host builds the default image's chain part from genesis and grows it per header; a skein created from the image holds `chain/headers` and `chain/tip`; the chain app (shruggr/skein-chain 0.4.0) installed by the owner; the next header the first it takes, its chain state then every header from genesis (no feed replay); `skein-host add --image default` from the same image; replayed | all ok; reproduced exactly |
+| `equiv/image-chain.ts` (#132, #156) | the image carries the header chain: a fake chaintracks (history by height and a tip stream) with N regtest headers before the host starts and M more on its stream; the host builds the default image's chain part from genesis and grows it per header; a skein created from the image holds `chain/headers` and `chain/tip`; the empty host chain imports them at her first start (`chain-import`; `skein-host chain` shows the image's tip); the chain app (shruggr/skein-chain 0.7.0) installed by the owner: the install's `chain` event gives her chain state every header from genesis, no header fed, its maps the host chain's; the next header moves it on; `skein-host add --image default` from the same image; replayed; on SQLite and on RocksDB | all ok; reproduced exactly |
+| `equiv/hostchain.ts` (#156, #133) | two instances on one RocksDB host take three header runs: their `chain/state` `headers`/`heights` roots are the host chain record's, the tip read off them the host's; a proof on A verifies; a heavier branch replacing two headers reverts it (unproven, broadcast again) and leaves B on the new record; the gate (a host chain block through every set, A's record not through B's); a serve (SQLite) instance taking the same runs has the same `chain/state` CID and host chain record; every store replayed after the processes stopped; timings: one block's `headers` frame and its event stepped on 8 instances, `chain-import` of an image of `HOSTCHAIN_IMPORT` headers (default 20 160) on RocksDB and SQLite | all ok; reproduced exactly |
 | both backends (#96) | every store `replays.ts` checks also replayed into a set of a fresh LMDB environment (the same report, state CID and dump — the same CIDs) and, a SQLite one, migrated (`skein-kernel migrate`: the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts` and `sync.ts` run again with every host's instances sets of one environment (`SKEIN_EQUIV_STORE=lmdb`), their sets replayed the same way; run.sh prints the corpus's wall time on each | all identical |
 | RocksDB, one process (#158) | every store `replays.ts` checks also replayed into a set of a fresh RocksDB database (the same report, state CID and dump) and, a Zig one, migrated into one (the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts`, `sync.ts`, `claim.ts`, `host.ts` and `git-clone.ts` run again with every host's instances sets of one database inside one `skein-kernel host` (`SKEIN_EQUIV_STORE=rocksdb`), their sets replayed after it stopped | all identical |
 | `equiv/pool.ts` (#158) | 8 instances × 500 entries submitted interleaved: each final state CID equals a serial run's and SQLite's; the same with `SKEIN_WORKERS=1`; a `call` on an instance whose step waits on a `wallet` request answered late comes back before the step ends, with the state as committed (the entry pending); a block only bob put is absent for alice (her kernel, her call, the host's reader), a block in `host/chain` readable by both; each set replayed after the process stopped, the same state CID; timings (1 vs N workers, commit cost on RocksDB and SQLite) | all ok; timings printed |
@@ -1091,6 +1132,7 @@ re-genesis when they move to this build).
 | `secp.zig` | BRC-42 "anyone" keys, ECDSA verify as @bsv/sdk (`identity.ts`) |
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
 | `lmdb_store.zig`, `any_store.zig`, `migrate.zig`, `vendor/lmdb/` | the shared host store (#96, #133): a set of one LMDB environment, its member gate and `host/chain`; either backend for serve and the tools; `skein-kernel migrate`; LMDB 0.9.36 |
+| `host_chain.zig` | the host chain's tracker (#156): the SDK's `chain.host` over a kernel backend (`get`, `put`, `putBlock`), the frames `headers`, `chain-import`, `chain` |
 | `rocksdb_store.zig`, `host.zig` | the one-process kernel (#158): the RocksDB backend (a set of one database, its gate, a call's committed `View`); `skein-kernel host` (the I/O thread, the worker pool and run queue, the host-read socket) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `dispatch.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, the dispatch table (#77; `src/runtime/dispatch.ts` reads it), `programs.ts`, `syscalls.ts` |

@@ -59,6 +59,7 @@ const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const rocks = @import("rocksdb_store.zig");
 const any = @import("any_store.zig");
+const host_chain = @import("host_chain.zig");
 const AnyStore = any.AnyStore;
 const Value = cbor.Value;
 const Io = std.Io;
@@ -345,6 +346,14 @@ const Host = struct {
     reqs: Requests,
     /// Written by a worker that adds an `answer` waiter: the I/O thread's poll takes its bound.
     wake_fd: std.posix.fd_t = -1,
+    /// The host chain (#156): its tracker over the set `host/chain`, and the frames for it
+    /// (`headers`, `chain-import`) run in order on their own thread, off the I/O thread.
+    hc: host_chain.HostChain = undefined,
+    chain_set: ?*rocks.RocksStore = null,
+    cq_mu: Io.Mutex = .init,
+    cq_cond: Io.Condition = .init,
+    cq: std.ArrayListUnmanaged([]u8) = .empty,
+    cq_quit: bool = false,
 
     fn wakeIo(h: *Host) void {
         if (h.wake_fd >= 0) _ = std.posix.system.write(h.wake_fd, "w", 1);
@@ -401,6 +410,14 @@ const Host = struct {
         const eq = std.mem.eql;
         if (eq(u8, op, "say")) return sayRaw(Value.str(v) orelse "");
         if (handle == null) {
+            // #156: the host chain's frames go to its thread, in order (`chain` after a pending import).
+            if (host_chain.isOp(op)) {
+                h.cq_mu.lockUncancelable(h.io);
+                defer h.cq_mu.unlock(h.io);
+                try h.cq.append(h.gpa, try h.gpa.dupe(u8, bytes));
+                h.cq_cond.signal(h.io);
+                return;
+            }
             if (h.hostRead(a, op, id, v, null, Value.str(f.get("set")))) |ans| return h.send(ans);
             if (eq(u8, op, "instances")) {
                 h.q.lock();
@@ -460,6 +477,9 @@ const Host = struct {
                 const arr = a.alloc(Value, cids.len) catch |e| break :blk e;
                 for (cids, arr) |x, *y| y.* = cbor.cidv(x);
                 break :blk Value{ .array = arr };
+            } else if (eq(u8, op, "chain") and handle == null) {
+                // #156: the host chain as it stands: {root, height, hash} | null.
+                break :blk host_chain.run(&h.hc, a, op, v, null) catch |e| break :blk e;
             } else if (eq(u8, op, "state") and handle != null) {
                 const p = h.db.pointerOf(a, handle.?, "state") catch |e| break :blk e;
                 break :blk if (p) |x| cbor.cidv(x) else .null;
@@ -908,6 +928,48 @@ const Host = struct {
     }
 };
 
+// ------------------------------------------------------------------ the host chain's thread
+
+/// The host chain's writes (#156: `headers`, `chain-import`), in the order they came, answered as
+/// they are done: off the I/O thread (an import of a whole chain takes seconds), one at a time.
+fn chainThread(h: *Host) void {
+    while (true) {
+        const bytes = blk: {
+            h.cq_mu.lockUncancelable(h.io);
+            defer h.cq_mu.unlock(h.io);
+            while (h.cq.items.len == 0 and !h.cq_quit) h.cq_cond.waitUncancelable(h.io, &h.cq_mu);
+            if (h.cq.items.len == 0) return;
+            break :blk h.cq.orderedRemove(0);
+        };
+        defer h.gpa.free(bytes);
+        var arena = std.heap.ArenaAllocator.init(h.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const f = cbor.decode(a, bytes) catch continue;
+        const op = Value.str(f.get("op")) orelse continue;
+        const id: i64 = @intCast(Value.intOf(f.get("id")) orelse 0);
+        const v = f.get("v") orelse .null;
+        // chain-import's set: the instance whose set holds the image's blocks (read through its gate).
+        var from_ctx: SetReader = .{ .db = h.db, .set = Value.str(v.get("set")) orelse "" };
+        const from: ?host_chain.Reader = if (from_ctx.set.len > 0) .{ .ctx = &from_ctx, .get = SetReader.get } else null;
+        const ans = host_chain.run(&h.hc, a, op, v, from) catch |err| {
+            h.reply(a, null, id, null, std.fmt.allocPrint(a, "{s}: {s}", .{ op, @errorName(err) }) catch @errorName(err), null);
+            continue;
+        };
+        h.reply(a, null, id, ans, null, null);
+    }
+}
+
+/// A set's blocks, read through its gate (an image's, for `chain-import`).
+const SetReader = struct {
+    db: *rocks.Db,
+    set: []const u8,
+    fn get(ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8 {
+        const r: *SetReader = @ptrCast(@alignCast(ctx));
+        return r.db.setGet(a, r.set, cid);
+    }
+};
+
 // ------------------------------------------------------------------ the host-read socket
 
 const Client = struct { fd: std.posix.fd_t, r: ipc.Reader };
@@ -976,7 +1038,7 @@ fn serveClient(h: *Host, cl: *Client) bool {
         const ans = h.hostRead(a, op, id, f.get("v") orelse .null, Value.str(f.get("h")), Value.str(f.get("set"))) orelse blk: {
             var m = cbor.MapBuilder.init(a);
             m.put("re", cbor.int(id)) catch return false;
-            m.put("error", cbor.string("only the host reads (get, has, members, state) here")) catch return false;
+            m.put("error", cbor.string("only the host reads (get, has, members, state, chain) here")) catch return false;
             break :blk m.value();
         };
         ipc.write(h.io, .{ .handle = cl.fd, .flags = .{ .nonblocking = false } }, a, ans) catch return false;
@@ -1006,6 +1068,13 @@ pub fn main(gpa: std.mem.Allocator, io: Io) !void {
     const r = try runner.Runner.init(gpa);
     r.io = io;
     var host = Host{ .gpa = gpa, .io = io, .db = db, .dir = dir, .runner = r, .q = Queue.init(gpa, io), .reqs = Requests.init(gpa, io) };
+    const network = host_chain.hostNetwork() catch {
+        sayRaw("skein-kernel host: SKEIN_NETWORK is main, test or regtest");
+        std.process.exit(1);
+    };
+    host.chain_set = try rocks.RocksStore.openChain(gpa, db);
+    host.hc = host_chain.HostChain.init(host.chain_set.?.backend(), network, io);
+    const chain_thread = try std.Thread.spawn(.{ .stack_size = 64 << 20, .allocator = gpa }, chainThread, .{&host});
     var io_wake: [2]std.posix.fd_t = .{ -1, -1 };
     if (std.posix.errno(std.posix.system.pipe2(&io_wake, .{ .CLOEXEC = true, .NONBLOCK = true })) != .SUCCESS) return error.Pipe;
     host.wake_fd = io_wake[1];
@@ -1086,6 +1155,13 @@ pub fn main(gpa: std.mem.Allocator, io: Io) !void {
         }
     }
     for (threads) |t| t.join();
+    {
+        host.cq_mu.lockUncancelable(io);
+        host.cq_quit = true;
+        host.cq_cond.broadcast(io);
+        host.cq_mu.unlock(io);
+    }
+    chain_thread.join();
     _ = std.posix.system.write(wake[1], "x", 1);
     if (sock_thread) |t| t.join();
     // Every instance stopped, its store closed (its last commit), the database flushed.
@@ -1108,6 +1184,7 @@ pub fn main(gpa: std.mem.Allocator, io: Io) !void {
             _ = std.posix.system.unlink(z.ptr);
         } else |_| {}
     }
+    if (host.chain_set) |cs| cs.close();
     db.close(gpa);
     if (stop_id) |id| {
         var arena = std.heap.ArenaAllocator.init(gpa);

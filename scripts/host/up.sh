@@ -154,7 +154,7 @@ fi
 # The chain app takes its network from the genesis default SKEIN_NETWORK sets (defaults.walletNetwork; SKEIN_HEADERS_URL must feed that network's headers).
 app_dir() { if [ -n "$1" ]; then echo "$1"; else checkout "$2"; fi; }
 if [ -n "$hostskein" ]; then
-  for dir in "$(app_dir "${SKEIN_CHAIN_DIR:-}" "${SKEIN_CHAIN_APP:-https://github.com/shruggr/skein-chain#v0.6.0}")" \
+  for dir in "$(app_dir "${SKEIN_CHAIN_DIR:-}" "${SKEIN_CHAIN_APP:-https://github.com/shruggr/skein-chain#v0.7.0}")" \
              "$(app_dir "${SKEIN_GIT_DIR:-}" "${SKEIN_GIT_APP:-https://github.com/shruggr/skein-git#v0.2.0}")" \
              "$(app_dir "${SKEIN_SITE_DIR:-}" "${SKEIN_SITE_APP:-https://github.com/shruggr/skein-site#v0.10.0}")"; do
     owner_send "$hostskein" install "$dir" || echo "install $dir into $hostskein failed (above)" >&2

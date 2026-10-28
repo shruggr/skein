@@ -8,13 +8,20 @@
 //   - a skein created from the default image (the instance manager's
 //     create, claimed by its owner's signed claim) boots from the image as it
 //     stands: its tree carries chain/headers and chain/tip (N + M);
+//   - the host chain (#156) was empty: at her first start the host imported
+//     the image's chain/headers into it (`chain-import`), so `skein-host
+//     chain` shows the image's tip (N + M);
 //   - its owner installs the chain app (shruggr/skein-chain at the pinned
-//     commit, or $SKEIN_CHAIN_DIR); the next header the stream brings is the
-//     first header event the skein ever takes, and its chain state then
-//     holds the whole chain from genesis — every one of the N + M headers it
-//     was never fed, and the new one (no feed replay);
+//     commit, or $SKEIN_CHAIN_DIR): at the install the host sends the host
+//     chain's record (a `chain` event) and her chain state holds the whole
+//     chain from genesis after that first step — no header from the feed;
+//     the next header the stream brings moves it one on (its maps the host
+//     chain's: pointed at, not copied);
 //   - `skein-host add --image default` boots from the same image;
 //   - the skein's store replays to itself exactly.
+//
+// SKEIN_EQUIV_STORE=rocksdb: the instances are sets of one RocksDB database
+// in one `skein-kernel host` process (the host chain its set host/chain).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/image-chain.ts
 
@@ -33,10 +40,12 @@ import { testHost, until } from "../../src/host/testhost.ts";
 import { ownerCli } from "../../src/testapps.ts";
 import { readLog } from "../../src/runtime/log.ts";
 import { parseTree } from "../../src/runtime/tree.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { storeSpec } from "../../src/runtime/index-store.ts";
+import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
 
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -87,8 +96,9 @@ const N = 30, M = 20;
 mineTo(N);
 const afters: Array<() => unknown> = [];
 const ownerKey = PrivateKey.fromRandom();
-const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey, genesis: { defaults: { walletNetwork: "regtest" } }, headersFeed: `${ctUrl}/tip/stream` });
+const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey, genesis: { defaults: { walletNetwork: "regtest" } }, headersFeed: `${ctUrl}/tip/stream`, lmdb: LMDB_MODE, rocks: ROCKS_MODE });
 let store = "";
+const specOf = (handle: string) => storeSpec(h.db.get(handle)!);
 try {
   // ------------------------------------------------ the host: history from genesis, then the stream
   await h.router.start();
@@ -106,7 +116,7 @@ try {
   const k = async () => (await h.router.hydrate("alice")).kernel;
   const main_ = await (await k()).call("head", "main") as CID;
   check(main_.toString() === h.db.setting("image") && main_.toString() === h.db.get("alice")!.tree, `her tree is the image as it stood (host.db image ${String(h.db.setting("image")).slice(0, 16)}…)`);
-  const view = openStoreFile(h.db.get("alice")!.store, { readOnly: true });
+  const view = openStoreFile(storeSpec(h.db.get("alice")!), { readOnly: true });
   const ls = async (cid: CID) => parseTree(await view.bytes(cid));
   const chainDir = (await ls(main_)).find((e) => e.name === "chain")!;
   const parts = await ls(chainDir.cid);
@@ -123,37 +133,53 @@ try {
   out.push(...o.out); err.push(...o.err);
   await h.router.settled();
   check(o.code === 0, `the owner installs the chain app into alice: exit ${o.code} ${err.join(" ")}`);
-  check(!(await (await k()).call("head", "chain/state")), "no chain state yet: no header has reached her");
+  // #156: the host chain, imported from her image at her first start (the host's was empty).
+  const hc: string[] = [];
+  const hcCode = await main(["chain", "alice"], { vars: { SKEIN_HOME: h.home, HOME: h.home, ...(ROCKS_MODE ? { SKEIN_STORE_ROCKSDB: join(h.home, "store-rocksdb") } : {}) }, out: (l) => hc.push(l), err: (l) => hc.push(l) });
+  check(hcCode === 0 && hc[0]?.split("\t")[0] === String(N + M) && hc[0]?.split("\t")[1] === display(sha256d(chain[N + M]!)), `skein-host chain: the host chain holds the image's chain, tip ${N + M} (${hc.join(" ")})`);
+  // The install's event: her chain state after its first step — the whole chain, no header from the feed.
+  await until("alice's chain state", async () => (await (await k()).call("head", "chain/state")) ?? undefined, 20_000);
+  await h.router.settled();
+  const walkHeaders = async (kernel: Awaited<ReturnType<typeof k>>, node: CID | null, entries: Array<[number, CID]>) => {
+    if (!node) return;
+    const [left, es] = await kernel.store.get(node) as unknown as [CID | null, Array<[Uint8Array, CID, CID | null]>];
+    await walkHeaders(kernel, left, entries);
+    for (const [key, value, right] of es) { entries.push([Buffer.from(key).readUInt32BE(0), value]); await walkHeaders(kernel, right, entries); }
+  };
+  {
+    const kernel = await k();
+    const st0 = await kernel.store.get(await kernel.call("head", "chain/state") as CID) as { kind: string; network: string; maps: Record<string, CID | null> };
+    const es0: Array<[number, CID]> = [];
+    await walkHeaders(kernel, st0.maps.headers ?? null, es0);
+    check(st0.kind === "chain-state" && es0.length === N + M + 1 && es0.at(-1)?.[0] === N + M, `born with the chain: after the install's event her chain state holds heights 0…${es0.at(-1)?.[0]} (${es0.length} headers), no header fed`);
+    const hcRoot = await kernel.store.get(Cid.parse(hc[0]!.split("\t")[2]!)) as { maps: { headers: CID } };
+    check(String(st0.maps.headers) === String(hcRoot.maps.headers), "its headers map is the host chain's (pointed at, not copied)");
+  }
   await until("alice on the host's headers feed", () => h.lines.some((l) => l.includes("alice: subscribed to the host's headers feed")) || undefined, 10_000);
+  const before = String(await (await k()).call("head", "chain/state"));
   mineTo(N + M + 1);
   tipEvent(chain.at(-1)!, N + M + 1);
-  await until("alice's chain state", async () => (await (await k()).call("head", "chain/state")) ?? undefined, 20_000);
+  await until("alice's chain state moved on", async () => String(await (await k()).call("head", "chain/state")) !== before || undefined, 20_000);
   await h.router.settled();
   const kernel = await k();
   const stateCid = await kernel.call("head", "chain/state") as CID;
   const state = await kernel.store.get(stateCid) as { kind: string; network: string; maps: Record<string, CID | null> };
   // The best chain, read off the headers map (the kernel's Merkle search tree: [left, [[key, value, right] …]]).
   const entries: Array<[number, CID]> = [];
-  const walk = async (node: CID | null) => {
-    if (!node) return;
-    const [left, es] = await kernel.store.get(node) as unknown as [CID | null, Array<[Uint8Array, CID, CID | null]>];
-    await walk(left);
-    for (const [key, value, right] of es) { entries.push([Buffer.from(key).readUInt32BE(0), value]); await walk(right); }
-  };
-  await walk(state.maps.headers ?? null);
+  await walkHeaders(kernel, state.maps.headers ?? null, entries);
   const want = chain.slice(0, N + M + 2);
   const same = entries.length === want.length && entries.every(([height, cid], i) => height === i && Buffer.from(cid.multihash.digest).equals(sha256d(want[i]!)));
   check(state.kind === "chain-state" && state.network === "regtest" && same, `her chain state holds the whole chain from genesis: heights 0…${entries.at(-1)?.[0]} (${entries.length} headers; the image's ${N + M + 1} and the stream's one)`);
-  const view2 = openStoreFile(h.db.get("alice")!.store, { readOnly: true });
-  const headerEvents = [];
+  const view2 = openStoreFile(storeSpec(h.db.get("alice")!), { readOnly: true });
+  const chainEvents: Array<{ kind?: string; height?: number }> = [];
   for (const { entry } of await readLog(view2)) {
     const ec = (entry as unknown as { event?: CID }).event;
     if (!ec) continue;
-    const ev = await view2.get(ec).catch(() => undefined) as { kind?: string } | undefined;
-    if (ev?.kind === "header") headerEvents.push(ev);
+    const ev = await view2.get(ec).catch(() => undefined) as { kind?: string; height?: number } | undefined;
+    if (ev?.kind === "chain" || ev?.kind === "header") chainEvents.push(ev);
   }
   view2.close();
-  check(headerEvents.length === 1, `no feed replay: the one header event in her log is the new tip's (${headerEvents.length})`);
+  check(chainEvents.length === 2 && chainEvents.every((e) => e.kind === "chain") && chainEvents.map((e) => Number(e.height)).join(",") === `${N + M},${N + M + 1}`, `no feed replay: two chain events in her log, the install's and the new tip's (${chainEvents.map((e) => `${e.kind} ${e.height}`).join(", ")})`);
   const blocksHeld = await Promise.all(chain.slice(0, N + M + 1).map((raw) => kernel.hasBlock(Cid.createV1(0xb0, Digest.create(0x56, sha256d(raw))))));
   check(blocksHeld.every(Boolean), "every header of the image is a bitcoin-block block in her store");
 
@@ -161,7 +187,7 @@ try {
   const outs: string[] = [], errs: string[] = [];
   const code = await main(["add", "fresh", "--image", "default"], { vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => outs.push(l), err: (l) => errs.push(l) });
   check(code === 0 && outs.some((l) => l.includes(`booted from the image ${h.db.setting("image")}`)), `skein-host add fresh --image default boots from the image as it stands: exit ${code} ${[...outs, ...errs].filter((l) => /booted|fresh/.test(l)).join(" ")}`);
-  store = h.db.get("alice")!.store;
+  store = specOf("alice");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
@@ -178,5 +204,5 @@ try {
   if (!process.env.KEEP) await removeHome?.();
 }
 
-process.stdout.write(failures ? `image-chain: ${failures} FAILED\n` : "image-chain: all ok\n");
+process.stdout.write(failures ? `image-chain (${BACKEND}): ${failures} FAILED\n` : `image-chain (${BACKEND}): all ok\n`);
 process.exit(failures ? 1 : 0);

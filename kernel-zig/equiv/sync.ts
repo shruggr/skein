@@ -48,7 +48,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
 const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "924d60f559503e9df59f596bed0162f171f1e768";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-sync-"));
@@ -184,7 +184,7 @@ function mineAlone(t: Transaction): number {
   return height;
 }
 const feedHeaders = async (h: Name, from = 1) => {
-  for (let i = from; i <= headers.length; i++) await r(h).admitEvent(h, "chain", { kind: "header", raw: headers[i - 1]! });
+  for (let i = from; i <= headers.length; i++) await r(h).chainHeaders(h, "chain", [headers[i - 1]!]);
   await r(h).settled();
 };
 

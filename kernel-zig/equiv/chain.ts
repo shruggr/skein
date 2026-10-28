@@ -49,7 +49,7 @@ import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -127,7 +127,7 @@ try {
   check(routeLines.some((l) => l.startsWith("route event chain ")) && routeLines.some((l) => l.startsWith("route mailbox chain [kernel.beef] ")) && routeLines.some((l) => l.startsWith("route mailbox chain/status ")) && routeLines.length === 3,
     `the prompt shows its routes (#143: no sender; the BEEF decoded at the door): ${routeLines.join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.6.0", "the head chain/app is the app record (0.6.0)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.7.0", "the head chain/app is the app record (0.7.0)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   check(rows.length === 3 && rows.every((r) => !("sender" in r) && !("optional" in r)) && rows.map((r) => `${r.transport} ${r.address}`).join(",") === "event chain,mailbox chain,mailbox chain/status"
     && JSON.stringify(rows[1]!.filters) === '["kernel.beef"]',
@@ -141,7 +141,7 @@ try {
   const fundTxid = fund.id("hex");
   fund.merklePath = new MerklePath(1, [[{ offset: 0, hash: fundTxid, txid: true }]]);
   const h1 = mine(sha256d(REGTEST_GENESIS), internal(fundTxid), 1_790_200_000);
-  await h.router.admitEvent("ch", "chain", { kind: "header", raw: h1 });
+  await h.router.chainHeaders("ch", "chain", [h1]);
   await h.router.settled();
   const state = async () => {
     const r = await record("chain/state") as { kind?: string; network?: string } | undefined;
@@ -189,7 +189,7 @@ try {
   check(!!st.maps.unproven && !!st.maps.broadcasts, "at rest unproven: the broadcast registered (maps unproven and broadcasts)");
   // Mined at 2: the header, then Arcade's MINED with its path.
   const h2 = mine(sha256d(h1), internal(childTxid), 1_790_200_600);
-  await h.router.admitEvent("ch", "chain", { kind: "header", raw: h2 });
+  await h.router.chainHeaders("ch", "chain", [h2]);
   await h.router.settled();
   const path = new MerklePath(2, [[{ offset: 0, hash: childTxid, txid: true }]]);
   arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h2)), blockHeight: 2, merklePath: path.toHex() });
@@ -257,7 +257,7 @@ try {
   const src = await dirSource(sys);
   await h.router.bootRow("boot", { kind: "tree", root: src.root, objects: src.objects });
   await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: h.origin("caller") });
-  for (const raw of [h1, h2]) await h.router.admitEvent("boot", "chain", { kind: "header", raw });
+  for (const raw of [h1, h2]) await h.router.chainHeaders("boot", "chain", [raw]);
   await h.router.settled();
   const bootStore = storeSpec(h.db.get("boot")!);
   const bootBox = new RawBox(callerWallet, `${h.base}/@boot`);
@@ -270,7 +270,7 @@ try {
   const ab = await answers(rb, 1, "accepted at boot");
   check(ab[0]?.result?.state === "accepted", `booted with the chain app: ingest unproven → broadcast → accepted (${ab[0]?.result?.state})`);
   const h3 = mine(sha256d(h2), internal(c3), 1_790_201_200);
-  for (const hh of ["boot", "ch"]) await h.router.admitEvent(hh, "chain", { kind: "header", raw: h3 });
+  for (const hh of ["boot", "ch"]) await h.router.chainHeaders(hh, "chain", [h3]);
   await h.router.settled();
   arcade.emit(c3, { txStatus: "MINED", blockHash: display(sha256d(h3)), blockHeight: 3, merklePath: new MerklePath(3, [[{ offset: 0, hash: c3, txid: true }]]).toHex() });
   const ab2 = await answers(rb, 2, "proven at boot");

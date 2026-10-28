@@ -168,7 +168,7 @@ try {
     const time = 1_790_200_000 + height * 600;
     tip = mine(sha256d(tip), sha256d(Buffer.concat([internal(cb), internal(id)])), time);
     times.set(id, time);
-    await h.router.admitEvent(handle, "chain", { kind: "header", raw: tip });
+    await h.router.chainHeaders(handle, "chain", [tip]);
     await h.router.settled();
   };
   const fund = tx([{ from: "72".repeat(32), vout: 0 }], Array.from({ length: 6 }, () => ({ sats: 10_000, lock: p2pkh(pkh(alice)) })));

@@ -11,6 +11,9 @@
 //                        HTTP exchange for the kernel's authfetch — the kernel signs and verifies, this
 //                        side moves the bytes: {method, url, headers, body, timeoutMs?} → {status,
 //                        headers, body} | {error})
+//   the host chain       headers {raws} · chain-import {set, root} · chain (#156: the header chain the
+//                        host keeps once, in the kernel process — a serve instance's in its own store —
+//                        → {root, height, hash, added?, replaced?} | null)
 //   the kernel tells     emit (#70: a signed message for the host to carry out — {message, body,
 //                        transport, address}, a `local` provider's or the libp2p node's, the answer
 //                        coming back as an entry; #65: a broadcast event, transport `event`) · stop
@@ -52,6 +55,9 @@ export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Arra
 
 export { DoorAnswered, doorAnswer, type DoorAnswer } from "./door-answer.ts";
 import { DoorAnswered, doorAnswer } from "./door-answer.ts";
+/** The host chain as the kernel answers it (#156): its record's CID and tip; `headers`/`chain-import` also count. */
+export type HostChainTip = { root: CID; height: number; hash: string; added?: number; replaced?: number };
+
 /** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
 export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
@@ -148,7 +154,18 @@ export abstract class KernelSurface {
   }
   async idle(): Promise<void> { await this.call("idle"); }
   async start(): Promise<void> { await this.call("start"); }
+  /** #156: a run of headers (parents first) into the host chain this instance reads; its record and tip after. */
+  async chainHeaders(raws: Uint8Array[]): Promise<HostChainTip> { return tipOf(await this.call("headers", { raws })); }
+  /** #156: an image's chain/headers (the tree `root`, held by this instance) into the empty host chain. */
+  async chainImport(root: CID): Promise<HostChainTip> { return tipOf(await this.call("chain-import", { set: this.o.handle, root })); }
+  /** #156: the host chain as it stands, or undefined (empty). */
+  async chainTip(): Promise<HostChainTip | undefined> { const v = await this.call("chain"); return v == null ? undefined : tipOf(v); }
   async tip(): Promise<CID | undefined> { return this.store.log.tip(); }
+}
+
+function tipOf(v: unknown): HostChainTip {
+  const o = v as { root: CID; height: number | bigint; hash: string; added?: number | bigint; replaced?: number | bigint };
+  return { root: o.root, height: Number(o.height), hash: o.hash, ...(o.added !== undefined ? { added: Number(o.added) } : {}), ...(o.replaced !== undefined ? { replaced: Number(o.replaced) } : {}) };
 }
 
 /**
@@ -363,6 +380,8 @@ export class KernelHost {
   private closing = new Map<string, Promise<unknown>>();
   private done?: Promise<void>;
   private dead = false;
+  /** #156: the last `headers` runs asked for (their answers shared). */
+  private recent = new Map<string, Promise<HostChainTip>>();
 
   private constructor(dir: string, o: KernelHostOptions) { this.dir = dir; this.o = o; }
 
@@ -484,6 +503,26 @@ export class KernelHost {
   }
   async state(set: string): Promise<CID | undefined> { return (await this.request(set, "state") as CID | null) ?? undefined; }
 
+  /**
+   * #156: a run of headers into the host chain (the frame `headers`, run in order on the process's
+   * chain thread). The same run asked for again while it is in flight or just answered (every
+   * instance subscribed to one feed asks for the same SSE event) is one frame: its answer shared.
+   */
+  chainHeaders(raws: Uint8Array[]): Promise<HostChainTip> {
+    const key = raws.map((r) => Buffer.from(r).toString("hex")).join("");
+    const had = this.recent.get(key);
+    if (had) return had;
+    const p = this.request(undefined, "headers", { raws }).then(tipOf);
+    this.recent.set(key, p);
+    p.catch(() => this.recent.delete(key));
+    while (this.recent.size > 64) this.recent.delete(this.recent.keys().next().value!);
+    return p;
+  }
+  /** #156: an image's chain/headers (the tree `root`, whose blocks the set `set` holds) into the empty host chain. */
+  async chainImport(set: string, root: CID): Promise<HostChainTip> { return tipOf(await this.request(undefined, "chain-import", { set, root })); }
+  /** #156: the host chain as it stands, or undefined (empty). */
+  async chainTip(): Promise<HostChainTip | undefined> { const v = await this.request(undefined, "chain"); return v == null ? undefined : tipOf(v); }
+
   /** One holder less; the last one's release stops the process (every instance closed, the database flushed). */
   async release(): Promise<void> {
     if (--this.holders > 0) return;
@@ -537,6 +576,11 @@ export class HostedKernel extends KernelSurface {
   }
 
   async running(identity: string): Promise<void> { this.host.tell(this.o.handle, "running", identity); }
+
+  /** #156: the host chain is the process's, not the instance's: its host-level frames. */
+  override chainHeaders(raws: Uint8Array[]): Promise<HostChainTip> { return this.host.chainHeaders(raws); }
+  override chainImport(root: CID): Promise<HostChainTip> { return this.host.chainImport(this.o.handle, root); }
+  override chainTip(): Promise<HostChainTip | undefined> { return this.host.chainTip(); }
 
   /** Close the instance in the process (its inbox drained first); the process keeps running. */
   async stop(): Promise<void> {

@@ -79,7 +79,7 @@ import { signedSubmitter } from "../../src/testapps.ts";
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
 const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "e1211e10f7a1ed128a0d416c13a8433f33dc6151"; // v0.12.1
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));
@@ -334,7 +334,7 @@ const router = new Router({
   db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   // #66: a client waits on its request's thread; the gate's pending broadcast answers 503 + Retry-After at this bound.
   answerWaitMs: 6000,
-  kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  kernel: { command: kernel, env: { SKEIN_HOME: home } }, network: "regtest", // #156: the host chain is regtest (the trees' own walletNetwork is per instance)
   arc: { url: arcade.url, token: "the-host-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 500, max: 2000 },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
@@ -352,13 +352,15 @@ async function entriesSince(handle: string, from: number): Promise<Array<{ cid: 
 }
 // #73: a fourth instance, on a router with no Arcade — no status provider in its address book (its `status` row
 // left out), so no status ever arrives: the chain app answers only at the proof.
-const noarcDb = specFor(home, "noarc");
+// #156: a host of its own (its own chain: in RocksDB mode, its own database and so its own host chain).
+const noarcHome = join(home, "noarc-host");
+const noarcDb = specFor(noarcHome, "noarc");
 const noarcHostDb = new HostDb(join(home, "noarc-host.db"));
-noarcHostDb.add("noarc", { store: storeFor(home, "noarc") });
+noarcHostDb.add("noarc", { store: storeFor(noarcHome, "noarc") });
 const noarcRouter = new Router({
   db: noarcHostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   answerWaitMs: 300,
-  kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  kernel: { command: kernel, env: { SKEIN_HOME: home } }, network: "regtest", // #156: the host chain is regtest (the trees' own walletNetwork is per instance)
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [noarc:${s}] ${l}\n`); },
 });
 
@@ -414,7 +416,7 @@ try {
     headers.push(mine(prev, h === 1 ? root1 : sha256d(Buffer.from(`filler ${h}`)), 1_790_000_000 + h * 600));
     prev = sha256d(headers.at(-1)!);
   }
-  for (const raw of headers) for (const h of ["overlay", "gossip", "gate"]) await router.admitEvent(h, "chain", { kind: "header", raw });
+  for (const raw of headers) for (const h of ["overlay", "gossip", "gate"]) await router.chainHeaders(h, "chain", [raw]);
   await router.settled();
   const roots = new Map<number, string>(headers.map((h, i) => [i + 1, Buffer.from(h.subarray(36, 68)).reverse().toString("hex")]));
   const tracker: ChainTracker = { isValidRootForHeight: async (root, height) => roots.get(height) === root, currentHeight: async () => headers.length };
@@ -742,7 +744,7 @@ try {
   const h4 = mine(prev, sha256d(Buffer.concat([n01, n23])), 1_790_000_000 + 4 * 600);
   headers.push(h4);
   roots.set(4, Buffer.from(h4.subarray(36, 68)).reverse().toString("hex"));
-  await router.admitEvent("overlay", "chain", { kind: "header", raw: h4 });
+  await router.chainHeaders("overlay", "chain", [h4]);
   const disp = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
   const bumpOf = (i: number) => new MerklePath(4, [
     [i ^ 1, i].sort().map((o) => o === i ? { offset: o, hash: leaves[o]!, txid: true } : { offset: o, hash: leaves[o]! }),
@@ -798,7 +800,7 @@ try {
   const h5 = mine(sha256d(h4), sha256d(Buffer.concat([m01, m23])), 1_790_000_000 + 5 * 600);
   headers.push(h5);
   roots.set(5, Buffer.from(h5.subarray(36, 68)).reverse().toString("hex"));
-  await router.admitEvent("overlay", "chain", { kind: "header", raw: h5 });
+  await router.chainHeaders("overlay", "chain", [h5]);
   await router.settled();
   const bump5 = (i: number) => new MerklePath(5, [
     [i ^ 1, i].sort().map((o) => o === i ? { offset: o, hash: leaves5[o]!, txid: true } : { offset: o, hash: leaves5[o]! }),
@@ -829,7 +831,7 @@ try {
   const filler6 = "f6".repeat(32);
   const h6 = mine(sha256d(h5), sha256d(Buffer.concat([internal(filler6), internal(m.id("hex"))])), 1_790_000_000 + 6 * 600);
   roots.set(6, Buffer.from(h6.subarray(36, 68)).reverse().toString("hex"));
-  await router.admitEvent("overlay", "chain", { kind: "header", raw: h6 });
+  await router.chainHeaders("overlay", "chain", [h6]);
   await router.settled();
   m.merklePath = new MerklePath(6, [[{ offset: 0, hash: filler6 }, { offset: 1, hash: m.id("hex"), txid: true }]]);
   const postsBefore = arcade.posts.length;
@@ -940,7 +942,7 @@ try {
   nFund.merklePath = new MerklePath(1, [[{ offset: 0, hash: nCb }, { offset: 1, hash: nFundTxid, txid: true }]]);
   const nRoot1 = sha256d(Buffer.concat([internal(nCb), internal(nFundTxid)]));
   const nH1 = mine(sha256d(REGTEST_GENESIS), nRoot1, 1_790_010_000);
-  await noarcRouter.admitEvent("noarc", "chain", { kind: "header", raw: nH1 });
+  await noarcRouter.chainHeaders("noarc", "chain", [nH1]);
   await noarcRouter.settled();
   const nTok = new Transaction();
   nTok.addInput({ sourceTransaction: nFund, sourceOutputIndex: 0, unlockingScriptTemplate: new P2PKH().unlock(bob), sequence: 0xffffffff });
@@ -961,7 +963,7 @@ try {
   const nFiller = "f7".repeat(32);
   const nH2 = mine(sha256d(nH1), sha256d(Buffer.concat([internal(nFiller), internal(nTokId)])), 1_790_010_600);
   const nPath = new MerklePath(2, [[{ offset: 0, hash: nFiller }, { offset: 1, hash: nTokId, txid: true }]]);
-  await noarcRouter.admitEvent("noarc", "chain", { kind: "header", raw: nH2 });
+  await noarcRouter.chainHeaders("noarc", "chain", [nH2]);
   await noarcRouter.admitEvent("noarc", "chain", { kind: "proof", subject: txCid(nTokId), txid: nTokId, path: Uint8Array.from(nPath.toBinary()) });
   await noarcRouter.settled();
   await until("the no-Arcade instance admits at the proof", async () => { await noarcRouter.settled(); return (await noarcLive()) > 0 ? true : undefined; }, 15_000).catch(() => undefined);
@@ -990,7 +992,9 @@ const freePort = () => new Promise<number>((resolve, reject) => {
 });
 const G = ["ga", "gb", "gc"] as const;
 type GH = typeof G[number];
-const gDb: Record<GH, string> = { ga: specFor(home, "ga"), gb: specFor(home, "gb"), gc: specFor(home, "gc") };
+// #156: three hosts, each its own (in RocksDB mode its own database: its own host chain).
+const gHome = (h: GH) => join(home, `host-${h}`);
+const gDb: Record<GH, string> = { ga: specFor(gHome("ga"), "ga"), gb: specFor(gHome("gb"), "gb"), gc: specFor(gHome("gc"), "gc") };
 const p2pSigner = new Signer(new PrivateKey("a77e57", 16));
 const gossipTree = (dir: string, topics: string[]) => {
   cpSync(sys, dir, { recursive: true });
@@ -1009,13 +1013,13 @@ try {
   const idOf = (h: GH) => peerIdOf(p2pSigner.peerKey(h)).toString();
   for (const h of G) {
     const hdb = new HostDb(join(home, `${h}-host.db`));
-    hdb.add(h, { store: storeFor(home, h) });
+    hdb.add(h, { store: storeFor(gHome(h), h) });
     g[h] = {
       hdb,
       r: new Router({
         db: hdb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
         providerKeyFor: (n) => p2pSigner.providerKey(n), peerKeyFor: (x) => p2pSigner.peerKey(x), answerWaitMs: 6000,
-        kernel: { command: kernel, env: { SKEIN_HOME: home } },
+        kernel: { command: kernel, env: { SKEIN_HOME: home } }, network: "regtest", // #156: the host chain is regtest (the trees' own walletNetwork is per instance)
         ...(h === "ga" ? { arc: { url: arcade74.url, token: "the-ga-arcade-token", events: arcade74.eventsUrl }, arcRetry: { min: 500, max: 2000 } } : {}),
         libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports[h]}`], bootstrap: G.filter((x) => x !== h).map((x) => `/ip4/127.0.0.1/tcp/${ports[x]}/p2p/${idOf(x)}`), dht: "off", relays: [], mdns: false },
         libp2pDiscoveryMs: 300,
@@ -1049,7 +1053,7 @@ try {
   const logLenOf = async (h: GH) => { const k = await kOf(h); return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
   const headOf = async (h: GH, name: string) => String(await (await kOf(h)).call("head", name));
   const settleAll = async () => { for (const h of G) await gr(h).settled(); };
-  const header = async (ev: Record<string, unknown>) => { for (const h of G) await gr(h).admitEvent(h, "chain", { kind: "header", ...ev }); await settleAll(); };
+  const header = async (ev: { raw?: Uint8Array; raws?: Uint8Array[] }) => { for (const h of G) await gr(h).chainHeaders(h, "chain", ev.raws ?? [ev.raw!]); await settleAll(); };
   const signed = async (k: PrivateKey, topic: string, body: Uint8Array, seq: bigint) => {
     const sq = new Uint8Array(8);
     new DataView(sq.buffer).setBigUint64(0, seq, false);

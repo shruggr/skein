@@ -230,7 +230,8 @@ pub const LmdbStore = struct {
 
     // -------------------------------------------------------- the backend
 
-    fn backend(s: *LmdbStore) index.Backend {
+    /// The backend under the store's index (host_chain.zig writes the host chain through it, #156).
+    pub fn backend(s: *LmdbStore) index.Backend {
         return .{ .ctx = s, .vt = &backend_vt };
     }
 

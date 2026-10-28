@@ -87,7 +87,7 @@ test("feeds: an SSE header feed fanned out to its subscribers, resumed after a d
   let gate: Promise<void> | undefined;
   const lines: string[] = [];
   const feeds = new Feeds({
-    admit: async (h, box, ev) => { if (gate) await gate; got.push([h, box, (ev.raw as Uint8Array)?.[0] ?? -1]); },
+    headers: async (h, box, raws) => { if (gate) await gate; got.push([h, box, raws[0]?.[0] ?? -1]); },
     log: (_s, l) => lines.push(l), maxQueue: 3, backoff: { min: 20, max: 100 },
   });
   t.after(() => feeds.stop());
@@ -134,7 +134,7 @@ test("#141: subscribing with a backfill — the headers it lacks first, as runs;
   t.after(() => server.close());
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/headers`;
   const got: string[] = [];
-  const feeds = new Feeds({ admit: async (_h, _box, ev) => { got.push(ev.raws ? `run ${(ev.raws as Uint8Array[]).map((r) => r[0]).join(",")}` : `live ${(ev.raw as Uint8Array)[0]}`); }, backoff: { min: 20, max: 100 } });
+  const feeds = new Feeds({ headers: async (_h, _box, raws) => { got.push(raws.length > 1 ? `run ${raws.map((r) => r[0]).join(",")}` : `live ${raws[0]![0]}`); }, backoff: { min: 20, max: 100 } });
   t.after(() => feeds.stop());
   let release!: (raws: Uint8Array[]) => void;
   const done = feeds.host("w", { kind: "headers", url }, () => new Promise((r) => { release = r; }));

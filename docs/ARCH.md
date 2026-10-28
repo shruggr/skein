@@ -296,8 +296,10 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   a proof event in box `chain`, anything else as a signed message from the
   status provider, which an instance takes only through a `$status` row.
 - **Feeds** (`src/host/feeds.ts`): SSE header streams an instance declares
-  in its config, one connection per URL, each header appended as an event
-  (box `chain` by default). The chain app validates. The host has a feed of
+  in its config, one connection per URL, each event's headers handed to the
+  host chain (a `headers` frame; below) and, on a changed record, the
+  `chain` event in the subscriber's box (`chain` by default). The kernel's
+  host chain validates. The host has a feed of
   its own besides (`SKEIN_HEADERS_URL`, #102): every enabled instance whose
   dispatch table takes events in box `chain` (the chain app's `event` row)
   is subscribed to it, the others not, and the router keeps that current
@@ -311,8 +313,21 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   `chain/tip`: a new tree per header), filled from genesis at start out of
   the feed's chaintracks history (`…/headers?height=&count=`). Its objects
   and its current root are in host.db. A skein is created from the image as
-  it stands, so it is born with the chain up to the current tip; the chain
-  app loads it at its first step. Headers are pushed: no skein asks for one.
+  it stands, so it is born with the chain up to the current tip. Headers
+  are pushed: no skein asks for one.
+- **The host chain** (#156, #133): the header chain is the host's, held once
+  per host and kept by the kernel process (`kernel-zig/src/host_chain.zig`,
+  over skein-sdk's `chain.host`): `skein-kernel host` writes it into the
+  `host/chain` set of its RocksDB database, which every instance reads; a
+  `serve` instance keeps it in its own store. The feed's headers go to it as
+  `headers` frames (the kernel validates and appends: the SDK's `Chain.add`);
+  on a changed record the router admits `{kind: "chain", root, height}` in
+  box `chain` to each subscribed running instance, once at its start and once
+  when an app taking box `chain` is installed. The chain app's state points
+  at the record's `headers` and `heights` (skein-sdk `State.pointAt`), never
+  copies them. A fresh host chain is bootstrapped from an image's
+  `chain/headers` (`chain-import`) before the instance's first event;
+  `skein-host chain` prints its tip.
 - **The store**: one SQLite file per instance
   (`$SKEIN_HOME/instances/<handle>/runtime.db`), written by the kernel
   process.

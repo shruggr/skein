@@ -183,11 +183,17 @@ bytes (`src/host/image-chain.ts`):
 **A skein is born with the chain up to the current tip**: the instance
 manager's `create` (and `skein-host init`, `skein-host add <h> --image
 default`) boots from the image as it stands — after the first fill at
-start — so its tree, and its store, carry `chain/headers`. The chain app
-(shruggr/skein-chain), once root installs it (#152), loads them into its
-empty `chain/state` at its first step (it reads `main`, the genesis's tree;
-its docs/CHAIN.md, "Born with the chain"). Replay: the image tree is the
-genesis's, so the chain app loads the same; nothing new is in the log.
+start — so its tree, and its store, carry `chain/headers`. The header chain
+itself is the host's (#156): held once per host by the kernel process (the
+`host/chain` set of a RocksDB host; a serve instance's own store). When the
+host chain is empty, the router imports the new skein's `chain/headers`
+into it (the frame `chain-import`, before the skein's first event): the
+image is the host's bootstrap. The chain app (shruggr/skein-chain 0.7.0),
+once root installs it (#152), is sent the host chain's record (a `chain`
+event: at the install, at each start, once per block) and points its
+`chain/state` at it; it never loads the image itself (its docs/CHAIN.md,
+"The header chain is the host's"). Replay: the event carries the record's
+CID; the host chain's blocks are never deleted.
 
 **The feed** (#141). The host subscribes a skein to its headers feed while
 its table has a row taking events in box `chain` (#102): from the chain
@@ -197,7 +203,7 @@ it; an instance added offline, at its first load). On subscribing (and on every 
 enabled again) the host first pushes the headers the skein lacks — from its
 tip (its `chain/state`'s last header, else its tree's `chain/tip`) to the
 host's, read from the image's chain part in turn with its writes, in runs of
-2016 (`{kind: "header", raws}`) — and the live stream after them: a live
+2016 (a `headers` frame each, into the host chain, #156) — and the live stream after them: a live
 header that arrives meanwhile waits behind them, and one they carry is not
 pushed twice (feeds.ts `host`, image-chain.ts `after`, `skeinTip`). A tip
 the image does not hold at its height (a fork) is pushed from six below it.
@@ -207,10 +213,10 @@ live stream.
 
 Costs on mainnet (about 970 000 headers, 2026-10): the chain part is
 78 MB of header blocks in host.db; filling it from a local chaintracks
-takes about 10 s; each new skein's store starts with those 78 MB, and the
-chain app's first step takes about 15 s and adds about 330 MB (each header
-as its own block, and the `headers` and `heights` maps). A host store
-shared by the skeins (backlog) would hold the blocks once.
+takes about 10 s; each new skein's store starts with those 78 MB. The
+header chain itself (each header as its own block, and the `headers` and
+`heights` maps) is held once per host since #156: the host chain, imported
+from the image when it is empty (`chain-import`), not per skein.
 
 A host with no headers feed has no chain part: the image is the static part
 alone, as before.
@@ -677,10 +683,14 @@ boot is written, and the process exits 0.
   part with `chain/` beside it. `kernel-zig/equiv/image-chain.ts` (in
   `run.sh`): on regtest, N headers in a fake chaintracks' history and M on
   its tip stream, all before any skein exists; a skein created from the
-  image holds `chain/headers` and `chain/tip`; the chain app installed, the
-  next header is the first header event it takes, and its chain state then
-  holds every header from genesis (no feed replay); `add --image default`
-  boots from the same image; replayed.
+  image holds `chain/headers` and `chain/tip`; the empty host chain imports
+  them at its first start (`skein-host chain` shows the image's tip); the
+  chain app installed, the install's `chain` event gives its chain state
+  every header from genesis with no header fed, its maps the host chain's;
+  the next header moves it on; `add --image default` boots from the same
+  image; replayed — on SQLite and on RocksDB. `kernel-zig/equiv/hostchain.ts`:
+  two instances on one RocksDB host, three runs, a proof, a heavier branch
+  reverting it, the gate, serve's state the RocksDB host's, timings (#156).
 - `src/host/boot.test.ts` also resolves the default image: no root, the
   admin routes and the claim route, the explorer behind `kernel.brc104`
   (root's), no http route at `/`, `/site` or `/manifest.json`, no

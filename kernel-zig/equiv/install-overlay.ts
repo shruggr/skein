@@ -75,7 +75,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
 const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "e1211e10f7a1ed128a0d416c13a8433f33dc6151";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "00f29a21fa6c4de13090b04a6870dcdf237f0e59";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));
@@ -270,7 +270,7 @@ try {
   const cb = "cb".repeat(32);
   fund.merklePath = new MerklePath(1, [[{ offset: 0, hash: cb }, { offset: 1, hash: fundTxid, txid: true }]]);
   const h1 = mine(sha256d(REGTEST_GENESIS), sha256d(Buffer.concat([internal(cb), internal(fundTxid)])), 1_790_100_000);
-  await rA.admitEvent("ov", "chain", { kind: "header", raw: h1 });
+  await rA.chainHeaders("ov", "chain", [h1]);
   await rA.settled();
   const token = (vout: number) => {
     const t = new Transaction();
@@ -352,7 +352,7 @@ try {
   const cb2 = "cd".repeat(32);
   tM.merklePath = new MerklePath(2, [[{ offset: 0, hash: cb2 }, { offset: 1, hash: tM.id("hex"), txid: true }]]);
   const h2 = mine(sha256d(h1), sha256d(Buffer.concat([internal(cb2), internal(tM.id("hex"))])), 1_790_100_600);
-  await rA.admitEvent("ov", "chain", { kind: "header", raw: h2 });
+  await rA.chainHeaders("ov", "chain", [h2]);
   await rA.settled();
   const postsBefore = arcade.posts.length;
   const subM = await submitFetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": "tm_demo" }, body: new Uint8Array(tM.toBEEF()) });
