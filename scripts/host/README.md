@@ -407,6 +407,7 @@ renders it.
 | | |
 |---|---|
 | `SKEIN_ROUTER_PORT` (default 8100) | the host's HTTP transport |
+| `SKEIN_ROOT_INSTANCE` | the instance served at `/` of a hostname that is no instance's: the standalone's one app at `http://localhost:<port>/` (the host's own paths, `/.well-known/skein-host`, `/skeins`, BRC-169 discovery, `/arc/callback`, come first) |
 | `SKEIN_ROUTER_BIND` (default `127.0.0.1,::1`) | the addresses the router listens on, a comma list; a tunnel running on another machine needs this box's LAN or tailnet address here |
 | `SKEIN_HOST_PORT` (default 4600) | `/`: the host page; `/roster.json`: the roster |
 

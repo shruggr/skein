@@ -68,6 +68,17 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   const local = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, idleMs: 0, ledgerMs: 60_000 });
   t.after(() => local.stop());
   assert.equal(local.ownLabel(), undefined);
+  // No root instance: the bare root is nobody's.
+  assert.equal((await local.dispatch({ method: "GET", url: "http://127.0.0.1:1/", headers: {}, body: new Uint8Array() })).status, 404);
+
+  // SKEIN_ROOT_INSTANCE (rootInstance): the host's own paths still come first at a hostname that is no instance's.
+  const rooted = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, rootInstance: "swap", idleMs: 0, ledgerMs: 60_000 });
+  t.after(() => rooted.stop());
+  const wk = await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/.well-known/skein-host", headers: {}, body: new Uint8Array() });
+  assert.equal(wk.status, 200, "the host's own .well-known, not the root instance's");
+  assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/skeins?key=zz", headers: {}, body: new Uint8Array() })).status, 400, "the host's own /skeins");
+  db.add("swap", { status: "disabled" });
+  assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/", headers: {}, body: new Uint8Array() })).status, 404, "a disabled root instance serves nothing");
 });
 
 test("the host's domain (H4): from its origin when no onboarding app names one", async (t) => {

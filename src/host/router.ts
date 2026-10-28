@@ -240,6 +240,8 @@ export interface RouterOptions {
    * certifier). No other instance reaches it.
    */
   managerFor?: string[];
+  /** SKEIN_ROOT_INSTANCE: the instance served at `/` of any hostname that is no instance's (the standalone's one app at localhost:<port>/). */
+  rootInstance?: string;
   /** #162, SKEIN_IMAGES_DIR (default $SKEIN_HOME/images): the images a create names by name, a directory each (the layout `skein-host add --image <dir>` takes). */
   imagesDir?: string;
 }
@@ -1842,14 +1844,15 @@ export class Router {
       if ("problem" in o) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: o.problem });
       if (o.handle) return await this.held(this.forward(o.handle, url.pathname, url, req));
     }
-    if (t) {
+    const serve = async (x: { handle: string; route: string }): Promise<RouterResponse> => {
       // #138: the liveness tool's read, the host's own (no program).
-      const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(t.route) : null;
-      if (live) return await this.held(this.liveRead(t.handle, t.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
+      const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(x.route) : null;
+      if (live) return await this.held(this.liveRead(x.handle, x.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
       // #148: a stream, served on a socket only (handler).
-      if (req.method === "GET" && EVENTS_ROUTE.test(t.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
-      return await this.held(this.forward(t.handle, t.route, url, req));
-    }
+      if (req.method === "GET" && EVENTS_ROUTE.test(x.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
+      return await this.held(this.forward(x.handle, x.route, url, req));
+    };
+    if (t) return await serve(t);
     const path = url.pathname;
     if (req.method === "GET" && path === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
@@ -1862,6 +1865,10 @@ export class Router {
       return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
+    // SKEIN_ROOT_INSTANCE: a hostname that is no instance's serves the root instance (the standalone's one app at localhost:<port>/),
+    // after the host's own paths above.
+    const root = this.o.rootInstance;
+    if (root && this.o.db.get(root)?.status === "enabled") return await serve({ handle: root, route: path });
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
