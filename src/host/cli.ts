@@ -87,6 +87,12 @@
 //   SKEIN_OPERATOR_KEY    the operator's key file (#142), default $SKEIN_HOME/operator.key: the host skein's owner
 //   SKEIN_HANDLE_DOMAIN, SKEIN_HOST_NAME, SKEIN_HOST_NOTE   the onboarding app's config at the host skein's birth
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
+//   SKEIN_KEY_FILE        #160: one-key mode — the ONE key every instance signs with (a file, read and never made), or
+//                         SKEIN_KEY (hex); refused beside SKEIN_MASTER_KEY(_FILE). Every row the same identity, one peer key
+//                         (signer.ts Signer.oneKey), one libp2p node for all (p2p.ts); a create claimed by the host's key (#162)
+//   SKEIN_MANAGER_FOR     #162: the instances (handles, comma-separated) besides the host skein the instance manager acts for:
+//                         the manager in their address book at birth, their create/start/stop taken
+//   SKEIN_IMAGES_DIR      #162: where a create's image by name is (<dir>/<name>), default $SKEIN_HOME/images
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
 //   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: where BRC-169 discovery is
 //                         answered (the host skein's onboarding app, #113), and the geneses' resolveOrigin. The manifest's
@@ -148,7 +154,7 @@ import { openStoreFile, readHostChain, storeBlocks, storeExists } from "./stores
 import { spawnSync } from "node:child_process";
 import { connect } from "node:net";
 import type { Store } from "../runtime/store.ts";
-import { masterKey, Signer } from "./signer.ts";
+import { oneKeySetting, signerOf } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { homeOf as homeOfVars, identityOf, operatorKey, withHostEnv } from "./hostenv.ts";
 import { hostArcConfig } from "./arc.ts";
@@ -156,7 +162,7 @@ import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { addressBook } from "./deploy.ts";
 import { fetchHttp, hostDomain, Router, type RouterOptions } from "./router.ts";
 import { billingConfig, DEV_BILLING, NSAT } from "./billing.ts";
-import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
+import { HostDb, knowsColumn, knowsOf, pathOnly, type InstanceRow, type RowFields } from "./instances.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
 
 export interface Env {
@@ -240,7 +246,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
-        if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Signer(masterKey(env.vars, home)).identity(handle);
+        if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = signerOf(env.vars, home).identity(handle);
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
         if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
         const r = db.add(handle, f);
@@ -277,7 +283,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
         // The signer's key (signer.ts) for an instance: the BRC-104 identity its front door answers as.
         const [handle, flag, ...more] = rest;
         if (!handle || more.length || (flag !== undefined && flag !== "--peer")) { env.err(USAGE); return 2; }
-        const signer = new Signer(masterKey(env.vars, home));
+        const signer = signerOf(env.vars, home);
         // The libp2p peer ID (#51): the identity multihash of the peer key, a child of the instance's root key (#129: key ID libp2p:<handle>, self).
         env.out(flag ? peerIdOf(signer.peerKey(handle)).toString() : signer.identity(handle));
         return 0;
@@ -365,16 +371,16 @@ const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean)
  */
 function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => string {
   const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
-  if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
-  const signer = new Signer(masterKey(vars, home));
+  if (!oneKeySetting(vars) && !vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
+  const signer = signerOf(vars, home);
   return (row) => signer.identity(row.handle);
 }
 
 /** Each row's libp2p peer ID (#51): derived from the instance's root key (#129: key ID libp2p:<handle>, self), whether or not it runs a node; "-" with no master secret. */
 function peerIds(vars: Env["vars"], home: string): (row: InstanceRow) => string {
   const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
-  if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
-  const signer = new Signer(masterKey(vars, home));
+  if (!oneKeySetting(vars) && !vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
+  const signer = signerOf(vars, home);
   return (row) => peerIdOf(signer.peerKey(row.handle)).toString();
 }
 
@@ -398,6 +404,8 @@ function knowsCmd(db: HostDb, rest: string[], env: Env): number {
  * on SKEIN_ROUTER_PORT (default 8100).
  */
 export function originOf(vars: Env["vars"], handle: string): string {
+  // #161: a path-only handle (a token id): /@<handle> on the router's own origin.
+  if (pathOnly(handle)) return `${(vars.SKEIN_ROUTER_ORIGIN || "http://127.0.0.1:{port}").replace("{port}", vars.SKEIN_ROUTER_PORT || "8100").replace(/\/+$/, "")}/@${handle}`;
   return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
 }
 
@@ -697,9 +705,13 @@ export interface Host {
  * keys (#70: the HTTP proxy, the waker, the cron provider, the libp2p node, the status provider,
  * the instance manager, and the certifier, #113: its key the certifier key, BRC-169's trust anchor).
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor"> {
-  const signer = new Signer(masterKey(v, home));
-  return { walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (handle) => signer.peerKey(handle), providerKeyFor: (name) => signer.providerKey(name) };
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor" | "claimer"> {
+  const signer = signerOf(v, home); // #160: one-key mode (SKEIN_KEY_FILE / SKEIN_KEY), else the master key's
+  return {
+    walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (handle) => signer.peerKey(handle), providerKeyFor: (name) => signer.providerKey(name),
+    // #162: a one-key host claims the instances it creates with its own key.
+    ...(signer.shared ? { claimer: signer.wallet("") } : {}),
+  };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -716,6 +728,9 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     ...(v.SKEIN_STORE ? { lmdbStore: resolve(v.SKEIN_STORE) } : {}),
     ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
+    // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
+    ...(v.SKEIN_MANAGER_FOR ? { managerFor: handles(v.SKEIN_MANAGER_FOR) } : {}),
+    imagesDir: resolve(v.SKEIN_IMAGES_DIR || join(home, "images")),
     // #142: settings host.env may give (the environment's are read where they are used, too).
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
     ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),

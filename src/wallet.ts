@@ -40,10 +40,11 @@ export function ephemeralWallet(key: PrivateKey = PrivateKey.fromRandom()): Wall
 
 /**
  * A wallet over one private key (#142: the operator's, from its key file): it signs, derives and opens
- * BRC-103/104 sessions (a ProtoWallet); it has no actions (no coins), and those reject.
+ * BRC-103/104 sessions (a ProtoWallet); it has no actions (no coins), and those reject. `base`: the
+ * ProtoWallet over that key it wraps (#160: the one-key host's, signer.ts OneKeyWallet), by default a plain one.
  */
-export function keyWallet(key: PrivateKey): WalletInterface {
-  return new Proxy(new ProtoWallet(key), {
+export function keyWallet(key: PrivateKey, base: ProtoWallet = new ProtoWallet(key)): WalletInterface {
+  return new Proxy(base, {
     get(t, p) {
       // `then` must stay undefined or awaiting the wallet would call it.
       if (typeof p !== "string" || p === "then" || p in t) return Reflect.get(t, p);

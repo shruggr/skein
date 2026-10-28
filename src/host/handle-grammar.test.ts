@@ -40,6 +40,16 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   assert.equal(router.target(new URL("https://id.example.test/manifest.json")), undefined);
   assert.deepEqual(router.target(new URL("https://alice.example.test/x")), { handle: "alice", route: "/x" });
 
+  // #161: a token id is a path-only handle: added, reached by /@<handle> only, its origin the host's /@<handle>.
+  const tok = `${"ab".repeat(32)}_0`;
+  db.add(tok, { store: join(home, "tok.db"), status: "disabled" });
+  assert.equal(router.originOf(tok), `https://id.example.test/@${tok}`);
+  assert.equal(router.target(new URL(`https://id.example.test/@${tok}/x`)), undefined, "disabled: not routed");
+  db.setStatus(tok, "enabled");
+  assert.deepEqual(router.target(new URL(`https://id.example.test/@${tok}/x`)), { handle: tok, route: "/x" });
+  assert.equal(router.target(new URL(`https://${tok}.example.test/x`)), undefined, "never by host name");
+  for (const bad of [`${"AB".repeat(32)}_0`, `${"ab".repeat(31)}_0`, `${"ab".repeat(32)}_`, `${"ab".repeat(32)}.0`]) assert.throws(() => db.add(bad, { store: join(home, "x.db") }), /hostname label/, `add ${bad}`);
+
   // A router at a loopback address has no label of its own.
   const local = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, idleMs: 0, ledgerMs: 60_000 });
   t.after(() => local.stop());

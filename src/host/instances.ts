@@ -134,6 +134,20 @@ CREATE TABLE IF NOT EXISTS billing_payments (
  */
 export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+/**
+ * A path-only handle (#161): a token id `<txid>_<vout>` (64 lower-case hex digits, `_`, the output
+ * index). Not a hostname label, so its instance is published under no hostname: it is reached at
+ * `/@<handle>/…` on the host's origin only (Router.target, originOf). Everything else about its row is
+ * a row's.
+ */
+export const TOKEN_HANDLE = /^[0-9a-f]{64}_[0-9]+$/;
+
+/** Whether `handle` is a handle this host takes (#161): a hostname label (HANDLE), or a path-only token id (TOKEN_HANDLE). */
+export const validHandle = (handle: string): boolean => HANDLE.test(handle) || TOKEN_HANDLE.test(handle);
+
+/** Whether `handle` is path-only (#161): a token id, reached by `/@<handle>` and never by a hostname. */
+export const pathOnly = (handle: string): boolean => TOKEN_HANDLE.test(handle);
+
 export type Status = "enabled" | "disabled";
 
 export type Kind = "agent" | "mailbox";
@@ -204,7 +218,7 @@ export class HostDb {
       if (set.length) this.db.prepare(`UPDATE instances SET ${set.map((k) => `${k} = ?`).join(", ")} WHERE handle = ?`).run(...set.map((k) => f[k]!), handle);
     } else {
       // A new row's handle is a hostname label; a row an older file already has keeps its handle.
-      if (!HANDLE.test(handle)) throw new Error(`bad handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
+      if (!validHandle(handle)) throw new Error(`bad handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
       if (!f.store) throw new Error(`${handle}: a new instance needs a store`);
       const cols = ["handle", ...set, "created_at"];
       this.db.prepare(`INSERT INTO instances (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(handle, ...set.map((k) => f[k]!), now.toISOString());

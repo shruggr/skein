@@ -228,6 +228,39 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   it with the handle when it is resolved or found; the page shows it as
   signed by the handle's key. "Find a handle" searches the host by handle
   or name.
+- **One key for every instance** (#160, #161, #162). A host can be
+  provisioned with ONE private key instead of the master key:
+  `SKEIN_KEY_FILE=<path>` (64 hex digits, read and never made) or
+  `SKEIN_KEY=<hex>`; set together with `SKEIN_MASTER_KEY` /
+  `SKEIN_MASTER_KEY_FILE` the host refuses to start. Every instance then
+  signs with that key directly (`skein-host add` records the same identity
+  on every row), and every instance's libp2p peer key is the key's one child
+  ([2, "skein instance"], key ID `libp2p`): a program that asks its signer
+  for `libp2p:<handle>` gets it, whatever the handle. One libp2p node per key
+  carries all of them: gossip goes to every instance that takes the topic
+  (accepted if any accepts); an inbound stream goes to the instance its first
+  frame's `topic` names (a frame naming none: the one instance declaring the
+  protocol, else `{kind: "error", message: "topic required"}`). Unset: the
+  master key's derivation per instance, one node per instance, as before.
+- **Path-only handles** (#161). A token id `<txid>_<vout>` is a handle too:
+  its instance has no hostname and is reached at `/@<txid>_<vout>/…` on the
+  host's origin (its `url` says so). An overlay request at the bare host —
+  `POST /submit` (its `X-Topics`) or `POST /lookup` (its `service`
+  `ls_color_<id>`, or a `topic` `tm_color_<id>`) — goes to the enabled
+  path-only instance whose handle is that `<id>`, so a wallet keeps one
+  provider URL; topics naming two instances, or one here and one not, are 400.
+- **An instance creates instances** (#162). `SKEIN_MANAGER_FOR=<handle>[,…]`
+  gives those instances the instance manager in their address book at birth
+  (as the host skein has it) and has the manager take their messages: `create
+  {handle, image?, config?, claim?}`, `start {handle}`, `stop {handle}`.
+  `image` is `default`, `mailbox`, or an image by name: the directory
+  `$SKEIN_HOME/images/<name>` (`SKEIN_IMAGES_DIR` names another directory;
+  the layout `skein-host add --image <dir>` takes, a link to an app
+  repository's `image/` included). `config` is the new instance's apps'
+  config at birth, `{<app>: {…}}`, merged as an install's `--config`. On a
+  one-key host a create with no `claim` is claimed by the host's own key
+  (its owner), so the instance is live at once; on a master-key host the
+  owner's signed claim stays required.
 - `scripts/host/up.sh` brings up the dev stack.
 - Block headers for the chain app: run the host with
   `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`

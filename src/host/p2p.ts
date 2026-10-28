@@ -1,9 +1,11 @@
 // The router's libp2p host (#43, #51): a router component, like the HTTP
 // proxy and the feeds. The runtime has no network; this is where the sockets
-// are. One js-libp2p node per instance that declares libp2p — in its config
-// (the genesis's `libp2p`, from etc/config.json), or by a `libp2p` row in the
-// kernel's dispatch table (#72, #77: a topic, or a `/<protocol>`) — each
-// with its own peer key, all inside the router process:
+// are. One js-libp2p node per peer KEY (#160) for the instances that declare
+// libp2p — in their config (the genesis's `libp2p`, from etc/config.json), or
+// by a `libp2p` row in the kernel's dispatch table (#72, #77: a topic, or a
+// `/<protocol>`) — all inside the router process: a master-key host derives a
+// key per instance, so one node per instance; a one-key host's instances share
+// the one peer key, so one node carries them all ("the host" below):
 //
 //   peer key   a secp256k1 key derived from the INSTANCE's root key with BRC-42/43
 //              (#129: [2, "skein instance"], key ID `libp2p:<handle>`, self — signer.ts
@@ -444,20 +446,52 @@ export function foldBeacons(events: Iterable<BeaconEvent>, into: Beacon[] = []):
 const isCid = (x: unknown): x is CID => CID.asCID(x) !== null;
 
 // ---------------------------------------------------------------- the host
+//
+// One node per KEY (#160): the nodes are keyed by peer ID, each with the
+// handles whose peer key it is. A master-key host derives a key per instance,
+// so each node has one handle: one node per instance, as before. A one-key
+// host's handles all share the one peer key, so one node carries them all:
+//
+//   topics     the node subscribes the union of its handles' (their configs'
+//              and their liveness tools'); a message on a topic is judged for
+//              every handle that takes it — Accept if any accepts, Reject only
+//              if all reject, else Ignore (a discovery instance and a token
+//              instance may share a topic, #137).
+//   protocols  the node handles the union of its handles' protocols (and
+//              /skein/message/1.0.0, every handle's). An inbound stream's
+//              first frame is read and decoded as dag-cbor: its `topic` picks
+//              the handle that declares the protocol and takes that topic; a
+//              frame naming none goes to the one handle that declares the
+//              protocol, and with several is answered {kind: "error",
+//              message: "topic required"} and the stream closed. The frame
+//              is then served to that handle as every frame is (not read twice).
+//   listen     the host's listen addresses, once per node; an instance's own
+//              `listen` is honoured when its node has that one handle (a line
+//              otherwise).
+//   outbound   publish, dial, request: from the handle's node, as before.
+
 /** A stream an instance dialled (the libp2p provider's). */
 interface OpenStream { stream: Stream; lp: LengthPrefixedStream }
 
-interface Node {
-  handle: string;
-  node: Libp2p;
+/** One handle on a node: its config, its dialled streams, its beacons' timers (#126, by "<app> <topic>"). */
+interface Handle {
   config: P2PInstanceConfig;
   streams: Map<number, OpenStream>;
+  beats: Map<string, { beacon: Beacon; timer: ReturnType<typeof setInterval> }>;
+}
+
+interface Node {
+  /** The peer ID (the key's). */
+  id: string;
+  node: Libp2p;
+  /** The handles on this node, in the order they were declared. */
+  handles: Map<string, Handle>;
   /** publish's seqno, caught in msgIdFn by the data object published. */
   seqnos: Map<Uint8Array, bigint>;
-  /** The beacons' timers (#126), by "<app> <topic>". */
-  beats: Map<string, { beacon: Beacon; timer: ReturnType<typeof setInterval> }>;
-  /** The topics subscribed: the config's and the liveness tool's (#138). */
+  /** The topics subscribed: the handles' configs' and their liveness tools' (#138). */
   subscribed: Set<string>;
+  /** The protocols handled for the handles (the host's own aside). */
+  handled: Set<string>;
   timer?: ReturnType<typeof setInterval>;
 }
 
@@ -466,12 +500,20 @@ let nextStream = Date.now() * 1000;
 
 const u64 = (n: bigint): Uint8Array => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n, false); return b; };
 
+/** The answer to a stream whose first frame names no topic where several instances declare its protocol (#160). */
+export const TOPIC_REQUIRED = "topic required";
+
 export class P2PHost {
   readonly o: P2POptions;
   /** The liveness tool's state (#138): the apps' liveness and the beats kept, in memory. */
   readonly live = new Liveness();
+  /** The nodes, by peer ID (#160: one per key). */
   private nodes = new Map<string, Node>();
-  /** Each instance's declares, in order (one at a time). */
+  /** Each handle's node. */
+  private byHandle = new Map<string, Node>();
+  /** Each handle's peer ID, as derived (keyOf). */
+  private ids = new Map<string, string>();
+  /** Each key's declares, in order (one at a time). */
   private starting = new Map<string, Promise<unknown>>();
   private stopped = false;
 
@@ -482,59 +524,79 @@ export class P2PHost {
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
 
+  /** A node's name in a log line: its one handle (as before #160), else its first. */
+  private nameOf(n: Node): string { return n.handles.keys().next().value ?? n.id; }
+
   /** The node of an instance, if it has one. */
-  node(handle: string): Libp2p | undefined { return this.nodes.get(handle)?.node; }
+  node(handle: string): Libp2p | undefined { return this.byHandle.get(handle)?.node; }
 
   /** An instance's peer ID (derived: whether or not its node runs). */
-  peerId(handle: string): string { return peerIdOf(this.o.keyOf(handle)).toString(); }
+  peerId(handle: string): string {
+    let id = this.ids.get(handle);
+    if (!id) this.ids.set(handle, (id = peerIdOf(this.o.keyOf(handle)).toString()));
+    return id;
+  }
+
+  /** The handles on `handle`'s node (#160: one in a master-key host; every one sharing its key in a one-key host). */
+  handlesOn(handle: string): string[] { return [...(this.byHandle.get(handle)?.handles.keys() ?? [])]; }
+
+  /** How many nodes run (#160: one per key). */
+  nodeCount(): number { return this.nodes.size; }
 
   /** Where an instance's node listens (with /p2p/<id>). */
   addrs(handle: string): string[] { return this.node(handle)?.getMultiaddrs().map((m) => m.toString()) ?? []; }
 
   /**
-   * `handle`'s libp2p config is this: its node started (once) with its peer key,
-   * its topics subscribed with the validator, its protocols handled. Declared
-   * again, the running node is brought to the new config (reconfigure). No
-   * config: no node (an existing one is stopped).
+   * `handle`'s libp2p config is this: its key's node started (once) with its peer key, the handle's
+   * topics subscribed with the validator, its protocols handled. Declared again, the handle is brought
+   * to the new config. No config: the handle leaves its node; the node stops with its last handle.
    */
   async declare(handle: string, config: P2PInstanceConfig | undefined): Promise<void> {
     if (this.stopped) return;
-    const prev = this.starting.get(handle) ?? Promise.resolve();
+    const key = this.byHandle.get(handle)?.id ?? this.peerId(handle);
+    const prev = this.starting.get(key) ?? Promise.resolve();
     // The previous declare's failure went to its own caller (it awaited it); this one runs regardless.
     const next = prev.catch(() => {}).then(async () => {
       if (this.stopped) return;
       if (!config) return this.drop(handle);
-      const n = this.nodes.get(handle);
-      if (n) return this.reconfigure(n, config);
-      await this.start(handle, config);
+      const n = this.byHandle.get(handle) ?? this.nodes.get(key);
+      if (n) return this.reconfigure(n, handle, config);
+      await this.start(key, handle, config);
     });
-    this.starting.set(handle, next);
+    this.starting.set(key, next);
     // Only clears the slot: the error reaches this call's caller through `await next` below.
-    void next.catch(() => {}).finally(() => { if (this.starting.get(handle) === next) this.starting.delete(handle); });
+    void next.catch(() => {}).finally(() => { if (this.starting.get(key) === next) this.starting.delete(key); });
     await next;
   }
 
-  /** The topics and protocols an instance's node serves now. */
+  /** The topics and protocols an instance's node serves for it now. */
   served(handle: string): { topics: string[]; protocols: string[] } | undefined {
-    const n = this.nodes.get(handle);
-    return n && { topics: [...n.config.topics], protocols: [...n.config.protocols] };
+    const h = this.byHandle.get(handle)?.handles.get(handle);
+    return h && { topics: [...h.config.topics], protocols: [...h.config.protocols] };
   }
 
-  /** Bring a running node to `config`: subscribe and handle what is new, unsubscribe and unhandle what is gone. */
-  private async reconfigure(n: Node, config: P2PInstanceConfig): Promise<void> {
-    const was = n.config;
+  /** Bring `handle` on a running node to `config` (joining it if it is new there): subscribe and handle what is new, unsubscribe and unhandle what no handle takes any more. */
+  private async reconfigure(n: Node, handle: string, config: P2PInstanceConfig): Promise<void> {
+    let h = n.handles.get(handle);
+    const joined = !h;
+    if (!h) {
+      n.handles.set(handle, (h = { config: { topics: [], protocols: [] }, streams: new Map(), beats: new Map() }));
+      this.byHandle.set(handle, n);
+      if (config.listen?.length) this.say(handle, `libp2p: its listen ${config.listen.join(" ")} not honoured: its key's node (${n.id}) carries ${n.handles.size} instances and listens on ${n.node.getMultiaddrs().map(String).join(" ") || "(nothing)"} (#160)`);
+    }
+    const was = h.config;
     const added = config.topics.filter((t) => !was.topics.includes(t));
     const removed = was.topics.filter((t) => !config.topics.includes(t));
     const addedP = config.protocols.filter((p) => !was.protocols.includes(p) && !this.hostServed(p));
     const removedP = was.protocols.filter((p) => !config.protocols.includes(p) && !this.hostServed(p));
-    if (!added.length && !removed.length && !addedP.length && !removedP.length) { n.config = { ...config, listen: was.listen }; return; }
-    n.config = { ...config, listen: was.listen };
-    this.resubscribe(n);
-    for (const p of removedP) await n.node.unhandle(p);
-    for (const p of addedP) await this.handleProtocol(n, p);
+    h.config = { ...config, listen: joined ? undefined : was.listen };
+    if (!joined && !added.length && !removed.length && !addedP.length && !removedP.length) return;
+    const sub = this.resubscribe(n);
+    await this.rehandle(n);
     const list = (xs: string[]) => xs.join(", ") || "none";
-    this.say(n.handle, `libp2p: topics ${list(config.topics)} (+${list(added)} −${list(removed)}); protocols ${list(config.protocols)} (+${list(addedP)} −${list(removedP)})`);
-    if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
+    if (joined) this.say(handle, `libp2p: on the node of its key ${n.id} (${n.handles.size} instances); topics ${list(config.topics)}; protocols ${list(config.protocols)}`);
+    else this.say(handle, `libp2p: topics ${list(config.topics)} (+${list(added)} −${list(removed)}); protocols ${list(config.protocols)} (+${list(addedP)} −${list(removedP)})`);
+    if (added.length || sub.added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`)), 200);
   }
 
   private subscribe(n: Node, topic: string): void {
@@ -544,9 +606,12 @@ export class P2PHost {
     n.subscribed.add(topic);
   }
 
-  /** Subscribe what the config and the liveness tool (#138) take, unsubscribe the rest: the topics added and removed. */
+  /** The topics `handle` takes: its config's and its apps' liveness topics (#138). */
+  private takes(handle: string, h: Handle): string[] { return [...h.config.topics, ...this.live.topics(handle)]; }
+
+  /** Subscribe what the handles' configs and liveness tools (#138) take, unsubscribe the rest: the topics added and removed. */
   private resubscribe(n: Node): { added: string[]; removed: string[] } {
-    const want = new Set([...n.config.topics, ...this.live.topics(n.handle)]);
+    const want = new Set([...n.handles].flatMap(([handle, h]) => this.takes(handle, h)));
     const ps = this.pubsub(n);
     const removed = [...n.subscribed].filter((t) => !want.has(t));
     const added = [...want].filter((t) => !n.subscribed.has(t));
@@ -555,8 +620,20 @@ export class P2PHost {
     return { added, removed };
   }
 
-  /** The topics `handle`'s node subscribes now: its config's and its apps' liveness topics (#138). */
-  listening(handle: string): string[] { return [...(this.nodes.get(handle)?.subscribed ?? [])]; }
+  /** Handle the protocols the handles declare, unhandle those none declares any more (the host's own aside). */
+  private async rehandle(n: Node): Promise<void> {
+    const host = this.o.hostProtocols ?? {};
+    const want = new Set([...n.handles.values()].flatMap((h) => h.config.protocols).filter((p) => !(p in host) && p !== MESSAGE_PROTOCOL));
+    for (const p of [...n.handled]) if (!want.has(p)) { n.handled.delete(p); await n.node.unhandle(p); }
+    for (const p of want) if (!n.handled.has(p)) { n.handled.add(p); await this.handleProtocol(n, p); }
+  }
+
+  /** The topics `handle`'s node subscribes for it now: its config's and its apps' liveness topics (#138). */
+  listening(handle: string): string[] {
+    const n = this.byHandle.get(handle);
+    const h = n?.handles.get(handle);
+    return n && h ? [...new Set(this.takes(handle, h))].filter((t) => n.subscribed.has(t)) : [];
+  }
 
   /**
    * The liveness `handle`'s apps keep (#138, liveness.ts): the tool keeps it, and the node subscribes
@@ -565,12 +642,12 @@ export class P2PHost {
    */
   liveness(handle: string, lives: Live[]): void {
     this.live.set(handle, lives);
-    const n = this.nodes.get(handle);
+    const n = this.byHandle.get(handle);
     if (!n) return;
     const { added, removed } = this.resubscribe(n);
     for (const t of added) this.say(handle, `libp2p: liveness ${t} (app ${lives.filter((l) => l.topic === t).map((l) => l.app).join(", ")})`);
     for (const t of removed) this.say(handle, `libp2p: ${t} left`);
-    if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
+    if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`)), 200);
   }
 
   /** Whether the host serves `protocol` on every node itself (/skein/message/1.0.0, `hostProtocols`). */
@@ -584,11 +661,12 @@ export class P2PHost {
           for (;;) {
             let frame: Uint8Array;
             try { frame = (await lp.read()).subarray(); } catch { break; }
-            await lp.write(await f(n.handle, connection.remotePeer, frame));
+            // The router names no host protocol (#154); a node's first handle answers for it.
+            await lp.write(await f(this.nameOf(n), connection.remotePeer, frame));
           }
           await stream.close().catch(() => {});
         } catch (e) {
-          this.say(n.handle, `libp2p: ${protocol} from ${connection.remotePeer}: ${(e as Error).message}`);
+          this.say(this.nameOf(n), `libp2p: ${protocol} from ${connection.remotePeer}: ${(e as Error).message}`);
           stream.abort(e as Error);
         }
       })();
@@ -599,9 +677,9 @@ export class P2PHost {
     await n.node.handle(protocol, (stream, connection) => { void this.serve(n, protocol, stream, connection.remotePeer); }, { runOnLimitedConnection: true });
   }
 
-  private async start(handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
+  private async start(key: string, handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
     const h = this.o.host;
-    const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map(), beats: new Map(), subscribed: new Set() };
+    const n: Node = { id: key, node: undefined as never, handles: new Map([[handle, { config, streams: new Map(), beats: new Map() }]]), seqnos: new Map(), subscribed: new Set(), handled: new Set() };
     const listen = [...(config.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
     // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
     const privateDev = [...h.bootstrap, ...listen].every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
@@ -638,14 +716,16 @@ export class P2PHost {
     });
     n.node = node;
     if (this.stopped) { await node.stop(); return undefined; }
-    this.nodes.set(handle, n);
-    if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(handle, `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
+    this.nodes.set(key, n);
+    this.byHandle.set(handle, n);
+    if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(this.nameOf(n), `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
     this.resubscribe(n);
     const host = this.o.hostProtocols ?? {};
-    for (const protocol of [...config.protocols.filter((p) => !(p in host)), ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
+    for (const protocol of config.protocols.filter((p) => !(p in host) && p !== MESSAGE_PROTOCOL)) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
+    await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
-    const discover = () => void this.discover(n).catch((e) => this.say(handle, `libp2p: discovery: ${(e as Error).message}`));
+    const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
     setTimeout(discover, 200);
     n.timer = setInterval(discover, this.o.discoveryMs ?? 30_000);
     return n;
@@ -656,24 +736,25 @@ export class P2PHost {
   /** Keep the bootstrap peers connected; with the DHT on, advertise each topic and dial its providers. */
   private async discover(n: Node): Promise<void> {
     const node = n.node;
+    const name = this.nameOf(n);
     const connected = new Set(node.getConnections().map((c) => c.remotePeer.toString()));
     for (const a of this.o.host.bootstrap) {
       let ma: Multiaddr;
-      try { ma = multiaddr(a); } catch { this.say(n.handle, `libp2p: bad bootstrap address ${a}`); continue; }
+      try { ma = multiaddr(a); } catch { this.say(name, `libp2p: bad bootstrap address ${a}`); continue; }
       const id = ma.getComponents().find((c) => c.name === "p2p")?.value;
       if (id === node.peerId.toString() || (id && connected.has(id))) continue;
-      await node.dial(ma).catch((e) => this.say(n.handle, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
+      await node.dial(ma).catch((e) => this.say(name, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
     }
     if (this.o.host.dht === "off" || !(node.services as Record<string, unknown>).dht) return;
     for (const topic of [...n.subscribed]) {
       const cid = await topicCid(topic);
-      await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch((e) => { if (!timedOut(e)) this.say(n.handle, `libp2p: provide ${topic}: ${(e as Error).message}`); });
+      await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch((e) => { if (!timedOut(e)) this.say(name, `libp2p: provide ${topic}: ${(e as Error).message}`); });
       try {
         for await (const p of node.contentRouting.findProviders(cid, { signal: AbortSignal.timeout(20_000) })) {
           if (p.id.equals(node.peerId) || node.getConnections(p.id).length) continue;
-          await node.dial(p.multiaddrs.length ? p.multiaddrs : p.id).catch((e) => this.say(n.handle, `libp2p: ${topic} provider ${p.id}: ${(e as Error).message}`));
+          await node.dial(p.multiaddrs.length ? p.multiaddrs : p.id).catch((e) => this.say(name, `libp2p: ${topic} provider ${p.id}: ${(e as Error).message}`));
         }
-      } catch (e) { if (!timedOut(e)) this.say(n.handle, `libp2p: find providers ${topic}: ${(e as Error).message}`); } // timed out: next round
+      } catch (e) { if (!timedOut(e)) this.say(name, `libp2p: find providers ${topic}: ${(e as Error).message}`); } // timed out: next round
     }
   }
 
@@ -684,40 +765,81 @@ export class P2PHost {
   }
 
   /**
-   * The topic validator: one front-door call; its verdict is GossipSub's (async: forwarding waits on
-   * it). A topic an app keeps liveness for (#138) is the liveness tool's too: it keeps a beat that
-   * verifies; when no config topic takes it, the tool's verdict is the only one (nothing admitted).
+   * The topic validator: for every handle on the node that takes the topic, one front-door call (or,
+   * for a topic only its apps' liveness takes, #138, the liveness tool's verdict alone: nothing
+   * admitted); GossipSub's verdict (async: forwarding waits on it) is Accept if any handle accepts,
+   * Reject only if every one rejects, else Ignore (#160).
    */
   private async validate(n: Node, topic: string, _source: PeerId, msg: { type: string; from: PeerId; data: Uint8Array; sequenceNumber: bigint; signature: Uint8Array }): Promise<TopicValidatorResult> {
     if (msg.type !== "signed") return TopicValidatorResult.Reject;
-    const live = this.live.takes(n.handle, topic) ? this.live.observe(n.handle, topic, msg.data, msg.from.toString()) : undefined;
-    if (!n.config.topics.includes(topic)) return live === "accept" ? TopicValidatorResult.Accept : live === "reject" ? TopicValidatorResult.Reject : TopicValidatorResult.Ignore;
+    const takers = [...n.handles].filter(([handle, h]) => h.config.topics.includes(topic) || this.live.takes(handle, topic));
+    if (!takers.length) return TopicValidatorResult.Ignore;
+    const verdicts = await Promise.all(takers.map(([handle, h]) => this.validateFor(handle, h, topic, msg)));
+    if (verdicts.includes(TopicValidatorResult.Accept)) return TopicValidatorResult.Accept;
+    if (verdicts.every((v) => v === TopicValidatorResult.Reject)) return TopicValidatorResult.Reject;
+    return TopicValidatorResult.Ignore;
+  }
+
+  /** One handle's verdict on a topic message (the validator as it was per node before #160). */
+  private async validateFor(handle: string, h: Handle, topic: string, msg: { from: PeerId; data: Uint8Array; sequenceNumber: bigint; signature: Uint8Array }): Promise<TopicValidatorResult> {
+    const live = this.live.takes(handle, topic) ? this.live.observe(handle, topic, msg.data, msg.from.toString()) : undefined;
+    if (!h.config.topics.includes(topic)) return live === "accept" ? TopicValidatorResult.Accept : live === "reject" ? TopicValidatorResult.Reject : TopicValidatorResult.Ignore;
     try {
-      const a = await this.o.inbound(n.handle, {
+      const a = await this.o.inbound(handle, {
         transport: "libp2p", topic, from: msg.from.toMultihash().bytes, seqno: u64(msg.sequenceNumber), signature: msg.signature, body: msg.data,
       });
       return a.verdict === "accept" ? TopicValidatorResult.Accept : a.verdict === "reject" ? TopicValidatorResult.Reject : TopicValidatorResult.Ignore;
     } catch (e) {
       // The host failing is not the message's fault: no penalty.
-      this.say(n.handle, `libp2p: ${topic}: validation failed: ${(e as Error).message}`);
+      this.say(handle, `libp2p: ${topic}: validation failed: ${(e as Error).message}`);
       return TopicValidatorResult.Ignore;
     }
   }
 
-  /** An inbound stream on a handled protocol: each frame one front-door call, its answer's body written back. */
+  /**
+   * Which handle an inbound stream on `protocol` is for (#160), by its first frame: the handles that
+   * declare the protocol (every handle declares /skein/message/1.0.0); the frame's `topic` (dag-cbor
+   * {topic, …}) picks the one among them that takes it; a frame naming none, or a topic none of them
+   * takes, goes to the one handle that declares the protocol; with several, a problem.
+   */
+  private streamHandle(n: Node, protocol: string, first: Uint8Array): { handle: string } | { problem: string } {
+    const declaring = [...n.handles].filter(([, h]) => protocol === MESSAGE_PROTOCOL || h.config.protocols.includes(protocol)).map(([handle]) => handle);
+    if (declaring.length === 1) return { handle: declaring[0]! };
+    if (!declaring.length) return { problem: `no instance here declares ${protocol}` };
+    let topic: unknown;
+    try { const v = dagCbor.decode(first) as { topic?: unknown } | null; topic = v && typeof v === "object" ? v.topic : undefined; } catch { /* not dag-cbor: it names no topic */ }
+    if (typeof topic !== "string" || !topic) return { problem: TOPIC_REQUIRED };
+    // A topic several declaring instances take (a discovery instance beside a token instance, #137): the first declared of them.
+    const taker = declaring.find((handle) => n.handles.get(handle)!.config.topics.includes(topic as string));
+    return taker ? { handle: taker } : { problem: `no instance here takes ${topic}` };
+  }
+
+  /** An inbound stream on a handled protocol: its first frame picks the handle (#160); each frame one front-door call, its answer's body written back. */
   private async serve(n: Node, protocol: string, stream: Stream, remote: PeerId): Promise<void> {
     const lp = lpStream(stream);
+    let handle = this.nameOf(n);
     try {
-      for (;;) {
-        let frame: Uint8Array;
-        try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed or reset its side: the stream is over either way, and nothing here is owed an answer
-        const a = await this.o.inbound(n.handle, { transport: "libp2p", protocol, from: remote.toMultihash().bytes, body: frame });
-        if (a.body) await lp.write(a.body);
-        if (a.close || a.verdict === "reject") break;
+      let first: Uint8Array | undefined;
+      try { first = (await lp.read()).subarray(); } catch { /* the remote closed before a frame: nothing owed */ }
+      if (first) {
+        const to = this.streamHandle(n, protocol, first);
+        if ("problem" in to) {
+          this.say(handle, `libp2p: ${protocol} from ${remote}: ${to.problem}: answered and closed`);
+          await lp.write(dagCbor.encode({ kind: "error", message: to.problem }));
+          await stream.close().catch(() => {});
+          return;
+        }
+        handle = to.handle;
+        for (let frame: Uint8Array | undefined = first; ;) {
+          const a = await this.o.inbound(handle, { transport: "libp2p", protocol, from: remote.toMultihash().bytes, body: frame });
+          if (a.body) await lp.write(a.body);
+          if (a.close || a.verdict === "reject") break;
+          try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed or reset its side: the stream is over either way, and nothing here is owed an answer
+        }
       }
       await stream.close().catch(() => {}); // a stream the remote already closed or reset cannot be closed again; every frame was answered
     } catch (e) {
-      this.say(n.handle, `libp2p: ${protocol} from ${remote}: ${(e as Error).message}`);
+      this.say(handle, `libp2p: ${protocol} from ${remote}: ${(e as Error).message}`);
       stream.abort(e as Error);
     }
   }
@@ -725,7 +847,7 @@ export class P2PHost {
   // ---------------------------------------------------------------- outbound (the libp2p provider's, #70)
 
   private nodeOf(handle: string): Node {
-    const n = this.nodes.get(handle);
+    const n = this.byHandle.get(handle);
     if (!n) throw new Error("this instance has no libp2p node (its config names no libp2p)");
     return n;
   }
@@ -738,21 +860,22 @@ export class P2PHost {
    * when a beacon starts, changes or stops. No node: nothing beats.
    */
   beacons(handle: string, beacons: Beacon[]): void {
-    const n = this.nodes.get(handle);
-    if (!n) return;
+    const n = this.byHandle.get(handle);
+    const hs = n?.handles.get(handle);
+    if (!n || !hs) return;
     const want = new Map(beacons.map((b) => [`${b.app} ${b.topic}`, b]));
-    for (const [k, x] of n.beats) {
+    for (const [k, x] of hs.beats) {
       const b = want.get(k);
       if (b && b.every === x.beacon.every && Buffer.from(b.body).equals(Buffer.from(x.beacon.body))) continue;
       clearInterval(x.timer);
-      n.beats.delete(k);
+      hs.beats.delete(k);
       if (!b) this.say(handle, `libp2p: beacon ${x.beacon.topic} (app ${x.beacon.app}) stopped`);
     }
     for (const [k, b] of want) {
-      if (n.beats.has(k)) continue;
+      if (hs.beats.has(k)) continue;
       // Each beat a new frame: the body, now, signed by the instance's signer (beaconFrame).
       const beat = () => {
-        if (this.nodes.get(handle) !== n) return;
+        if (this.byHandle.get(handle) !== n || n.handles.get(handle) !== hs) return;
         const { sign, identity } = this.o;
         if (!sign || !identity) return;
         void (async () => {
@@ -764,7 +887,7 @@ export class P2PHost {
           if (this.live.takes(handle, b.topic)) this.live.observe(handle, b.topic, frame, n.node.peerId.toString());
         })().catch(() => {});
       };
-      n.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
+      hs.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
       beat();
       this.say(handle, `libp2p: beacon ${b.topic} (app ${b.app}) every ${b.every} ms, ${b.body.length} bytes`);
     }
@@ -786,11 +909,12 @@ export class P2PHost {
   /** Open a stream from `handle`'s node to a peer (a peer ID, or a multiaddr with /p2p/<id>): its id; each frame read from it, and its end, to `frames`. */
   async dial(handle: string, peer: string, protocol: string, frames: (f: Frame) => void): Promise<number> {
     const n = this.nodeOf(handle);
+    const hs = n.handles.get(handle)!;
     const target = peer.startsWith("/") ? multiaddr(peer) : peerIdFromString(peer);
     const stream = await n.node.dialProtocol(target, protocol, { signal: AbortSignal.timeout(15_000) });
     const id = ++nextStream;
     const s = { stream, lp: lpStream(stream) };
-    n.streams.set(id, s);
+    hs.streams.set(id, s);
     void (async () => {
       for (;;) {
         try {
@@ -798,7 +922,7 @@ export class P2PHost {
         } catch (e) {
           const name = (e as Error).name;
           const clean = name === "UnexpectedEOFError" || name === "StreamClosedError" || name === "StreamResetError";
-          if (n.streams.get(id) === s) frames({ closed: true, ...(clean ? {} : { error: (e as Error).message }) });
+          if (hs.streams.get(id) === s) frames({ closed: true, ...(clean ? {} : { error: (e as Error).message }) });
           return;
         }
       }
@@ -828,43 +952,64 @@ export class P2PHost {
 
   /** The peers `handle`'s node knows subscribe `topic` (GossipSub's view), as peer ID strings. */
   subscribers(handle: string, topic: string): string[] {
-    const n = this.nodes.get(handle);
+    const n = this.byHandle.get(handle);
     return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
   }
 
   /** Write one length-prefixed frame on a dialled stream. */
   async send(handle: string, id: number, body: Uint8Array): Promise<void> {
-    const s = this.nodeOf(handle).streams.get(id);
+    const s = this.nodeOf(handle).handles.get(handle)!.streams.get(id);
     if (!s) throw new Error(`send: no stream ${id}`);
     await s.lp.write(body);
   }
 
   /** Close a dialled stream (our side), and forget it. */
   async close(handle: string, id: number): Promise<void> {
-    const n = this.nodeOf(handle);
-    const s = n.streams.get(id);
+    const hs = this.nodeOf(handle).handles.get(handle)!;
+    const s = hs.streams.get(id);
     if (!s) throw new Error(`close: no stream ${id}`);
-    n.streams.delete(id);
+    hs.streams.delete(id);
     await s.stream.close().catch(() => s.stream.abort(new Error("closed")));
   }
 
   // ---------------------------------------------------------------- lifecycle
 
+  /** `handle` leaves its node (its beats stopped, its liveness forgotten); the node stops with its last handle, else follows the handles left. */
   private async drop(handle: string): Promise<void> {
-    const n = this.nodes.get(handle);
+    const n = this.byHandle.get(handle);
     if (!n) return;
-    this.nodes.delete(handle);
-    clearInterval(n.timer);
-    for (const b of n.beats.values()) clearInterval(b.timer);
-    n.beats.clear();
+    const hs = n.handles.get(handle);
+    n.handles.delete(handle);
+    this.byHandle.delete(handle);
+    for (const b of hs?.beats.values() ?? []) clearInterval(b.timer);
+    hs?.beats.clear();
     this.live.drop(handle);
+    if (n.handles.size) {
+      this.resubscribe(n);
+      await this.rehandle(n).catch((e) => this.say(handle, `libp2p: leaving its key's node: ${(e as Error).message}`));
+      this.say(handle, `libp2p: left the node of its key ${n.id} (${n.handles.size} instances on it)`);
+      return;
+    }
+    this.nodes.delete(n.id);
+    clearInterval(n.timer);
     try { await n.node.stop(); } catch (e) { this.say(handle, `libp2p: stop: ${(e as Error).message}`); } // dropped either way
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     await Promise.all([...this.starting.values()].map((p) => p.catch(() => {}))); // each declare's failure went to its caller: this waits for them to settle
-    await Promise.all([...this.nodes.keys()].map((h) => this.drop(h)));
+    // Every node stopped at once, its handles with it (nothing to follow on a node that stops).
+    await Promise.all([...this.nodes.values()].map(async (n) => {
+      for (const [handle, hs] of n.handles) {
+        for (const b of hs.beats.values()) clearInterval(b.timer);
+        this.byHandle.delete(handle);
+        this.live.drop(handle);
+      }
+      n.handles.clear();
+      this.nodes.delete(n.id);
+      clearInterval(n.timer);
+      try { await n.node.stop(); } catch (e) { this.say(n.id, `libp2p: stop: ${(e as Error).message}`); } // dropped either way
+    }));
   }
 }
 

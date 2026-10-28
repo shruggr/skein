@@ -126,14 +126,15 @@ import { openStoreFile, storeExists } from "./stores.ts";
 import { rootOf } from "./install.ts";
 import { OVERLAY_ROLE } from "./manifest.ts";
 import { appHead } from "./plan.ts";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
+import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
 import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
-import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
+import { HANDLE, pathOnly, TOKEN_HANDLE, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
+import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
@@ -226,6 +227,21 @@ export interface RouterOptions {
   libp2pDiscoveryMs?: number;
   /** #130: what this host bills (billing.ts; `skein-host run`: billingConfig over the environment). Absent: it bills no one. */
   billing?: BillingConfig;
+  /**
+   * #160, #162: a one-key host's shared key's wallet (signer.ts Signer.oneKey). With it, an instance the
+   * host creates (createInstance) with no forwarded claim is claimed by the host itself: the claim
+   * message signed by this key (its owner), appended as a forwarded claim is. Absent (a master-key
+   * host): a create needs the owner's own signed claim, as before.
+   */
+  claimer?: WalletInterface;
+  /**
+   * #162, SKEIN_MANAGER_FOR (host env): the instances besides the host skein the instance manager
+   * takes messages from — the manager in their address book at birth, as in the host skein's (not the
+   * certifier). No other instance reaches it.
+   */
+  managerFor?: string[];
+  /** #162, SKEIN_IMAGES_DIR (default $SKEIN_HOME/images): the images a create names by name, a directory each (the layout `skein-host add --image <dir>` takes). */
+  imagesDir?: string;
 }
 
 interface Loaded {
@@ -506,6 +522,8 @@ export class Router {
       // #90: the instance manager acts for the host skein alone.
       manager: {
         from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
+        // #162: SKEIN_MANAGER_FOR — these instances too (each by its own identity).
+        alsoFor: () => (this.o.managerFor ?? []).flatMap((h) => { const r = this.o.db.get(h); return r?.identity && r.status === "enabled" ? [{ handle: r.handle, identity: r.identity }] : []; }),
         request: (box, body) => this.manage(box, body),
       },
       // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
@@ -559,6 +577,8 @@ export class Router {
 
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
+    // #161: a path-only handle (a token id) has no hostname: its origin is /@<handle> on the host's own.
+    if (pathOnly(handle)) return `${this.origin().replace(/\/+$/, "")}/@${handle}`;
     return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
   }
 
@@ -997,8 +1017,8 @@ export class Router {
    * one), the status provider (#65, when it has an Arcade) — and the owner's
    * mailbox, when it knows it.
    */
-  addressSeed(): AddressSeed[] {
-    const names: ProviderName[] = ["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])];
+  addressSeed(handle?: string): AddressSeed[] {
+    const names: ProviderName[] = ["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(handle !== undefined && this.managerFor(handle) ? ["manager" as const] : [])];
     const out: AddressSeed[] = this.providers.entries(names);
     const mb = this.ownerMessagebox();
     if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
@@ -1015,13 +1035,40 @@ export class Router {
    * in its address book too (no other instance's book names them).
    */
   imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
-    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
+    // #162: an instance SKEIN_MANAGER_FOR names gets the instance manager (not the certifier), as the host skein has it.
+    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : this.managerFor(row.handle) ? ["manager" as const] : [])]);
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
       feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
     };
+  }
+
+  /** #162: whether SKEIN_MANAGER_FOR names `handle` (the instance manager in its address book, its messages taken). */
+  managerFor(handle: string): boolean { return (this.o.managerFor ?? []).includes(handle); }
+
+  /**
+   * #162: the image a create names, as a boot source — the built-in `default` (this host's, with its
+   * chain part), or a directory `<imagesDir>/<name>` (SKEIN_IMAGES_DIR, default $SKEIN_HOME/images;
+   * the layout `skein-host add --image <dir>` takes: with no bin/ merged over the default image as
+   * images/host is, with bin/ a complete image). Its path resolved first (a link to an app repository's
+   * image/ reads `..` beside the repository's image, not beside the link).
+   */
+  private async namedImage(name: string | undefined, host: boolean | undefined): Promise<BootSource> {
+    if (host || name === undefined || name === "default") return await this.image.source({ host, ...(name ? { image: name } : {}) });
+    const dir = this.imageDir(name);
+    if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image, mailbox instances${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
+    return isOverlayImage(dir) ? await this.image.source({ overlay: dir }) : await imageSource(dir);
+  }
+
+  /** #162: an image by name: its directory under imagesDir (resolved), or undefined. */
+  private imageDir(name: string): string | undefined {
+    if (!this.o.imagesDir || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name === "host" || name === "mailbox") return undefined;
+    try {
+      const d = realpathSync(join(this.o.imagesDir, name));
+      return statSync(d).isDirectory() ? d : undefined;
+    } catch { return undefined; } // no such image here
   }
 
   /** Whether `owner` holds root on the instance (#143: the head `grants`): claimed by that key. */
@@ -1062,14 +1109,20 @@ export class Router {
    * registrations) and `skein-host add --mailbox` both come here.
    */
   async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<{ handle: string; identity: string; url: string }> {
-    if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
+    if (!validHandle(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
+    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox" && !this.imageDir(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image${this.o.imagesDir ? `, the images in ${this.o.imagesDir}` : ""} and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
-    const claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
+    let claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
+    // #162: a one-key host claims what it creates itself — the claim signed by its shared key (the owner).
+    if (!claim && !o.host && this.o.claimer && o.needsClaim) {
+      const me = (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey;
+      if (owner !== me) throw new Error(`owner: on a one-key host the claim is the host's own key's (${short(me)}): name it or no owner, or forward the owner's signed claim`);
+      claim = claimOf(await signClaim(this.o.claimer));
+    }
     if (!claim && o.needsClaim) claimOf(undefined);
     if (claim) claimProblem(claim, owner);
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
@@ -1081,7 +1134,8 @@ export class Router {
       await this.image.ready; // #132: born with the chain as the host holds it
       // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
       // operator's key, `appConfig` merged.
-      await this.bootRow(handle, await this.image.source({ host: o.host, ...(o.image ? { image: o.image } : {}) }), { image: true, manager: o.host, ...(o.host ? { owner, ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : {}) });
+      // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
+      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(o.host ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
@@ -1100,7 +1154,7 @@ export class Router {
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
       const tip = this.image.tip();
-      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);
@@ -1144,11 +1198,15 @@ export class Router {
   private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
     const handle = typeof b.handle === "string" ? b.handle : "";
     if (box === "create") {
-      const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : "";
+      // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
+      const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
+      const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
       if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
       if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
-      // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded).
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), needsClaim: true });
+      // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
+      if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
+      // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
+      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), needsClaim: true });
       return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
     }
     if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
@@ -1181,7 +1239,7 @@ export class Router {
     const genesisDefaults = this.o.genesis?.defaults;
     const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
-    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(), providers: Object.fromEntries(this.addressSeed().filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
+    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(row.handle), providers: Object.fromEntries(this.addressSeed(row.handle).filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
@@ -1690,7 +1748,7 @@ export class Router {
     if (m) { const h = decodeURIComponent(m[1]!); return enabled(h) ? { handle: h, route: m[2] ?? "/" } : undefined; }
     const name = url.hostname.toLowerCase();
     const label = name.includes(".") ? name.split(".")[0]! : "";
-    if (label && label !== this.ownLabel() && enabled(label)) return { handle: label, route: url.pathname };
+    if (label && HANDLE.test(label) && label !== this.ownLabel() && enabled(label)) return { handle: label, route: url.pathname }; // #161: a path-only handle never by hostname
     return undefined;
   }
 
@@ -1740,6 +1798,12 @@ export class Router {
       return await this.held(this.forward(t.handle, t.route, url, req));
     }
     const path = url.pathname;
+    // #161: an overlay request at the bare host (a wallet's one provider URL) goes to the instance its topic names.
+    if (req.method === "POST" && (path === "/submit" || path === "/lookup")) {
+      const o = this.overlayTarget(path, req);
+      if ("problem" in o) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: o.problem });
+      if (o.handle) return await this.held(this.forward(o.handle, path, url, req));
+    }
     if (req.method === "GET" && path === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
     const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
@@ -1752,6 +1816,42 @@ export class Router {
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
+  }
+
+  /**
+   * #161: an overlay request at the bare host — POST /submit (the topics its X-Topics names: a comma
+   * list or a JSON array, as the overlay reads it) or POST /lookup (its JSON body's `service`
+   * `ls_color_<id>`, or a `topic` `tm_color_<id>` beside it or in its query) — routed to the enabled
+   * path-only instance whose handle is that `<id>`. Every name that maps must map to the same instance
+   * (else a problem: 400); a topic naming no instance here beside one that does is a problem too.
+   * Nothing maps: no handle (the bare host as before).
+   */
+  overlayTarget(path: "/submit" | "/lookup", req: RouterRequest): { handle?: string } | { problem: string } {
+    const names: string[] = [];
+    if (path === "/submit") {
+      const h = (req.headers["x-topics"] ?? "").trim();
+      if (!h) return {};
+      if (h.startsWith("[")) {
+        let j: unknown;
+        try { j = JSON.parse(h); } catch { return {}; } // the overlay's own refusal, at no instance: the bare host's
+        if (!Array.isArray(j)) return {};
+        for (const t of j) if (typeof t === "string") names.push(t);
+      } else names.push(...h.split(",").map((x) => x.trim()).filter(Boolean));
+    } else {
+      let j: Record<string, unknown> | undefined;
+      try { j = JSON.parse(new TextDecoder().decode(req.body)) as Record<string, unknown>; } catch { return {}; }
+      if (!j || typeof j !== "object") return {};
+      const q = j.query as Record<string, unknown> | undefined;
+      for (const t of [j.service, j.topic, q && typeof q === "object" ? q.topic : undefined]) if (typeof t === "string") names.push(t);
+    }
+    const ids = names.map((n) => /^(?:tm|ls)_color_(.+)$/.exec(n)?.[1]);
+    const here = ids.map((id) => id && TOKEN_HANDLE.test(id) && this.o.db.get(id)?.status === "enabled" ? id : undefined);
+    const hit = [...new Set(here.filter((x): x is string => !!x))];
+    if (!hit.length) return {};
+    if (hit.length > 1) return { problem: `the topics name ${hit.length} instances here (${hit.join(", ")}): one request goes to one; send one per token` };
+    const stray = names.filter((_, i) => !here[i]);
+    if (stray.length) return { problem: `${stray.join(", ")}: no instance here takes ${stray.length > 1 ? "these" : "it"} beside ${hit[0]}: send one request per instance` };
+    return { handle: hit[0]! };
   }
 
   /**
