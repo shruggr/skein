@@ -24,7 +24,15 @@
 //       book and asks it to create T2 from the image `okimg`
 //       ($SKEIN_HOME/images/okimg) with `config`: the row is there, enabled,
 //       claimed by the shared key, its app record's config the one asked;
-//       stop disables it; T1 (not named) is not acted on; on D (master key) a
+//       (skein-amm#4) the image carries the chain app and the overlay
+//       (skein-overlay 0.17.0), the create's config names T2's topic, a
+//       lookup and terms, and its `beef` is a mined token: answered
+//       delivered {verdict: "accept"}, admitted under the configured topic,
+//       the topic and the lookup beating on <name>-live with the configured
+//       terms; stop disables it and takes it off the node, start brings it
+//       and its beats back; a create with an unmined BEEF answers delivered
+//       {verdict: ignore|reject, reason}, the instance created and enabled;
+//       T1 (not named) is not acted on; on D (master key) a
 //       create with no claim is refused as before;
 //   (f) D's dd syncs tm_color_T0 from T0 (the #150 sync path: the locator and
 //       the pulls over /skein/overlay/sync/1.0.0, answered through O's shared
@@ -63,7 +71,7 @@ import type { MailRecord } from "../../src/host/providers.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "924d60f559503e9df59f596bed0162f171f1e768"; // as equiv/sync.ts
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "9d72ecae2e3cd20728136bd9b649c63e9fb9b857"; // v0.17.0: configured topics and lookups beat (skein-amm#4)
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -365,7 +373,9 @@ try {
   // ------------------------------------------------ (e) an instance creates an instance (SKEIN_MANAGER_FOR)
   const imgDir = join(homeO, "images", "okimg");
   mkdirSync(join(imgDir, "etc"), { recursive: true });
-  writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [appTree("img", [])] })); // okt with no rows (app-demo's own manifest has a start message: not at birth)
+  // skein-amm#4: the chain app and the overlay beside okt (with no rows: app-demo's own manifest has a start message, not at birth),
+  // so a create's `config` can name the new instance's topic and its `beef` be judged under it.
+  writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir, overlayDir, appTree("img", [])] }));
   const book = async (r: Router, h: string) => (((await (await r.hydrate(h)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   check((await book(rO, "alice")).includes("manager") && !(await book(rO, T1)).includes("manager"), "(e) alice's address book names the instance manager (SKEIN_MANAGER_FOR); T1's does not");
   const answers: Array<{ handle: string; box: string; body: Record<string, unknown> }> = [];
@@ -384,12 +394,46 @@ try {
     await r.settled();
     return answers.slice(k).filter((a) => a.box === box && a.handle === from);
   };
-  const config = { okt: { onekey: "the admin's initial values" } };
+  // skein-amm#4: the create carries a mined token's BEEF; the new instance's overlay serves tm_color_T2 from its config at birth.
+  const overlayAt = (t: string, terms?: Record<string, number>) => ({ overlay: { topics: { [t]: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: [t] } }, ...(terms ? { terms } : {}) } });
+  const TERMS = { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
+  const tE = await token(fund, 2);
+  const hE = mineAlone(tE);
+  await feedHeaders(rO, T0, hE);
+  // A host with a headers feed fills its image's chain from it (#132): a new instance is born with the headers (on
+  // SQLite and LMDB each instance holds them; on RocksDB the host chain is the kernel process's, #156).
+  await (rO as unknown as { image: { headers(raws: Uint8Array[]): Promise<void> } }).image.headers([REGTEST_GENESIS, ...headers.slice(0, hE)]);
+  const config = { okt: { onekey: "the admin's initial values" }, overlay: overlayAt(topicOf(T2), TERMS) };
   const tc = Date.now();
-  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config });
+  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, beef: Uint8Array.from(tE.toAtomicBEEF()) });
   const createMs = Date.now() - tc;
-  timings.push(`create by emit (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, to its answer): ${createMs} ms`);
-  check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 220)}`);
+  timings.push(`create by emit with the deploy's BEEF (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, the BEEF delivered, to its answer): ${createMs} ms`);
+  check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url, delivered}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 260)}`);
+  const del = a[0]?.body.delivered as { verdict?: string; reason?: string } | undefined;
+  check(del?.verdict === "accept", `(e) the create's BEEF (a token mined at ${hE}) delivered into the new instance: ${JSON.stringify(del)}`);
+  const admittedE = await until("T2 admits the create's BEEF", async () => {
+    const r = await fetch(`${base}/@${T2}/overlay/admitted?topic=${topicOf(T2)}&fromHeight=${hE}&toHeight=${hE}`);
+    if (r.status !== 200) return undefined;
+    const x = await r.json() as { blocks?: Array<{ txids: string[] }> };
+    return x.blocks?.some((b) => b.txids.includes(tE.id("hex"))) || undefined;
+  }, 10_000).catch(() => false);
+  check(admittedE === true, `(e) the new instance admitted it under tm_color_<txid>_2, the topic its config at birth declares (/@<txid>_2/overlay/admitted at ${hE})`);
+  // skein-overlay 0.17.0: a configured topic and lookup beat on <name>-live (the validator's every: 1000 ms here),
+  // the beat's terms config.overlay.terms (the initial value: no head overlay/terms written).
+  const liveAt = async (name: string) => {
+    const r = await fetch(`${base}/@${T2}/overlay/.live/${name}-live`);
+    if (r.status !== 200) return undefined;
+    const xs = await r.json() as Array<{ sender: string; at: number; body: string }>;
+    return xs.length ? xs : undefined;
+  };
+  const tl = Date.now();
+  const topicBeats = await until("T2 beats tm_color_<txid>_2-live", () => liveAt(topicOf(T2)), 5000).catch(() => undefined);
+  const lookupBeats = await until("T2 beats ls_demo-live", () => liveAt("ls_demo"), 5000).catch(() => undefined);
+  timings.push(`a configured topic's first beat seen after the create's answer: ${Date.now() - tl} ms (validator every 1000 ms)`);
+  const beatTerms = topicBeats ? (dagCbor.decode(Buffer.from(topicBeats[0]!.body, "base64")) as { terms?: Record<string, number> }).terms : undefined;
+  check(!!topicBeats && !!lookupBeats, `(e) its configured topic and lookup beat: .live/tm_color_<txid>_2-live ${topicBeats?.length ?? 0} beat(s), .live/ls_demo-live ${lookupBeats?.length ?? 0}`);
+  const sorted = (o: object | undefined) => JSON.stringify(o && Object.fromEntries(Object.entries(o).sort()));
+  check(sorted(beatTerms) === sorted(TERMS), `(e) the topic's beat carries config.overlay.terms as its terms (${JSON.stringify(beatTerms)})`);
   const row2 = dbO.get(T2);
   if (row2?.status === "enabled") { stores.push(storeSpec(row2)); handleOf.set(storeSpec(row2), T2); }
   check(row2?.status === "enabled", `(e) the row ${T2.slice(0, 8)}…_2 exists, enabled (${row2?.status})`);
@@ -402,7 +446,22 @@ try {
     check((appRec.config as Record<string, unknown> | undefined)?.onekey === "the admin's initial values", `(e) its app record carries the create's config (${JSON.stringify(appRec.config)})`);
   }
   a = await ask(rO, "alice", "stop", { handle: T2 });
-  check(a[0]?.body.stopped === true && dbO.get(T2)?.status === "disabled", "(e) stop disables it");
+  check(a[0]?.body.stopped === true && dbO.get(T2)?.status === "disabled" && !rO.p2p!.handlesOn(T0).includes(T2), "(e) stop disables it and takes it off the node (its beacons stop)");
+  // A start: enabled, on the node again, its configured beacons folded back from its log (no new step needed).
+  a = await ask(rO, "alice", "start", { handle: T2 });
+  const restarted = await until("T2 beats again after start", () => liveAt(topicOf(T2)), 5000).catch(() => undefined);
+  check(a[0]?.body.started === true && dbO.get(T2)?.status === "enabled" && rO.p2p!.handlesOn(T0).includes(T2) && !!restarted, `(e) start enables it again and its configured topic beats again (${restarted?.length ?? 0} beat(s))`);
+  await ask(rO, "alice", "stop", { handle: T2 });
+  // An unmined BEEF: turned away at the door (the HARD RULE), reported in the answer, the instance created and enabled.
+  const TU = `${TXID}_10`;
+  const tU = await token(fund, 3);
+  a = await ask(rO, "alice", "create", { handle: TU, image: "okimg", config: { overlay: overlayAt(topicOf(TU)) }, beef: Uint8Array.from(tU.toAtomicBEEF()) });
+  const delU = a[0]?.body.delivered as { verdict?: string; reason?: string } | undefined;
+  const rowU = dbO.get(TU);
+  if (rowU) { stores.push(storeSpec(rowU)); handleOf.set(storeSpec(rowU), TU); }
+  check(a[0]?.body.handle === TU && (delU?.verdict === "reject" || delU?.verdict === "ignore") && !!delU?.reason, `(e) a create with an unmined BEEF answers delivered ${JSON.stringify(delU)}`);
+  check(rowU?.status === "enabled", `(e) … and the instance is created and enabled (${rowU?.status})`);
+  await ask(rO, "alice", "stop", { handle: TU });
   const nLines = lines.length;
   a = await ask(rO, T1, "create", { handle: `${TXID}_9`, image: "okimg" });
   check(a.length === 0 && !dbO.get(`${TXID}_9`) && lines.slice(nLines).some((l) => /the instance manager takes messages from the host skein only: not acted on/.test(l)), "(e) T1 (not named) gets the manager's refusal: not acted on, nothing created");

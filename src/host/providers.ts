@@ -89,7 +89,8 @@
 //                     {error}): a bad or taken handle, a bad owner key, another
 //                     image, no claim, another key's claim, a refused claim
 //              start {handle}   → {handle, started: true, url}: published and started
-//              stop {handle}    → {handle, stopped: true}: unpublished and stopped
+//              stop {handle}    → {handle, stopped: true}: unpublished and stopped (off its
+//                     libp2p node too: its beacons stop, skein-amm#4)
 //              create {handle, owner, image: "mailbox", domain?} (#113): a mailbox
 //                     instance for `owner` (the front door and the messagebox,
 //                     keeping its mail), published at once; the same owner and
@@ -102,6 +103,11 @@
 //                     at birth ({<app>: {…}}, merged as an install's --config);
 //                     `image` the default image, `mailbox`, or an image by name
 //                     ($SKEIN_HOME/images/<name>, SKEIN_IMAGES_DIR)
+//              create {…, beef?} (skein-amm#4): an Atomic BEEF handed into the new
+//                     instance's receive row /skein/overlay/beef/1.0.0 once it is up
+//                     (as a catch-up's fetched BEEF, from the host's own peer); the
+//                     answer gains delivered: {verdict, reason?} (turned away at the
+//                     door: reported, not retried, the instance stays created)
 //              Also for the instances SKEIN_MANAGER_FOR names (#162): the manager in
 //              their address book at birth, their messages taken as the host skein's
 //   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,

@@ -1206,8 +1206,12 @@ export class Router {
       // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
       if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
       // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
+      // skein-amm#4: `beef` — an Atomic BEEF (the token's deploy) handed into the new instance once it is up.
+      if (b.beef != null && !(b.beef instanceof Uint8Array)) throw new Error("beef: an Atomic BEEF (bytes)");
       const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), needsClaim: true });
-      return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+      const answer: Record<string, unknown> = { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+      if (b.beef instanceof Uint8Array) answer.delivered = await this.deliverBeef(c.handle, b.beef);
+      return answer;
     }
     if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
     const row = this.o.db.get(handle);
@@ -1224,9 +1228,36 @@ export class Router {
     await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
+    // skein-amm#4: off its libp2p node too (as reclaim), so a stopped instance's beacons stop beating; a start's hydrate declares it again.
+    await this.p2p?.declare(handle, undefined).catch(() => {});
     this.events.drop(handle);
     this.say("router", `${handle}: stopped by the instance manager`);
     return { handle, stopped: true };
+  }
+
+  /**
+   * A create's `beef` (skein-amm#4): the Atomic BEEF handed into the new instance's receive row
+   * (/skein/overlay/beef/1.0.0) exactly as a catch-up's fetched BEEF is (sync.ts `deliver`), from the
+   * host's own peer, and the answer → {verdict, reason?}. No topic is named here: the instance's engine
+   * judges it under the topics its config declares. Turned away at the door (unmined, a bad BUMP): reported,
+   * not retried; the instance stays created.
+   */
+  private async deliverBeef(handle: string, beef: Uint8Array): Promise<{ verdict: string; reason?: string }> {
+    let from = new Uint8Array();
+    try { if (this.p2p) from = peerIdFromString(this.p2p.peerId(handle)).toMultihash().bytes; } catch { /* no peer: the record names none */ }
+    // The door checks the BUMPs against chain/state: the host chain's event (#156, sent at the start, not awaited there) taken first.
+    await this.chainBirth(handle).catch(() => {});
+    const l = this.loaded.get(handle);
+    if (l) { await this.queues.get(handle); await l.kernel.idle().catch(() => {}); }
+    try {
+      const r = await this.p2pInbound(handle, { transport: "libp2p", protocol: BEEF_PROTOCOL, from, body: beef });
+      this.say("router", `${handle}: the create's BEEF delivered: ${r.verdict}${r.reason ? ` (${r.reason})` : ""}`);
+      return { verdict: r.verdict, ...(r.reason ? { reason: r.reason } : {}) };
+    } catch (e) {
+      const reason = (e as Error).message;
+      this.say("router", `${handle}: the create's BEEF not delivered: ${reason}`);
+      return { verdict: "ignore", reason };
+    }
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */

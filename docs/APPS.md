@@ -633,11 +633,14 @@ rows, `/submit` and `/lookup` as below, and no per-topic rows. A manifest
 may still pre-configure topics (OpNS: one global topic). There are no prefix
 declarations: `prefixes`, here or in a lookup service, is refused as an
 unknown field, as is any field other than `topics`, `lookups`, `gossip`,
-`market` and `validator` (and, in a lookup service's object form,
+`market`, `validator` and `terms` (and, in a lookup service's object form,
 `program`, `topics`). `market: {window: <ms>}` and `validator: {every:
 <ms>}` (skein-overlay 0.9.0, #120) are the engine's own settings, read from
 the app record as `topics` is; the install checks their shape (a positive
-integer of milliseconds) and derives no rows from them.
+integer of milliseconds) and derives no rows from them. `terms` (a map,
+skein-overlay 0.17.0, skein-amm#4) is the beat's initial terms, opaque to
+the host: the engine beats the head `<app>/terms` once the app writes it,
+else this.
 
 **Its state is under its own name** (#79, skein-overlay ≥ 0.3.0):
 `<app>/state` (what its topics admitted and judged, and the submissions

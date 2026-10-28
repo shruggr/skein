@@ -430,7 +430,7 @@ export interface OverlayWiring { routes: Route[]; topics: string[] }
 
 const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 /** The fields of `config.overlay` (`status` is refused with its own reason). */
-const OVERLAY_FIELDS = ["topics", "lookups", "gossip", "market", "validator"];
+const OVERLAY_FIELDS = ["topics", "lookups", "gossip", "market", "validator", "terms"];
 
 /**
  * The wiring `config.overlay` asks for (APPS.md §6, #79, #143), or its problems. For each topic:
@@ -443,13 +443,14 @@ const OVERLAY_FIELDS = ["topics", "lookups", "gossip", "market", "validator"];
  * the engine, which the manifest must declare `lookup` a filter of. No `chain` or `status` box (the
  * chain app's): the engine writes `<app>/…` only. No topics is accepted: the box routes, `/submit`
  * and `/lookup` and no per-topic routes — the topics registered at runtime get theirs from the
- * engine (#120). `market` ({window: <ms>}) and `validator` ({every: <ms>}) are the engine's own
- * settings, read from the app record: checked, no routes derived. A field other than these is
+ * engine (#120). `market` ({window: <ms>}), `validator` ({every: <ms>}) and `terms` (a map, the
+ * beat's initial terms: skein-overlay 0.17.0) are the engine's own settings, read from the app record:
+ * checked, no routes derived. A field other than these is
  * refused (no prefix declarations, #120). `isRole` tells which roles the manifest has.
  */
 export function overlayWiring(app: string, ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
   const bad: string[] = [];
-  if (!isMap(ov)) return ["want {topics?, lookups?, gossip?, market?, validator?}"];
+  if (!isMap(ov)) return ["want {topics?, lookups?, gossip?, market?, validator?, terms?}"];
   if (!isRole(OVERLAY_ROLE)) bad.push(`the engine is the role "${OVERLAY_ROLE}": programs has none`);
   const topics: string[] = [];
   if (ov.topics !== undefined && !isMap(ov.topics)) bad.push("topics: want {<topic>: <role>}");
@@ -474,6 +475,8 @@ export function overlayWiring(app: string, ov: unknown, isRole: (role: string) =
   const ms = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v > 0;
   if (ov.market !== undefined && (!isMap(ov.market) || !ms(ov.market.window) || Object.keys(ov.market).some((k) => k !== "window"))) bad.push("market: want {window: <ms>}");
   if (ov.validator !== undefined && (!isMap(ov.validator) || !ms(ov.validator.every) || Object.keys(ov.validator).some((k) => k !== "every"))) bad.push("validator: want {every: <ms>}");
+  // skein-overlay 0.17.0 (skein-amm#4): the beat's initial terms, opaque to the host (the head <app>/terms wins once written).
+  if (ov.terms !== undefined && ov.terms !== null && !isMap(ov.terms)) bad.push("terms: want a map (the beat's initial terms) or null");
   if (bad.length) return bad;
   const engine = (fn: string) => `${OVERLAY_ROLE}.${fn}`;
   // #121, #143: a submission's BEEF is decoded at the kernel's door (kernel.beef): the handler gets its pointer record.

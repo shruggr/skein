@@ -304,7 +304,7 @@ test("config.overlay with no topics (#120): accepted; the box routes, /submit an
 
 test("config.overlay: no prefix declarations (#120): prefixes refused, in the overlay and in a lookup service", () => {
   const p = (ov: unknown) => overlayProblems(overlayApp(ov)).join("\n");
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "mandala" } } }), /prefixes: not a field \(want topics, lookups, gossip, market, validator; no prefix declarations, #120\)/);
+  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "mandala" } } }), /prefixes: not a field \(want topics, lookups, gossip, market, validator, terms; no prefix declarations, #120\)/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, prefixes: {} }), /prefixes: not a field/);
   assert.match(p({ lookups: { ls_demo: { program: "lookup-demo", prefixes: ["tm_"] } } }), /lookups\.ls_demo: prefixes: not a field \(want program, topics\)/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, extra: 1 }), /extra: not a field/);

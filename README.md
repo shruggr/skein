@@ -260,7 +260,15 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   config at birth, `{<app>: {…}}`, merged as an install's `--config`. On a
   one-key host a create with no `claim` is claimed by the host's own key
   (its owner), so the instance is live at once; on a master-key host the
-  owner's signed claim stays required.
+  owner's signed claim stays required. `beef` (skein-amm#4): an Atomic BEEF
+  (bytes) the host hands into the new instance once it is claimed, published
+  and following headers — into its receive row `/skein/overlay/beef/1.0.0`,
+  as a catch-up's fetched BEEF is, from the host's own peer; the host names
+  no topic (the instance's engine judges it under the topics its config
+  declares). The answer gains `delivered: {verdict, reason?}`; a BEEF the
+  door turns away (unmined, a bad BUMP) is reported there, not retried, and
+  the instance stays created. `stop` also takes the instance off its
+  libp2p node (its beacons stop beating); `start` declares it again.
 - `scripts/host/up.sh` brings up the dev stack.
 - Block headers for the chain app: run the host with
   `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`
