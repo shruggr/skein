@@ -94,6 +94,7 @@
 //                         the manager in their address book at birth, their create/start/stop taken
 //   SKEIN_IMAGES_DIR      #162: where a create's image by name is (<dir>/<name>), default $SKEIN_HOME/images
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
+//   SKEIN_ROUTER_BIND     the addresses the router listens on, a comma list (default 127.0.0.1,::1): a tunnel on another box needs the LAN/tailnet address here
 //   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: where BRC-169 discovery is
 //                         answered (the host skein's onboarding app, #113), and the geneses' resolveOrigin. The manifest's
 //                         URLs, the handle domain, the host's name and note are the onboarding app's config
@@ -969,7 +970,8 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const home = homeOf(v);
   const router = new Router({ ...routerOptions(db, env), ...o.router });
   const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
-  const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
+  const binds = (v.SKEIN_ROUTER_BIND ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  const mserver = await router.listen(mport, binds.length ? binds : undefined).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
   // The control socket (#60): `skein-host event` reaches this router's kernels through it.
   const sock = join(home, CONTROL_SOCKET);
   await router.listenControl(sock).then(() => env.out(`skein-host: control socket at ${sock}`), (e: Error) => env.err(`skein-host: control socket: ${e.message}`));

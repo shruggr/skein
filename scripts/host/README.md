@@ -407,6 +407,7 @@ renders it.
 | | |
 |---|---|
 | `SKEIN_ROUTER_PORT` (default 8100) | the host's HTTP transport |
+| `SKEIN_ROUTER_BIND` (default `127.0.0.1,::1`) | the addresses the router listens on, a comma list; a tunnel running on another machine needs this box's LAN or tailnet address here |
 | `SKEIN_HOST_PORT` (default 4600) | `/`: the host page; `/roster.json`: the roster |
 
 **The host page** (`http://127.0.0.1:4600/`, read-only, #23): one line per
