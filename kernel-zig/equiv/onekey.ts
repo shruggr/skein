@@ -37,6 +37,14 @@
 //   (f) D's dd syncs tm_color_T0 from T0 (the #150 sync path: the locator and
 //       the pulls over /skein/overlay/sync/1.0.0, answered through O's shared
 //       node by T0's engine) to equal anchors;
+//   (g) #137: alice creates `discovery` (a hostname handle) from the same
+//       image with tm_color and ls_color_deploys configured: a BEEF POSTed at
+//       the bare host with X-Topics tm_color is routed to it (the router asks
+//       the node which instance takes the topic) and admitted there; POST
+//       /lookup {service: ls_color_deploys} is routed to it (its liveness
+//       topic ls_color_deploys-live); a lookup name a token instance (T2)
+//       beats too still goes to discovery (path-only instances not asked for
+//       shared names); stopped, tm_color falls through again;
 //   timings: a gossip message's fan-out to 8 handles on the one node; the
 //       create-by-emit latency.
 //
@@ -229,11 +237,11 @@ const fundTxid = fund.id("hex");
 fund.merklePath = new MerklePath(1, [[{ offset: 0, hash: "cb".repeat(32) }, { offset: 1, hash: fundTxid, txid: true }]]);
 const headers: Uint8Array[] = [mine(sha256d(REGTEST_GENESIS), sha256d(Buffer.concat([internal("cb".repeat(32)), internal(fundTxid)])), 1_790_200_000)];
 const tokenScript = () => Script.fromBinary([0x07, ...Buffer.from("tm_demo"), 0x75, ...new P2PKH().lock(holder.toPublicKey().toHash()).toBinary()]);
-async function token(source: Transaction, vout: number): Promise<Transaction> {
+async function token(source: Transaction, vout: number, change = 9_000): Promise<Transaction> {
   const t = new Transaction();
   t.addInput({ sourceTransaction: source, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(holder), sequence: 0xffffffff });
   t.addOutput({ lockingScript: tokenScript(), satoshis: 1 });
-  t.addOutput({ lockingScript: new P2PKH().lock(holder.toPublicKey().toHash()), satoshis: 9_000 });
+  t.addOutput({ lockingScript: new P2PKH().lock(holder.toPublicKey().toHash()), satoshis: change });
   await t.sign();
   return t;
 }
@@ -375,7 +383,12 @@ try {
   mkdirSync(join(imgDir, "etc"), { recursive: true });
   // skein-amm#4: the chain app and the overlay beside okt (with no rows: app-demo's own manifest has a start message, not at birth),
   // so a create's `config` can name the new instance's topic and its `beef` be judged under it.
-  writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir, overlayDir, appTree("img", [])] }));
+  // #137: and the overlay's two root routes (skein-overlay "Root routes"), as skein-amm's token image has them, so a request
+// the router routes by topic to an instance born from it is answered at its /submit and /lookup.
+writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir, overlayDir, appTree("img", [])], routes: [
+  { transport: "http", address: "/submit", filters: ["kernel.beef"], program: "overlay.overlay", fn: "submit" },
+  { transport: "http", address: "/lookup", filters: ["overlay.lookup"] },
+] }));
   const book = async (r: Router, h: string) => (((await (await r.hydrate(h)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   check((await book(rO, "alice")).includes("manager") && !(await book(rO, T1)).includes("manager"), "(e) alice's address book names the instance manager (SKEIN_MANAGER_FOR); T1's does not");
   const answers: Array<{ handle: string; box: string; body: Record<string, unknown> }> = [];
@@ -488,6 +501,61 @@ try {
   check(!!caught, `(f) D's dd synced tm_color_<txid>_0 from T0 over the shared node: equal anchors (genesis ${caught?.genesis}, tip ${caught?.tip}, ${caught?.anchor.slice(0, 16)}…; T0's tip ${oTip.tip})`);
   check(lines.some((l) => l.startsWith("[d:") && /sync: /.test(l) && l.includes(oPeer.slice(-8))) || !!caught, "(f) the catch-up was D's puller's, from O's peer");
   check((await seen(T1))?.head === t1Seen, "(f) T1, which declares the sync protocol too, was not asked: the frames named T0's topic");
+
+  // ------------------------------------------------ (g) a discovery instance (#137): a non-token topic routed to the instance that declares it
+  // alice creates `discovery` from the same image with tm_color and ls_color_deploys configured (skein-amm 0.18.0's toggle);
+  // a token instance (T2's config names ls_demo) declares a lookup too: path-only instances are not asked for shared names.
+  const DISC = { overlay: { topics: { tm_color: "topic-demo" }, lookups: { ls_color_deploys: { program: "lookup-demo", topics: ["tm_color"] }, ls_demo: { program: "lookup-demo", topics: ["tm_color"] } } } };
+  a = await ask(rO, "alice", "create", { handle: "discovery", image: "okimg", config: { overlay: DISC } }); // {<app>: {<program>: …}}
+  const rowD = dbO.get("discovery");
+  if (rowD) { stores.push(storeSpec(rowD)); handleOf.set(storeSpec(rowD), "discovery"); }
+  check(a[0]?.body.handle === "discovery" && rowD?.status === "enabled", `(g) alice's create of discovery answered ${JSON.stringify({ ...a[0]?.body, identity: undefined })}`);
+  // Born with no BEEF, discovery's overlay has not stepped: its configured names are declared on the engine's first step
+  // (skein-overlay 0.17.0), so nothing here takes tm_color yet and a bare-host request for it falls through.
+  check(rO.takers("tm_color-live").length === 0, `(g) before discovery's first step nothing takes tm_color (${rO.takers("tm_color-live").join() || "none"})`);
+  const fwdG = (rO as unknown as { forward: (h: string, route: string, ...rest: unknown[]) => Promise<unknown> });
+  const origG = fwdG.forward.bind(rO);
+  const sent: Array<{ handle: string; route: string }> = [];
+  fwdG.forward = async (h: string, route: string, ...rest: unknown[]) => { sent.push({ handle: h, route }); return await origG(h, route, ...rest); };
+  const admittedAt = async (t: Transaction, height: number) => until("discovery admits it under tm_color", async () => {
+    const r = await fetch(`${base}/@discovery/overlay/admitted?topic=tm_color&fromHeight=${height}&toHeight=${height}`);
+    if (r.status !== 200) return undefined;
+    const x = await r.json() as { blocks?: Array<{ txids: string[] }> };
+    return x.blocks?.some((b) => b.txids.includes(t.id("hex"))) || undefined;
+  }, 10_000).catch(() => false);
+  // Its first submission at its own path steps it.
+  const tD = await token(tE, 1, 8_000);
+  const hD = mineAlone(tD);
+  await feedHeaders(rO, "discovery", hE + 1);
+  const sD0 = await fetch(`${base}/@discovery/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
+  const sD0Body = await sD0.text();
+  check(sD0.status === 200 && await admittedAt(tD, hD) === true, `(g) a first BEEF at /@discovery/submit (its root route), X-Topics tm_color: ${sD0.status} ${sD0Body.slice(0, 200)}, admitted at ${hD}`);
+  await until("discovery declares tm_color and ls_color_deploys", () => rO.takers("tm_color-live").includes("discovery") && rO.takers("ls_color_deploys-live").includes("discovery") || undefined, 10_000).catch(() => undefined);
+  check(rO.takers("tm_color-live").join() === "discovery" && rO.takers("ls_color_deploys-live").join() === "discovery", `(g) then the node's table: tm_color-live taken by ${rO.takers("tm_color-live").join() || "none"}; ls_color_deploys-live by ${rO.takers("ls_color_deploys-live").join() || "none"}`);
+  const tD2 = await token(tD, 1, 7_000);
+  const hD2 = mineAlone(tD2);
+  await feedHeaders(rO, "discovery", hD2);
+  const sD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD2.toBEEF()) });
+  const sDBody = await sD.text();
+  check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/submit" && sD.status === 200, `(g) bare-host POST /submit, X-Topics tm_color → discovery /submit: ${sD.status} ${sDBody.slice(0, 160)}`);
+  check(await admittedAt(tD2, hD2) === true, `(g) discovery admitted it under tm_color (at ${hD2})`);
+  const lD = await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color_deploys", query: {} }) });
+  const lDBody = await lD.text();
+  check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/lookup" && /UnknownService/.test(lDBody), `(g) bare-host POST /lookup {service: ls_color_deploys} → discovery /lookup, answered by its program (lookup-demo knows only ls_demo): ${lD.status} ${lDBody.slice(0, 160)}`);
+  // ls_demo: discovery (a hostname handle) and T2's config both name it; T2 is stopped, so start it: path-only, not asked.
+  await ask(rO, "alice", "start", { handle: T2 });
+  await until("T2 beats ls_demo-live again", () => rO.takers("ls_demo-live").includes(T2) || undefined, 10_000).catch(() => undefined);
+  const nG = sent.length;
+  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_demo", query: {} }) });
+  check(rO.takers("ls_demo-live").includes(T2) && sent.length === nG + 1 && sent.at(-1)?.handle === "discovery", `(g) ls_demo, beaten by discovery and the token instance T2: routed to discovery (takers ${rO.takers("ls_demo-live").map((h) => h.slice(0, 9)).join(", ")})`);
+  await ask(rO, "alice", "stop", { handle: T2 });
+  const mixedG = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": `tm_color,${topicOf(T0)}` }, body: Uint8Array.from([1]) });
+  check(mixedG.status === 400, `(g) tm_color beside a token's topic: 400 (${(await mixedG.json() as { description?: string }).description})`);
+  a = await ask(rO, "alice", "stop", { handle: "discovery" });
+  const nS = sent.length;
+  const offD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
+  check(a[0]?.body.stopped === true && sent.length === nS && offD.status === 404 && rO.takers("tm_color").length === 0, `(g) discovery stopped: tm_color taken by no one, the bare host as before (${offD.status})`);
+  fwdG.forward = origG;
 
   // ------------------------------------------------ timing: gossip fan-out to 8 handles on the one node
   for (const h of EXTRA) {

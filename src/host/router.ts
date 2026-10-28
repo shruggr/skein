@@ -1874,39 +1874,65 @@ export class Router {
 
   /**
    * #161: an overlay request at the bare host — POST /submit (the topics its X-Topics names: a comma
-   * list or a JSON array, as the overlay reads it) or POST /lookup (its JSON body's `service`
-   * `ls_color_<id>`, or a `topic` `tm_color_<id>` beside it or in its query) — routed to the enabled
-   * path-only instance whose handle is that `<id>`. Every name that maps must map to the same instance
-   * (else a problem: 400); a topic naming no instance here beside one that does is a problem too.
-   * Nothing maps: no handle (the bare host as before).
+   * list or a JSON array, as the overlay reads it) or POST /lookup (its JSON body's `service`, and a
+   * `topic` beside it or in its query) — routed to the instance that serves the names:
+   *
+   *   - a token's name, `tm_color_<id>` / `ls_color_<id>` whose `<id>` is an enabled path-only
+   *     instance here: that instance (#161);
+   *   - any other name (#137: `tm_color`, `ls_color_deploys`, …): the enabled instance with a
+   *     hostname handle that DECLARES it on this host's libp2p node — a topic by its gossip
+   *     subscription or its liveness topic `<topic>-live` (skein-overlay 0.17.0's configured
+   *     topics declare only the latter), a lookup service by its liveness topic `<service>-live`
+   *     (P2PHost.takers: the handles' config topics and their apps' liveness topics). Path-only (token) instances are not asked
+   *     for these: each serves its token's own names, and the shared ones (`ls_color`, `ls_amm`,
+   *     `ls_color_deploys`) every token instance declares are reached at `/@<id>/lookup`. Two
+   *     instances with hostname handles declaring the same name: a problem (400, "N instances here
+   *     take <name>").
+   *
+   * Every name that maps must map to the same instance (else a problem: 400); a name mapping to no
+   * instance here beside one that does is a problem too. Nothing maps: no handle (the hostname's
+   * instance, or the bare host, as before).
    */
   overlayTarget(path: "/submit" | "/lookup", req: RouterRequest): { handle?: string } | { problem: string } {
-    const names: string[] = [];
+    const names: Array<{ name: string; service: boolean }> = [];
     if (path === "/submit") {
       const h = (req.headers["x-topics"] ?? "").trim();
       if (!h) return {};
+      const topics: string[] = [];
       if (h.startsWith("[")) {
         let j: unknown;
         try { j = JSON.parse(h); } catch { return {}; } // the overlay's own refusal, at no instance: the bare host's
         if (!Array.isArray(j)) return {};
-        for (const t of j) if (typeof t === "string") names.push(t);
-      } else names.push(...h.split(",").map((x) => x.trim()).filter(Boolean));
+        for (const t of j) if (typeof t === "string") topics.push(t);
+      } else topics.push(...h.split(",").map((x) => x.trim()).filter(Boolean));
+      for (const t of topics) names.push({ name: t, service: false });
     } else {
       let j: Record<string, unknown> | undefined;
       try { j = JSON.parse(new TextDecoder().decode(req.body)) as Record<string, unknown>; } catch { return {}; }
       if (!j || typeof j !== "object") return {};
       const q = j.query as Record<string, unknown> | undefined;
-      for (const t of [j.service, j.topic, q && typeof q === "object" ? q.topic : undefined]) if (typeof t === "string") names.push(t);
+      if (typeof j.service === "string") names.push({ name: j.service, service: true });
+      for (const t of [j.topic, q && typeof q === "object" ? q.topic : undefined]) if (typeof t === "string") names.push({ name: t, service: false });
     }
-    const ids = names.map((n) => /^(?:tm|ls)_color_(.+)$/.exec(n)?.[1]);
-    const here = ids.map((id) => id && TOKEN_HANDLE.test(id) && this.o.db.get(id)?.status === "enabled" ? id : undefined);
-    const hit = [...new Set(here.filter((x): x is string => !!x))];
+    const enabled = (h: string) => this.o.db.get(h)?.status === "enabled";
+    const mapped: Array<string | undefined> = [];
+    for (const { name, service } of names) {
+      const id = /^(?:tm|ls)_color_(.+)$/.exec(name)?.[1];
+      if (id && TOKEN_HANDLE.test(id) && enabled(id)) { mapped.push(id); continue; }
+      const by = [...new Set([...(service ? [] : this.takers(name)), ...this.takers(`${name}-live`)])].filter((h) => !pathOnly(h) && enabled(h));
+      if (by.length > 1) return { problem: `${by.length} instances here take ${name} (${by.join(", ")}): send it to one of them (/@<handle>/${path.slice(1)})` };
+      mapped.push(by[0]);
+    }
+    const hit = [...new Set(mapped.filter((x): x is string => !!x))];
     if (!hit.length) return {};
-    if (hit.length > 1) return { problem: `the topics name ${hit.length} instances here (${hit.join(", ")}): one request goes to one; send one per token` };
-    const stray = names.filter((_, i) => !here[i]);
+    if (hit.length > 1) return { problem: `the names map to ${hit.length} instances here (${hit.join(", ")}): one request goes to one; send one per instance` };
+    const stray = names.filter((_, i) => !mapped[i]).map((x) => x.name);
     if (stray.length) return { problem: `${stray.join(", ")}: no instance here takes ${stray.length > 1 ? "these" : "it"} beside ${hit[0]}: send one request per instance` };
     return { handle: hit[0]! };
   }
+
+  /** The handles on this host's libp2p node(s) that take `topic` (P2PHost.takers; none without libp2p). */
+  takers(topic: string): string[] { return this.p2p?.takers(topic) ?? []; }
 
   /**
    * GET /skeins?key=<hex> at the host's own origin: the skeins on this host whose head `grants`
