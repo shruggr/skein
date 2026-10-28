@@ -1,6 +1,6 @@
 // One handle grammar (a hostname label) for every row (`add`, the manager's
 // create, a mailbox instance), and the reserved names: `id`, `host`, and the first label of the router's own origin, which
-// no instance may take and which never routes to one. No kernel needed: each
+// no instance may take and which never routes to one — unless the operator names it in SKEIN_MANAGER_FOR. No kernel needed: each
 // refusal comes before anything is booted.
 
 import { test } from "node:test";
@@ -49,6 +49,20 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   assert.deepEqual(router.target(new URL(`https://id.example.test/@${tok}/x`)), { handle: tok, route: "/x" });
   assert.equal(router.target(new URL(`https://${tok}.example.test/x`)), undefined, "never by host name");
   for (const bad of [`${"AB".repeat(32)}_0`, `${"ab".repeat(31)}_0`, `${"ab".repeat(32)}_`, `${"ab".repeat(32)}.0`]) assert.throws(() => db.add(bad, { store: join(home, "x.db") }), /hostname label/, `add ${bad}`);
+
+  // The router's own label as an instance: only one the operator names in SKEIN_MANAGER_FOR (managerFor).
+  const own = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", managerFor: ["swap"], idleMs: 0, ledgerMs: 60_000 });
+  t.after(() => own.stop());
+  assert.equal(own.ownLabel(), "swap");
+  assert.ok(!own.reserved("swap") && own.ownLabelInstance("swap"));
+  assert.ok(own.reserved("id") && own.reserved("host"));
+  db.add("swap", { store: join(home, "swap.db") });
+  assert.deepEqual(own.target(new URL("https://swap.example.test/amm/tokens")), { handle: "swap", route: "/amm/tokens" });
+  assert.deepEqual(own.target(new URL(`https://swap.example.test/@${tok}/x`)), { handle: tok, route: "/x" }, "/@<handle> at the shared name");
+  const notNamed = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", idleMs: 0, ledgerMs: 60_000 });
+  t.after(() => notNamed.stop());
+  assert.ok(notNamed.reserved("swap"));
+  assert.equal(notNamed.target(new URL("https://swap.example.test/amm/tokens")), undefined, "not named in managerFor: never routed");
 
   // A router at a loopback address has no label of its own.
   const local = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, idleMs: 0, ledgerMs: 60_000 });
