@@ -1820,6 +1820,13 @@ export class Router {
       return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });
     }
     const t = this.target(url);
+    // #161: an overlay request routed by its topic goes to the token instance it names, at an instance's
+    // hostname too (one public name for the pages and the wallets' provider URL, 2026-10-28).
+    if (req.method === "POST" && (url.pathname === "/submit" || url.pathname === "/lookup") && (!t || t.route === url.pathname)) {
+      const o = this.overlayTarget(url.pathname, req);
+      if ("problem" in o) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: o.problem });
+      if (o.handle) return await this.held(this.forward(o.handle, url.pathname, url, req));
+    }
     if (t) {
       // #138: the liveness tool's read, the host's own (no program).
       const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(t.route) : null;
@@ -1829,12 +1836,6 @@ export class Router {
       return await this.held(this.forward(t.handle, t.route, url, req));
     }
     const path = url.pathname;
-    // #161: an overlay request at the bare host (a wallet's one provider URL) goes to the instance its topic names.
-    if (req.method === "POST" && (path === "/submit" || path === "/lookup")) {
-      const o = this.overlayTarget(path, req);
-      if ("problem" in o) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: o.problem });
-      if (o.handle) return await this.held(this.forward(o.handle, path, url, req));
-    }
     if (req.method === "GET" && path === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
     const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
