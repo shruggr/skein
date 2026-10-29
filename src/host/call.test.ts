@@ -13,7 +13,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { ephemeralWallet } from "../wallet.ts";
 import { rawCid } from "./boot.ts";
-import { admit2, writeGenesis } from "./genesis.ts";
+import { writeGenesis } from "./genesis.ts";
 import { Kernel, KERNEL_BIN } from "./kernel.ts";
 
 const PROBE = new URL("../../kernel-zig/test/call/probe.wasm", import.meta.url);
@@ -99,7 +99,7 @@ test("kernel call: a function over the state, no entry and no writes, fuel repor
 
   // From a step: the probe, as the `probe` box's handler, calls itself to advance a head — the step's move.
   const ev = await k.store.put({ kind: "probe-event", probe } as never);
-  await admit2(k, { box: "probe", event: ev } as never);
+  await k.admit({ box: "probe", event: ev } as never);
   await k.idle();
   const moved = await k.call("head", "probe") as CID | null;
   assert.ok(moved, "the in-VM call's head move is written when the step ends");

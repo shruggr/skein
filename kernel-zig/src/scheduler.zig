@@ -1,6 +1,8 @@
 // The scheduler: the log consumer (first a line-by-line port of the TypeScript
-// scheduler, deleted in #55; docs/VM.md is the design record). Entries come in finished
-// and signed through `admit`; the runtime checks them and consumes them in
+// scheduler, deleted in #55; docs/VM.md is the design record). Entries come in through
+// `admit` as the host hands them over — the arrival's body and its stamp — and the kernel
+// appends them (#163: `prev` and `n` its own tip's, the stamp raised to the tip's; the
+// genesis alone is the host's, `append`); the runtime checks them and consumes them in
 // order: genesis → the seed of the route table (#77) and the grants (#143: its
 // `root`); a request (#68) → admitted through the door (#121, #143: its route
 // matched, the route's filters run, the gate checked — a rejection or an
@@ -568,7 +570,19 @@ pub const Runtime = struct {
     /// entry names is read from the store. An event (#121, #164) likewise:
     /// its record with the frame or in the store, and through the door when
     /// its box's route names kernel.beef (eventDoor).
-    pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !AdmitResult {
+    ///
+    /// #163: the host hands over what arrived and when — the entry's body and its stamp, `{time,
+    /// request+transport | event+box}` — and the kernel appends it: `prev` and `n` are its own
+    /// tip's, and `time` is raised to the tip's stamp when the host's clock is behind (`extend`).
+    /// A body naming `kind`, `prev` or `n` is refused (one way in). The tip is read again after
+    /// the door, right before the append: an admit served while this one's door waited on the
+    /// host (serve's nested frames) is written first, and this one extends it. Nothing between
+    /// that read and the append yields, so the instance's one writer is the order.
+    pub fn admit(rt: *Runtime, a: std.mem.Allocator, body: Value, record: ?Value) !AdmitResult {
+        if (body != .map) return .{ .invalid = "admit: the entry is a map: {time, request+transport | event+box} (#163)" };
+        for ([_][]const u8{ "kind", "prev", "n" }) |k| if (body.get(k) != null) return .{ .invalid = try std.fmt.allocPrint(a, "admit: `{s}` is the kernel's to write (#163: the host hands over the body and its stamp; the kernel appends)", .{k}) };
+        if (logm.stampOf(body.get("time")) == null) return .{ .invalid = "admit: the entry's stamp, `time: [sec, nsec]`, the host's clock at admission (#163)" };
+        const entry = try rt.extend(a, body);
         if (try rt.check(a, entry, record)) |r| return r;
         var e = entry;
         if (Value.cidOf(entry.get("request"))) |rc| {
@@ -585,11 +599,33 @@ pub const Runtime = struct {
                 .answered => |x| return .{ .answered = x },
             }
         }
-        const res = try rt.store.logAppend(a, e);
+        const res = try rt.store.logAppend(a, try rt.extend(a, e));
         switch (res) {
             .ok => |c| return .{ .ok = c }, // the caller kick()s: the entry is processed after the host hears back
             .rejected => |r| return .{ .rejected = .{ .reason = r.reason, .message = r.message } },
         }
+    }
+
+    /// #163: `e` as the next entry of the log as it stands — {kind: "log", prev: <the tip>, n: <the
+    /// tip's n + 1>, time: <e's stamp, raised to the tip's>, …e} (log.ts nextEntry's rule, kept here).
+    /// The genesis is the host's (`append`): with no tip there is nothing to extend.
+    fn extend(rt: *Runtime, a: std.mem.Allocator, e: Value) !Value {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("kind", cbor.string("log"));
+        for (e.map) |x| try m.put(x.key, x.value);
+        const stamp = logm.stampOf(e.get("time")).?;
+        if (try rt.store.logTip(a)) |t| {
+            const tip = (try rt.store.get(a, t)) orelse return error.NotFound;
+            const ts = logm.stampOf(tip.get("time")) orelse return error.BadTip;
+            try m.put("prev", cbor.cidv(t));
+            try m.put("n", cbor.int((Value.intOf(tip.get("n")) orelse return error.BadTip) + 1));
+            if (stamp.ns() < ts.ns()) try m.put("time", tip.get("time").?);
+        } else {
+            // No genesis yet: check() refuses it ("admit: no genesis"); the shape still an entry's.
+            try m.put("prev", .null);
+            try m.put("n", cbor.int(0));
+        }
+        return m.value();
     }
 
     /// The host's `append` frame (K24): the genesis entry and nothing else, only as the log's

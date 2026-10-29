@@ -15,7 +15,6 @@ import { signMessage } from "../client/raw.ts";
 import { encode } from "../runtime/cid.ts";
 import { rawCid } from "../runtime/programs.ts";
 import { cidOf } from "./frontdoor.ts";
-import { admit2 } from "./genesis.ts";
 import { DoorAnswered, KERNEL_BIN } from "./kernel.ts";
 import { beef170, chainState170, TX_170_CID } from "./testbeef.ts";
 import { testHost } from "./testhost.ts";
@@ -65,7 +64,7 @@ test("admitEvent through an event route naming kernel.beef: validated and rewrit
   // A record put first, the entry naming it: the door runs on it all the same.
   const first = { kind: "deploy", beef: beef170(), n: 2 };
   await k.store.put(first as never);
-  const e2 = await k.store.get(await admit2(k, { box: "deploy", event: cidOf(first) } as never)) as unknown as { event: CID };
+  const e2 = await k.store.get(await k.admit({ box: "deploy", event: cidOf(first) } as never)) as unknown as { event: CID };
   assert.notEqual(e2.event.toString(), cidOf(first).toString());
   assert.equal((await k.store.get(e2.event) as unknown as { beef: { form: string } }).beef.form, "beef", "put first: rewritten as well");
 });

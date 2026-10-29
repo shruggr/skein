@@ -18,7 +18,7 @@ import { nextEntry } from "../runtime/log.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { now as clockNow } from "./clock.ts";
 import { appendRequest } from "./frontdoor.ts";
-import { admit2, keyBytes, writeGenesis } from "./genesis.ts";
+import { keyBytes, writeGenesis } from "./genesis.ts";
 import { DoorAnswered, Kernel, KERNEL_BIN } from "./kernel.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "./providers.ts";
 
@@ -60,7 +60,7 @@ test("admit: no mail entry from the host (K2); the signed message as a `local` r
 
   // The host's word: a mail entry naming an unsigned record is refused at admission.
   const mail = await k.store.put(unsigned as never);
-  await assert.rejects(admit2(k, { mail } as never, { body: bodyBytes }), /admit: a message is not admitted as a mail entry/);
+  await assert.rejects(k.admit({ mail } as never, { body: bodyBytes }), /admit: a message is not admitted as a mail entry/);
   // A forged signature, as a local request: turned away at the door by the transport's check (#143: no entry).
   await assert.rejects(appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: new Uint8Array(70) }, body: bodyBytes }), DoorAnswered);
   await k.idle();
@@ -75,4 +75,25 @@ test("admit: no mail entry from the host (K2); the signed message as a `local` r
   // The loopback's shape (the instance to itself), unsigned, but no record the instance emitted: the door turns it away.
   const self = { ...unsigned, sender: keyBytes(identity) };
   await assert.rejects(appendRequest(k, "local", { kind: "message", message: self, body: bodyBytes }), (e: unknown) => e instanceof DoorAnswered && /not a message this instance emitted/.test(e.answer.reason ?? ""), "an unsigned loopback is admitted only as the instance's own emit");
+});
+
+test("admit (#163): the host hands over the body and its stamp; the kernel assigns prev and n; a frame naming either is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const { k, identity, owner } = await kernel(t);
+  const g = await writeGenesis(k, { identity, root: [owner], handle: "adm", domain: "localhost" }, [100, 0]);
+  await k.start();
+  await k.idle();
+  const ev = { kind: "note", text: "an arrival" };
+  const cid = encode(ev).cid;
+  // A stamp behind the tip's: raised to it.
+  const e1 = await k.admit({ event: cid, box: "notes" }, { event: ev }, [50, 0]);
+  const got = await k.store.get(e1) as unknown as { kind: string; prev: CID; n: number; time: [number, number]; event: CID; box: string };
+  assert.equal(got.kind, "log");
+  assert.ok(got.prev.equals(g), "prev: the tip as the kernel holds it");
+  assert.equal(got.n, 1);
+  assert.deepEqual(got.time, [100, 0], "the stamp raised to the tip's");
+  for (const extra of [{ prev: g }, { n: 2 }, { kind: "log" }]) {
+    await assert.rejects(k.call("admit", { entry: { event: cid, box: "notes", time: [200, 0], ...extra }, event: ev }), /is the kernel's to write/);
+  }
+  await assert.rejects(k.call("admit", { entry: { event: cid, box: "notes" }, event: ev }), /the entry's stamp/);
+  assert.ok((await k.store.log.tip())!.equals(e1), "nothing written by the refused frames");
 });

@@ -2,8 +2,10 @@
 // input, in order, as a hash chain of log-entry records. The kernel
 // (kernel-zig/src/log.zig) is authoritative: it refuses an entry that is
 // malformed or does not extend its tip. This is the host's mirror of the
-// shape, for building entries (src/host/genesis.ts over nextEntry) and
-// reading them.
+// shape, for building the genesis entry (src/host/genesis.ts over nextEntry)
+// and reading entries. Every other entry the kernel appends (#163: the host
+// hands over the body and its stamp, Kernel.admit; the kernel assigns prev
+// and n).
 //
 //   { kind: "log", prev: <entry | null>, n, time: [sec, nsec],
 //     genesis: <cid>                       n = 0: the starting state
@@ -60,8 +62,8 @@ export function isLogEntry(x: unknown): x is Entry {
 
 /**
  * The next entry: extending the tip, stamped `time` (raised to the tip's
- * stamp if earlier). The kernel refuses an entry that no longer extends its
- * tip.
+ * stamp if earlier). The host builds only the genesis this way (#163); the
+ * kernel keeps the same rule for every entry it appends.
  */
 export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Promise<Entry> {
   const tipCid = await store.log.tip();

@@ -136,6 +136,9 @@ echo "== the BEEF intake on an event route (#121, #164): an event route naming k
 "${node[@]}" "$kz/equiv/event-beef.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-beef.ts" || status=1
 
+echo "== the kernel appends (#163): N arrivals into one instance at once, none queued on the host side (the kernel's admit, as the HTTP front door and libp2p inbound call it) — on serve (SQLite) and on skein-kernel host (RocksDB): all land, n strictly increasing with each prev the entry before, stamps behind the tip raised, every arrival's record named by exactly one entry; a frame naming prev or n refused, nothing written"
+"${node[@]}" "$kz/equiv/appends.ts" || status=1
+
 echo "== files (#52, #125): skein-sdk's files module through the site app's handler (shruggr/skein-site at src/testapps.ts's pinned commit, or \$SKEIN_SITE_DIR, with test files in its tree), installed by the owner; its row /site/* and the owner's own rows to it (/favicon.ico, /): types, index, 301, 404s, 405, HEAD, ETag/304; each request an entry, no head moved; replayed"
 "${node[@]}" "$kz/equiv/files.ts" || status=1
 

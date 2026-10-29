@@ -4,7 +4,9 @@
 // #33: unsigned entries, keys as bytes) on the host's side: the genesis a new instance's log starts with,
 // and entries.
 //
-//   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}   — no `sig`: no host key
+//   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}   — no `sig`: no host key;
+//            the genesis entry is built here (nextEntry: n = 0, no prev); every other the kernel appends
+//            (#163: Kernel.admit hands over the body and its stamp, the kernel assigns prev and n)
 //   genesis  {kind: "genesis", identity: bytes(33), root?: [bytes(33)], handle, domain, programs,
 //             dispatch: [<route>], roles?: {<role>: ["<program>.<fn>"]},
 //             scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes(33)},
@@ -48,8 +50,7 @@
 import type { CID } from "multiformats/cid";
 import { parse as parseCid } from "../runtime/cid.ts";
 import { isFilterRef, rowKey, type DispatchRow, type Transport } from "../runtime/dispatch.ts";
-import { DEFAULTS, nextEntry, type EntryBody } from "../runtime/log.ts";
-import { Rejected } from "../runtime/store.ts";
+import { DEFAULTS, nextEntry } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
@@ -474,15 +475,4 @@ export async function writeSystemGenesis(k: Kernel, c: Genesis2Config, s: System
 export async function writeGenesis(k: Kernel, c: Genesis2Config, time: Stamp = clockNow()): Promise<CID> {
   const programs = await k.call("programs") as Record<string, CID>;
   return await writeSystemGenesis(k, c, codeSystem(c, programs), time);
-}
-
-/** Admit the next entry over `body` (unsigned), retrying if the tip moved under it. */
-export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
-  for (let tries = 0; ; tries++) {
-    try {
-      return await k.admit(await nextEntry(k.store, body as EntryBody, time), records);
-    } catch (e) {
-      if (!(e instanceof Rejected && e.reason === "out-of-order") || tries >= 10) throw e;
-    }
-  }
 }

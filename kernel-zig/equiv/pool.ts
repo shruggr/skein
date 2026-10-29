@@ -41,7 +41,7 @@ import { Router } from "../../src/host/router.ts";
 import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { rawCid } from "../../src/host/boot.ts";
-import { admit2, writeGenesis } from "../../src/host/genesis.ts";
+import { writeGenesis } from "../../src/host/genesis.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -190,7 +190,7 @@ try {
   ga.arm();
   const ev = await kA.store.put({ kind: "probe-event", n: 1 } as never);
   // The admit is answered once the entry is appended; its step runs on after it, on the instance's worker.
-  const step = admit2(kA, { box: "probe", event: ev } as never);
+  const step = kA.admit({ box: "probe", event: ev } as never);
   await ga.called;
   let released = false;
   const during = await host.state("alice");

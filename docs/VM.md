@@ -823,7 +823,11 @@ host's side.
 Every package a transport carries in that the door admits is an entry
 (#143: what its route's filters reject or answer, or the gate refuses, is
 none) — as the door hands it back: `{kind: "log", …, request: <record>,
-transport, door?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
+transport, door?}` (docs/MESSAGES.md, "The log"). The entry's stamp is
+the host's clock at admission; the kernel assigns the sequence (#163: the
+host hands over the package and its stamp, the kernel appends the entry —
+`prev` and `n` its own tip's — so arrivals by HTTP, libp2p, events and the
+host's own messages never race for a place). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and
 `local` (#70: a provider's signed answer or a forwarded claim, its
 signature checked; the loopback, this instance's own emit, its record in the store;
@@ -1041,6 +1045,11 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
         (#127: a claim, box `claim`, may name no recipient: signed before the instance existed, forwarded into it)
 ```
 
+`time` is the entry's stamp, the host's clock at admission; the kernel
+assigns the sequence (`prev`, `n`: #163, on every path — the host hands over
+the body and its stamp, never the place in the log; the genesis alone is
+built by the host, n = 0 with no `prev`).
+
 - **`request`**: a package as a transport carried it in (an HTTP request, a
   GossipSub message, a stream frame), which the front door is stepped on
   ("Requests", above; the record shapes in docs/MESSAGES.md).
@@ -1088,7 +1097,8 @@ format is refused (start a new store).
 ## Time
 
 Time cannot be computed inside, so it is an input: the host stamps each
-entry when it appends it, and inside a step the clock is that stamp plus
+arrival when it hands it over (#163: the kernel appends it, and raises a
+stamp behind its tip's to the tip's), and inside a step the clock is that stamp plus
 the fuel burnt so far ("The clock inside a step runs on fuel", above).
 Sleep and deadlines are intentions the runtime keeps (#126: the `deadline`
 event), and their answer is an entry: the waker's signed message. A gib checkpoint can bind a state hash to a block time, which anyone

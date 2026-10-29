@@ -10,6 +10,10 @@
 // provider's signed message.
 //
 //   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport (+ door)}
+//            #163: the kernel appends every entry but the genesis — the host hands over the body and
+//            its stamp (`time`, the host's clock at admission), the kernel assigns `prev` and `n`
+//            from its tip and raises `time` to the tip's when it is behind (scheduler.zig admit/
+//            extend). The genesis (n = 0, no prev) is the host's, through `append`.
 //   door     (#121, #143) a request's admission: what the door established before the entry was
 //            written — {principal?: bytes(33) (who the filters, or the transport, say it is from),
 //            verified?: {caller, theirs, requestId} (kernel.brc104's: the session the answer is

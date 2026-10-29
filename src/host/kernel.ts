@@ -40,7 +40,9 @@ import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
 import { parseLmdbSpec, parseRocksSpec } from "../runtime/index-store.ts";
-import type { Entry } from "../runtime/log.ts";
+import type { Entry, EntryBody } from "../runtime/log.ts";
+import type { Stamp } from "../runtime/syscalls.ts";
+import { now as clockNow } from "./clock.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
 import type { HttpRequest, HttpResponse, Outgoing } from "./providers.ts";
@@ -121,12 +123,14 @@ export abstract class KernelSurface {
   async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /**
-   * Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), an
-   * event entry's likewise (#164: through the door when its box's route names kernel.beef), else put
-   * first. A request or event the door turns away or answers writes no entry (#143): DoorAnswered.
+   * Admit an arrival (#163): its entry's body and its stamp (`time`, the host's clock at
+   * admission; default now) — the kernel appends it, assigning `prev` and `n` from its own tip.
+   * A request's record beside it (#121: the kernel puts it, after the door), an event's likewise
+   * (#164: through the door when its box's route names kernel.beef), else put first. A request
+   * or event the door turns away or answers writes no entry (#143): DoorAnswered. The entry's CID.
    */
-  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}): Promise<CID> {
-    const r = await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}), ...(records.event ? { event: records.event } : {}) });
+  async admit(body: EntryBody, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
+    const r = await this.call("admit", { entry: { ...body, time }, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}), ...(records.event ? { event: records.event } : {}) });
     const answered = (r as { answered?: Record<string, unknown> } | null)?.answered;
     if (answered && typeof answered === "object" && !(r instanceof Uint8Array)) throw new DoorAnswered(doorAnswer(answered));
     return r as CID;

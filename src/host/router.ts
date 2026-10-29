@@ -132,7 +132,7 @@ import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Boo
 import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
+import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
@@ -700,7 +700,7 @@ export class Router {
       const l = await this.hydrate(handle);
       const closed = this.closed(handle);
       if (closed) throw new Error(`not forwarded (#130): ${closed}`);
-      const e = await admit2(l.kernel, { box, event: cidOf(event) } as never, { event }, this.now());
+      const e = await l.kernel.admit({ box, event: cidOf(event) } as never, { event }, this.now());
       this.settle(l);
       return e;
     });
@@ -817,7 +817,13 @@ export class Router {
     }
   }
 
-  /** Run `f` after everything else queued for this instance (the waker's and the feeds' admissions are serial per instance). */
+  /**
+   * Run `f` after everything else queued for this instance: the host's own admissions (events from its
+   * wiring, `local` messages: the waker's, the providers', the loopback, a forwarded claim) reach the
+   * kernel in the order the host made them, each after its hydrate and `closed` check, and `settled`
+   * waits on them. Not the log's order: the kernel assigns every entry's place (#163), so HTTP and
+   * libp2p arrivals, which do not queue here, need no queue.
+   */
   serial<T>(handle: string, f: () => Promise<T>): Promise<T> {
     const prev = this.queues.get(handle) ?? Promise.resolve();
     // f's failure goes to its caller through `next`; the queue only keeps the order.

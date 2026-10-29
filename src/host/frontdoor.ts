@@ -34,7 +34,6 @@ import { encode } from "../runtime/cid.ts";
 import { stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
-import { admit2 } from "./genesis.ts";
 import { DoorAnswered, type DoorAnswer } from "./door-answer.ts";
 import type { KernelSurface as Kernel, RequestAnswer } from "./kernel.ts";
 
@@ -95,7 +94,7 @@ export function headerMap(h: Record<string, string | string[] | undefined> | Hea
  * the door turns away or answers writes nothing (#143): DoorAnswered.
  */
 export async function appendRequest(k: Kernel, transport: string, record: Record<string, unknown>, time: Stamp = clockNow()): Promise<CID> {
-  return await admit2(k, { request: cidOf(record), transport }, { request: record }, time);
+  return await k.admit({ request: cidOf(record), transport }, { request: record }, time);
 }
 
 /** An HTTP request's record (log.zig: {kind: "http", method, path, route, query, headers, body}). */

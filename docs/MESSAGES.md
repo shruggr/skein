@@ -406,7 +406,10 @@ mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 ```
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
-order, `time` is the host's clock at admission (#10). A `request` names
+order, `time` is the host's clock at admission (#10); the kernel assigns
+the sequence (#163: the host hands over the body and its stamp, the kernel
+appends — `prev` and `n` its own tip's, the stamp raised to the tip's when
+the host's clock is behind; only the genesis is host-built). A `request` names
 the package as received (#121: as the door hands it back — a BEEF replaced by its pointer record on a row whose `filter` is `beef`) and its transport, whose middleware the kernel
 steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
 genesis may name others in `middleware: {<transport>: <program>}`). A

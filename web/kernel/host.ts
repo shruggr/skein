@@ -47,7 +47,7 @@ import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
 import { RawBox } from "../../src/client/raw.ts";
-import { admit2, keyBytes, writeGenesis } from "../../src/host/genesis.ts";
+import { keyBytes, writeGenesis } from "../../src/host/genesis.ts";
 import type { Kernel } from "../../src/host/kernel.ts";
 import { DoorAnswered, doorAnswer } from "../../src/host/door-answer.ts";
 import { encode } from "../../src/runtime/cid.ts";
@@ -105,7 +105,7 @@ function providerMaster(db: string): PrivateKey {
   }
 }
 
-/** The kernel in the worker, with the surface src/host's helpers use (writeGenesis, admit2: Kernel in kernel.ts). */
+/** The kernel in the worker, with the surface src/host's helpers use (writeGenesis: Kernel in kernel.ts). */
 export class WebKernel {
   readonly kw: KernelWorker;
   constructor(kw: KernelWorker) { this.kw = kw; }
@@ -128,9 +128,9 @@ export class WebKernel {
       append: async (entry: unknown) => await this.call("append", entry) as CID,
     },
   };
-  /** The one call in: admitted and durable when this resolves (processing is drain's). */
-  async admit(entry: unknown, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}): Promise<CID> {
-    const frame: Record<string, unknown> = { entry };
+  /** The one call in: the arrival's body and its stamp; the kernel appends it (#163). Admitted and durable when this resolves (processing is drain's). */
+  async admit(body: Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}, time: Stamp = now()): Promise<CID> {
+    const frame: Record<string, unknown> = { entry: { ...body, time } };
     if (records.body) frame.body = records.body;
     if (records.request) frame.request = records.request;
     const r = WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply);
@@ -305,7 +305,7 @@ export class BrowserHost {
   private async appendLocal(pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(async () => {
       // #121: the record goes with the frame; the kernel's door puts it.
-      const e = await admit2(this.kernel as unknown as Kernel, { request: encode(pkg).cid, transport: "local" } as never, { request: pkg }, now());
+      const e = await this.kernel.admit({ request: encode(pkg).cid, transport: "local" } as never, { request: pkg }, now());
       await this.kernel.drain();
       return e;
     });
@@ -366,7 +366,7 @@ export class BrowserHost {
     let a: Awaited<ReturnType<WebKernel["answer"]>>;
     try {
       a = await this.serial(async () => {
-        const e = await admit2(this.kernel as unknown as Kernel, { request: encode(record).cid, transport: "http" } as never, { request: record }, now());
+        const e = await this.kernel.admit({ request: encode(record).cid, transport: "http" } as never, { request: record }, now());
         await this.kernel.drain();
         return await this.kernel.answer(e);
       });

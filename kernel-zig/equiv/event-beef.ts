@@ -22,7 +22,7 @@ import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
 import { signMessage } from "../../src/client/raw.ts";
 import { appendRequest, cidOf } from "../../src/host/frontdoor.ts";
-import { admit2, writeGenesis } from "../../src/host/genesis.ts";
+import { writeGenesis } from "../../src/host/genesis.ts";
 import { DoorAnswered, Kernel, KernelHost } from "../../src/host/kernel.ts";
 import { beef170, chainState170, TX_170_CID } from "../../src/host/testbeef.ts";
 import { rawCid } from "../../src/runtime/programs.ts";
@@ -78,7 +78,7 @@ try {
   const good = { kind: "deploy", beef: beef170() };
   // No chain state yet: refused at the door, nothing written.
   const t0 = await tip();
-  check(await refused(admit2(k, { box: "deploy", event: cidOf(good) } as never, { event: good }), /no chain state/) === "ok", "before any chain state: refused at the door (no chain state)");
+  check(await refused(k.admit({ box: "deploy", event: cidOf(good) } as never, { event: good }), /no chain state/) === "ok", "before any chain state: refused at the door (no chain state)");
   check(await tip() === t0, "nothing written");
 
   // Root's messages: the chain state's blocks (`objects`), then the head chain/state.
@@ -93,7 +93,7 @@ try {
   check(((await k.call("head", "chain/state")) as CID | null)?.equals(cs.state) === true, "root's head message set chain/state (block 170's header)");
 
   // A good BEEF, the record beside the entry: admitted, the record rewritten.
-  const entry = await admit2(k, { box: "deploy", event: cidOf(good) } as never, { event: good });
+  const entry = await k.admit({ box: "deploy", event: cidOf(good) } as never, { event: good });
   await k.idle();
   const e = await k.store.get(entry) as Record<string, unknown> & { event: CID; box: string };
   const rec = await k.store.get(e.event) as { kind?: string; beef?: Envelope };
@@ -110,15 +110,15 @@ try {
   // A BUMP that does not check; a record with no BEEF: refused, nothing written.
   const t1 = await tip();
   const bad = { kind: "deploy", beef: beef170({ bad: true }) };
-  check(await refused(admit2(k, { box: "deploy", event: cidOf(bad) } as never, { event: bad }), /merkle root/) === "ok", "a BUMP whose root is not the header's: refused (DoorAnswered, the door's reason)");
+  check(await refused(k.admit({ box: "deploy", event: cidOf(bad) } as never, { event: bad }), /merkle root/) === "ok", "a BUMP whose root is not the header's: refused (DoorAnswered, the door's reason)");
   const none = { kind: "deploy", note: "no BEEF here" };
-  check(await refused(admit2(k, { box: "deploy", event: cidOf(none) } as never, { event: none }), /nothing to validate/) === "ok", "a record with no BEEF: refused (nothing to validate: an event has no principal)");
+  check(await refused(k.admit({ box: "deploy", event: cidOf(none) } as never, { event: none }), /nothing to validate/) === "ok", "a record with no BEEF: refused (nothing to validate: an event has no principal)");
   check(await tip() === t1, "nothing written for either");
   check(!(await k.hasBlock(cidOf(bad))) && !(await k.hasBlock(cidOf(none))), "neither record stored");
 
   // The same event into a box whose route names no filter: admitted as it is (the bytes in its record).
   await k.idle();
-  const entry3 = await admit2(k, { box: "plain", event: cidOf(good) } as never, { event: good });
+  const entry3 = await k.admit({ box: "plain", event: cidOf(good) } as never, { event: good });
   await k.idle();
   const e3 = await k.store.get(entry3) as { event: CID };
   const rec3 = await k.store.get(e3.event) as { beef?: unknown };

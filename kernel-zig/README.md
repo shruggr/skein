@@ -721,11 +721,17 @@ The host speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
 entry only, as the log's first; every other entry is admitted), `genesis`, `programs`
 (the pinned program records, for a new genesis), `head`, `boxes`,
 `dispatch` (#77: `{tip, rows}`, the dispatch table as it stands — the
-host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, request?}`: the one call in that writes — a
+host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, request? | event?}`: the one call in that writes — a
 request as received, #68, its record beside the entry (#121: the kernel's
 door puts it, as it hands it back; a host may still put it first), a
 feed's or a proof's event; never a `mail` entry, K2; it answers the CID
-of the entry written, the admission or the refusal), `answer` (#66, below),
+of the entry written, the admission or the refusal. #163: `entry` is the
+arrival's body and its stamp, `{time, request+transport | event+box}` —
+`time` the host's clock at admission; the kernel appends it, `prev` and `n`
+its own tip's and `time` raised to the tip's stamp when the host's clock is
+behind; a frame naming `kind`, `prev` or `n` is refused, so no admit is
+ever refused as out of order and the host reads no tip. The genesis is the
+host's, through `append`), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the host answers from the instance's
 ProtoWallet, the signer) and `http` (#126: one exchange for authfetch,
@@ -749,7 +755,9 @@ deterministic error, which is recorded.
 **`serve` is re-entrant.** While a step waits for the host's answer to a
 `wallet` request, `serve` keeps reading frames: `call`, `admit` and `answer`
 are handled mid-step (an admit is processed when the running drain loops
-again), and answers to other requests are kept until asked for. A request
+again; an admit served while another admit's door waits on the host is
+written first, and the waiting one extends it, #163: the tip is read right
+before the append), and answers to other requests are kept until asked for. A request
 appended mid-step is processed after that step. Since #67 a step never waits
 on the network: sending is an `emit`, and the answer an entry.
 
@@ -973,7 +981,7 @@ natively), and `runner.zig` picks the component backend by target.
 | `skein_open(store)` | open the shim's store `store` and a runtime over it (an older-format store is refused) |
 | `skein_modules()` | `[{name, file, cid}]`: the pinned modules and files to install |
 | `skein_put_block(cid, bytes)`, `skein_get_block(cid)` | a block, checked against its CID on put |
-| `skein_admit({entry, request?})` | `admit`: the one call in that writes (a request through the door, #121); admitted, not yet processed |
+| `skein_admit({entry, request?})` | `admit`: the one call in that writes (a request through the door, #121; `entry` the body and its stamp, the kernel appends it, #163); admitted, not yet processed |
 | `skein_start()`, `skein_drain()` | `start`; the step loop over everything admitted (`kick`) |
 | `skein_state()` | `{state, log, cursor}` |
 | `skein_call({op, v})` | the other serve ops: `tip get put append programs head genesis boxes byEnvelope state`, and `call` (#40; the browser requires `now`) |
