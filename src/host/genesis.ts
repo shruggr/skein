@@ -477,7 +477,7 @@ export async function writeGenesis(k: Kernel, c: Genesis2Config, time: Stamp = c
 }
 
 /** Admit the next entry over `body` (unsigned), retrying if the tip moved under it. */
-export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
+export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
   for (let tries = 0; ; tries++) {
     try {
       return await k.admit(await nextEntry(k.store, body as EntryBody, time), records);

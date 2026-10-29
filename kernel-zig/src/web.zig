@@ -16,7 +16,7 @@
 //   skein_modules() → n                             dag-cbor [{name, cid}]: the pinned modules and files to install
 //   skein_put_block(cid, n, bytes, n) → 0 | < 0     a block, checked against its CID (install, import)
 //   skein_get_block(cid, n) → n | -1                a block's bytes
-//   skein_admit(frame, n) → n                       serve's `admit` ({entry, request?}): the one call in that writes; not yet processed
+//   skein_admit(frame, n) → n                       serve's `admit` ({entry, request? | event?}): the one call in that writes; not yet processed
 //   skein_start() → n                               resume what the last run left (serve's `start`)
 //   skein_drain() → n                               process everything admitted (the step loop)
 //   skein_state() → n                               dag-cbor {state, log, cursor}
@@ -326,7 +326,7 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     }
     if (eq(u8, op, "admit")) {
         const entry = v.get("entry") orelse return error.BadRequest;
-        const res = try r.admit(a, entry, v.get("request"));
+        const res = try r.admit(a, entry, v.get("request") orelse v.get("event")); // #164: an event record with the frame too
         // Not processed here: skein_drain runs the step loop (the shim acknowledges first, once it is durable).
         return switch (res) {
             .ok => |c| reply(a, cbor.cidv(c), null, null),

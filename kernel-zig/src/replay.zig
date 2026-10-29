@@ -118,6 +118,8 @@ pub fn copyLog(a: std.mem.Allocator, from: AnyStore, to: AnyStore) !void {
         };
         // #121: what the door put for a request, beside it.
         if (Value.cidOf(e.get("request"))) |rc| if (src.getOpt(a, rc)) |req| try copyDoor(a, src, dst, req);
+        // #164: an event the door validated (its route names kernel.beef): the pointer records its envelopes link, beside it.
+        if (Value.cidOf(e.get("event"))) |x| if (src.getOpt(a, x)) |ev| try copyLinked(a, src, dst, ev);
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
             .rejected => |r| {

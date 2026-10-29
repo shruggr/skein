@@ -22,7 +22,7 @@ import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
-import { signClaim } from "../client/raw.ts";
+import { signClaim, signMessage } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { KERNEL_BIN } from "./kernel.ts";
@@ -163,4 +163,37 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "stop", { handle: "host" });
   assert.match(String(a[0]?.body.error), /is the host skein/);
   void host;
+});
+
+test("#164: an owned create — an image instance born owned: root its owner's from the genesis, no claim and no claim route; root's admin message runs, another key's does not", { skip, timeout: 120_000 }, async (t) => {
+  const h = await testHost(t);
+  const ownerKey = PrivateKey.fromRandom(), owner = ownerKey.toPublicKey().toString();
+  await assert.rejects(h.router.createInstance("tok", owner, { owned: true, claim: await signClaim(ephemeralWallet(ownerKey)) }), /born owned/, "an owned create takes no claim");
+  await assert.rejects(h.router.createInstance("tok", owner, { owned: true, needsClaim: true }), /born owned/);
+  const c = await h.router.createInstance("tok", owner, { owned: true });
+  assert.equal(c.handle, "tok");
+  assert.equal(h.db.get("tok")!.status, "enabled", "published");
+  assert.notEqual(h.db.hostSkein()?.handle, "tok", "not the host skein");
+  const k = (await h.router.hydrate("tok")).kernel;
+  const g = await k.genesis() as { root?: unknown[]; addressBook?: Array<{ address?: string }> };
+  assert.deepEqual(g.root?.map((x) => hex(x)), [owner], "its genesis names root");
+  assert.ok(!(g.addressBook ?? []).some((e) => e.address === "manager" || e.address === "certifier"), "no instance manager or certifier in its address book");
+  const grants = await k.store.get(await k.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
+  assert.deepEqual(grants.roles.root!.map((x) => hex(x)), [owner], "the owner holds root (the head grants), from the genesis");
+  const rows = (await k.dispatch()).rows as Array<Record<string, unknown>>;
+  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "the admin routes, no claim route");
+  // The log: the genesis, and nothing forwarded (no claim entry).
+  assert.equal(await h.entries("tok"), 1, "no claim entry: the genesis only");
+
+  // A root-gated call (the kernel's `dispatch` operation): another key's message is recorded and does nothing; the owner's runs.
+  const ack = rows.find((r) => r.transport === "event" && r.address === ":ack")!;
+  const send = async (key: PrivateKey) => {
+    const m = await signMessage(ephemeralWallet(key), { recipient: c.identity, box: "dispatch", body: dagCbor.encode({ op: "remove", row: ack }) });
+    await h.router.messageLocal("tok", dagCbor.encode(m.message), m.body);
+    await h.router.settled();
+    await k.idle();
+    return ((await k.dispatch()).rows as Array<Record<string, unknown>>).some((r) => r.transport === "event" && r.address === ":ack");
+  };
+  assert.equal(await send(PrivateKey.fromRandom()), true, "another key's dispatch message: refused by the gate (root's), the route stands");
+  assert.equal(await send(ownerKey), false, "the owner's: it runs, the route removed");
 });

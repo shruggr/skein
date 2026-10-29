@@ -121,11 +121,12 @@ export abstract class KernelSurface {
   async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /**
-   * Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), else
-   * put first. A request the door turns away or answers writes no entry (#143): DoorAnswered.
+   * Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), an
+   * event entry's likewise (#164: through the door when its box's route names kernel.beef), else put
+   * first. A request or event the door turns away or answers writes no entry (#143): DoorAnswered.
    */
-  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}): Promise<CID> {
-    const r = await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}) });
+  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}): Promise<CID> {
+    const r = await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}), ...(records.event ? { event: records.event } : {}) });
     const answered = (r as { answered?: Record<string, unknown> } | null)?.answered;
     if (answered && typeof answered === "object" && !(r instanceof Uint8Array)) throw new DoorAnswered(doorAnswer(answered));
     return r as CID;

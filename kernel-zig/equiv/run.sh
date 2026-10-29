@@ -132,6 +132,10 @@ echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorde
 echo "== overlay services (#36, #79): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) and the chain app in a tree; submit/lookup through the router with the stock SDK clients (POST /submit is BRC-22 and synchronous, 0.9.2: the STEAK, 503 + Retry-After at the bound, waiters all answered; a plain POST admitted because its BEEF validates, #135), verdicts by message into box overlay/submit (0.7.6, #128), answered once (#112); the gate (the chain app's answer); the gossip; replayed"
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
+echo "== the BEEF intake on an event route (#121, #164): an event route naming kernel.beef (the call probe its handler); no chain state: refused; root sets chain/state (block 170's header); {kind: \"deploy\", beef} with its record beside the entry admitted, the entry naming the record the door rewrote (the envelope, its pointer record, the bitcoin-tx block held, the bytes never stored), the step reading the envelope; a bad BUMP and no BEEF refused, nothing written; the same event on a route with no filter as it is; replayed — on SQLite and on RocksDB"
+"${node[@]}" "$kz/equiv/event-beef.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-beef.ts" || status=1
+
 echo "== files (#52, #125): skein-sdk's files module through the site app's handler (shruggr/skein-site at src/testapps.ts's pinned commit, or \$SKEIN_SITE_DIR, with test files in its tree), installed by the owner; its row /site/* and the owner's own rows to it (/favicon.ico, /): types, index, 301, 404s, 405, HEAD, ETag/304; each request an entry, no head moved; replayed"
 "${node[@]}" "$kz/equiv/files.ts" || status=1
 

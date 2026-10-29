@@ -61,7 +61,9 @@
 //            still admit one as an entry of its own (the browser's).
 //   event    a record from the host's wiring, self-validating (#29, #65: a
 //            header from a feed; a proof — a transaction's merkle path — from
-//            the broadcaster's Arcade session), routed by its `subject` or by box
+//            the broadcaster's Arcade session), routed by its `subject` or by box;
+//            on a box whose `event` route names kernel.beef (#121, #164) the
+//            record as the door handed it back (no `door` on the entry)
 //   genesis  {kind: "genesis", identity: bytes, root?: [bytes], handle, domain, programs,
 //             dispatch: [<route>], roles?: {<role>: ["<program>.<fn>"]},
 //             scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},

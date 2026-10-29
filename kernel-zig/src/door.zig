@@ -1,6 +1,8 @@
 // The kernel's own filters (#121, #143): what a route's `filters` may name as
-// `kernel.<name>`, run by the kernel in the door on a request's package before
-// anything is recorded (scheduler.zig `door`, which runs a route's filters in
+// `kernel.<name>`, run by the kernel in the door on a request's package (and,
+// #164, `kernel.beef` alone on an event record whose box's `event` route names
+// it: scheduler.zig `eventDoor` — an event has no sender) before anything is
+// recorded (scheduler.zig `door`, which runs a route's filters in
 // order and an app's own — `<app>.<filter>` — as calls in the deterministic
 // profile). A filter reads the package and the state as it stands; what it
 // writes is blocks (content-addressed, once) and the package it hands back,

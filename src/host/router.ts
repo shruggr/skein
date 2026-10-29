@@ -131,7 +131,7 @@ import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
 import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
-import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
+import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
@@ -687,17 +687,20 @@ export class Router {
 
   /**
    * A plain entry (#29, #65): a self-validating event from the host's wiring
-   * (a header feed, the broadcaster's proof), put as a record and admitted
-   * into the instance in `box`. The kernel routes it by its `subject` to the
-   * thread awaiting that record, else to a sender-less subscription on `box`.
+   * (a header feed, the broadcaster's proof), admitted into the instance in
+   * `box` with its record beside the entry (#164: the kernel puts it — after
+   * the door, when `box`'s event route names kernel.beef: its BEEFs decoded
+   * and checked, the bytes never stored; a BUMP that does not check, or no
+   * BEEF, is turned away: DoorAnswered, thrown, nothing written). The kernel
+   * routes it by its `subject` to the thread awaiting that record, else to
+   * `box`'s event route.
    */
   async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
       const closed = this.closed(handle);
       if (closed) throw new Error(`not forwarded (#130): ${closed}`);
-      const cid = await l.kernel.store.put(event as never);
-      const e = await admit2(l.kernel, { box, event: cid } as never, {}, this.now());
+      const e = await admit2(l.kernel, { box, event: cidOf(event) } as never, { event }, this.now());
       this.settle(l);
       return e;
     });
@@ -1113,6 +1116,12 @@ export class Router {
    * bad key, another image, a claim not `owner`'s or refused: the row is left
    * disabled, its store kept for a look).
    *
+   * `owned` (#164): a non-host image instance born owned as the host skein
+   * is — its genesis's `root` is `owner`, no claim (none taken, none made:
+   * the image's claim route is not seeded), no instance manager or
+   * certifier in its address book (those stay the host skein's and
+   * SKEIN_MANAGER_FOR's).
+   *
    * Image `mailbox` (#113): a mailbox instance for `owner` — the front door
    * and the messagebox, its owner in its genesis (no claim) — published at
    * once (`publish`). The same owner and handle again: the same answer (it
@@ -1120,7 +1129,7 @@ export class Router {
    * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
    * registrations) and `skein-host add --mailbox` both come here.
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; owned?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!validHandle(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
@@ -1128,9 +1137,12 @@ export class Router {
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
+    // #164: an owned image instance is born owned as the host skein is: no claim.
+    if (o.owned && (o.claim !== undefined || o.needsClaim)) throw new Error("an owned instance is born owned (#164): no claim");
+    const owned = o.host || o.owned;
     let claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
     // #162: a one-key host claims what it creates itself — the claim signed by its shared key (the owner).
-    if (!claim && !o.host && this.o.claimer && o.needsClaim) {
+    if (!claim && !owned && this.o.claimer && o.needsClaim) {
       const me = (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey;
       if (owner !== me) throw new Error(`owner: on a one-key host the claim is the host's own key's (${short(me)}): name it or no owner, or forward the owner's signed claim`);
       claim = claimOf(await signClaim(this.o.claimer));
@@ -1147,7 +1159,8 @@ export class Router {
       // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
       // operator's key, `appConfig` merged.
       // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
-      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(o.host ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
+      // #164: an owned instance's genesis names `owner` root (boot.ts then seeds no claim route), as the host skein's does.
+      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
@@ -1166,7 +1179,7 @@ export class Router {
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
       const tip = this.image.tip();
-      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${owned ? `owned by ${short(owner)}${o.host ? "" : " (born owned, #164)"}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);

@@ -743,7 +743,7 @@ const Host = struct {
             h.reply(a, hd, id, cbor.optCid(try s.byEnvelope(a, c)) orelse .null, null, null);
         } else if (eq(u8, op, "admit")) {
             const entry = v.get("entry") orelse return error.BadRequest;
-            const res = try rt.admit(a, entry, v.get("request"));
+            const res = try rt.admit(a, entry, v.get("request") orelse v.get("event")); // #164: an event record with the frame too
             switch (res) {
                 .ok => |c| h.reply(a, hd, id, cbor.cidv(c), null, null),
                 .answered => |x| {

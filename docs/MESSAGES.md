@@ -462,7 +462,13 @@ has the shapes).
   specific wiring, never an open box: its feeds (#29: headers), its
   broadcaster's proofs (#65: `{kind: "proof", subject, txid, path, …}` in box
   `chain`), and what a front door's step routes (`:ack`; #51: an accepted
-  libp2p message, `p2p` in `libp2p:<topic>`, below). An event goes to the
+  libp2p message, `p2p` in `libp2p:<topic>`, below) — or a record the door
+  validates on the way in (#121, #164): when the box's `event` route names
+  `kernel.beef`, the host sends the record beside the entry and the door
+  decodes and checks its BEEFs as it does a request's; the entry names the
+  record as the door rewrote it (the envelope where the bytes were), and a
+  BUMP that does not check, or no BEEF, writes no entry (the host's
+  `admitEvent` throws the door's answer). An event goes to the
   thread awaiting its `subject`, else to the first `mailbox` row **from
   anyone** whose address is the entry's box (or `*`); none: recorded,
   nothing runs. The handler gets `{event, box, subject?}`.

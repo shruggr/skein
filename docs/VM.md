@@ -734,6 +734,20 @@ state and writing nothing but blocks:
    bodies?: [{of, is}]}`, and the route's program runs as the request's
    thread, trusting what the door recorded.
 
+**An event through the door** (#121, #164). An event has no sender and no
+signature; its standing is that the record validates itself. An `event`
+route may name one filter, `kernel.beef` (no other: not `kernel.brc104`,
+which needs a session, nor an app's), and then the door runs on the event
+record as on a request's package: its BEEFs decoded, their BUMPs checked
+against `chain/state`, the blocks stored, the bytes replaced by the
+envelope. The host sends the record beside the entry (the `admit` frame's
+`event`), so the bytes are never stored as received; the entry — the same
+shape as any event's, `{kind: "log", prev, n, time, event, box}`, no `door`
+— names the record as the door handed it back. A BUMP that does not check,
+or no BEEF in the record (no principal: "nothing to validate"): no entry,
+and the host's `admitEvent` throws the door's answer. An event route that
+names no filter (headers, proofs, `chain`, `:ack`): no door, as before.
+
 **The door is lossless for anything a signature covers.** What a filter
 rewrites must be reconstructible to the exact bytes, so a reader of the log
 (replay, an auditor) can put them back and re-check the signature: the
@@ -1054,8 +1068,10 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
 - **`event`** in a box: a self-validating record from the host's specific
   wiring (#29: a header from a feed; #65: a transaction's proof from the
   broadcaster), or one a front door's step routes (`:ack`, an accepted
-  libp2p message, a gossiped `submit`), routed by its `subject` or by the
-  first `mailbox` row from anyone on its box.
+  libp2p message, a gossiped `submit`), or a record the door validates on
+  the way in (#121, #164: its box's `event` route names `kernel.beef` — the
+  entry names the record as the door rewrote it; "The door", above), routed
+  by its `subject` or by its box's `event` route.
   (No `wake` entry since format 7: wakes and ticks are providers' signed messages, #69, #126.)
 - **`genesis`**: who the instance is, its programs, the dispatch table's
   seed, the write scopes of its genesis-wired programs, its reads.

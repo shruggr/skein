@@ -13,7 +13,10 @@
 //          filters?: [text],       what runs on the package before anything is recorded, in
 //                                  order (door.zig): "kernel.brc104", "kernel.beef", or
 //                                  "<app>.<filter>" — a function the app's record lists under
-//                                  `filters`. http, libp2p and mailbox routes; an event has none
+//                                  `filters`. http, libp2p and mailbox routes; an event route
+//                                  may name only "kernel.beef" (#121, #164: the event record
+//                                  validated at the door — an event has no sender); a local
+//                                  route none
 //          program?: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
 //                                  itself: an admin operation (`fn`: objects | head | dispatch |
@@ -29,7 +32,9 @@
 //
 // `event` is a transport (#143): the host's wiring into a box (a feed's header,
 // a broadcaster's proof, a route's admit) — never a message; a `mailbox` route
-// takes messages only. There is no `sender` (#143): a route admits whatever its
+// takes messages only. An event route naming `kernel.beef` (#121, #164) has the
+// door run on the event record as on a request's package: its BEEFs decoded and
+// checked, the record the entry names the rewritten one. There is no `sender` (#143): a route admits whatever its
 // filters let through, and the gate decides who may run its function.
 //
 // The table is one chain per instance: origin {kind: "dispatch"}, one update
@@ -163,7 +168,11 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
             if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef or <app>.<filter>", .{try json.quoted(a, name)});
         }
         n_filters = fs.array.len;
-        if (n_filters > 0 and (std.mem.eql(u8, t, "event") or std.mem.eql(u8, t, "local"))) return try std.fmt.allocPrint(a, "filters: an {s} route has none (only http, libp2p and mailbox routes filter)", .{t});
+        if (n_filters > 0 and std.mem.eql(u8, t, "local")) return try a.dupe(u8, "filters: a local route has none (only http, libp2p, mailbox and — kernel.beef — event routes filter)");
+        // #121, #164: an event has no sender and no signature; the one filter an event route may name is the
+        // kernel's validating one, kernel.beef (the record validates itself at the door). Not kernel.brc104
+        // (a session), not an app's own.
+        if (std.mem.eql(u8, t, "event")) for (fs.array) |f| if (!std.mem.eql(u8, f.string, "kernel.beef")) return try std.fmt.allocPrint(a, "filters: an event route names only kernel.beef (an event has no sender), not {s}", .{try json.quoted(a, f.string)});
     };
     if (v.get("filter") != null) return try a.dupe(u8, "filter: gone (#143): name `filters`, a list (\"kernel.beef\")");
     if (v.get("app")) |x| if (x != .null and Value.str(x) == null) return try a.dupe(u8, "app: want text");
@@ -429,11 +438,15 @@ test "routes: filters, read routes, prefixes; an http path exact first, then the
     try std.testing.expect(rowOf(stream_read).?.isRead());
     try std.testing.expect((try problem(a, try route(a, "libp2p", "/skein/overlay/sync/1.0.0", false, &.{}, null, "sync"))) != null);
     try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_ab", false, &.{"overlay.sync"}, null, "topic"))) != null);
-    // Filters: the kernel's two, or <app>.<filter>; none on an event route.
+    // Filters: the kernel's two, or <app>.<filter>.
     try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{ "kernel.brc104", "kernel.beef", "amm.quote" }, cid1, "y"))) == null);
     try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{"kernel.nope"}, cid1, "y"))) != null);
     try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{"nodot"}, cid1, "y"))) != null);
-    try std.testing.expect((try problem(a, try route(a, "event", "chain", false, &.{"kernel.beef"}, cid1, "y"))) != null);
+    // #121, #164: an event route may name kernel.beef, and nothing else; a local route nothing.
+    try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{"kernel.beef"}, cid1, "y"))) == null);
+    try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{"kernel.brc104"}, cid1, "y"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{ "kernel.beef", "amm.quote" }, cid1, "y"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "local", "fetch", false, &.{"kernel.beef"}, cid1, "y"))) != null);
     // A prefix is an http route's only.
     try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_", true, &.{}, cid1, "p"))) != null);
     const exact = try route(a, "http", "/site/x", false, &.{"kernel.brc104"}, cid1, "exact");

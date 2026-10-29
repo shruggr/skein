@@ -16,7 +16,8 @@
 //!   fail      exits 1 with "probe: asked to fail"
 //! As a step (input kind "step", a subscription's handler): calls itself
 //! (the program CID in args.event's record `probe`) with fn "advance", so the
-//! in-VM call's head move is the step's.
+//! in-VM call's head move is the step's; an event record of kind "deploy"
+//! (#164) instead: head "probe" advanced to that record, as the step read it.
 const std = @import("std");
 
 const sk = struct {
@@ -102,6 +103,12 @@ pub fn main() u8 {
         // A subscription's handler: the event record names the probe's own CID.
         const ev = field(in, "event") orelse fail("step: no event");
         const rec = result(a, sk.get(ev.ptr, @intCast(ev.len), &buf, buf.len), &buf, "get event");
+        // #164: an event of kind "deploy" (a BEEF the door validated, equiv/event-beef.ts): head "probe" → the
+        // event record as the step reads it (the envelope where the bytes were).
+        if (field(rec, "probe") == null) if (field(rec, "kind")) |k| if (std.mem.eql(u8, k, "deploy")) {
+            if (sk.advance("probe", 5, ev.ptr, @intCast(ev.len)) < 0) fail("advance");
+            return 0;
+        };
         const self = a.dupe(u8, field(rec, "probe") orelse fail("the event names no probe")) catch fail("oom");
         const r = result(a, sk.call(self.ptr, @intCast(self.len), "advance", 7, "from a step", 11, &buf, buf.len), &buf, "call advance");
         out.writeStreamingAll(io(), r) catch {};

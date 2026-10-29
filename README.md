@@ -242,6 +242,10 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   frame's `topic` names (a frame naming none: the one instance declaring the
   protocol, else `{kind: "error", message: "topic required"}`). Unset: the
   master key's derivation per instance, one node per instance, as before.
+- **Born owned** (#164). A host program on skein's host as a library calls
+  `Router.createInstance(handle, owner, {image, owned: true})`: an image
+  instance whose genesis names `owner` root, as the host skein is born —
+  no claim, no claim route (the CLI has no flag for it).
 - **Path-only handles** (#161). A token id `<txid>_<vout>` is a handle too:
   its instance has no hostname and is reached at `/@<txid>_<vout>/…` on the
   host's origin (its `url` says so). An overlay request at the bare host —

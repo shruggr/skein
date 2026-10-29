@@ -295,7 +295,7 @@ const Server = struct {
             s.reply(a, id, ans, null, null);
         } else if (eq(u8, op, "admit")) {
             const entry = v.get("entry") orelse return error.BadRequest;
-            const res = try s.rt.admit(a, entry, v.get("request"));
+            const res = try s.rt.admit(a, entry, v.get("request") orelse v.get("event")); // #164: an event record with the frame too
             switch (res) {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 // #143: the door turned it away or answered it — nothing written: {answered: {…}}.

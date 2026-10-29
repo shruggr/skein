@@ -10,8 +10,10 @@
 // answers, else its route (dispatch.zig forMail) through the gate (grants.zig:
 // its sender the principal): a kernel route is one of the kernel's own admin
 // operations (kernelOp: objects, head, dispatch, peers, grant — root's; no
-// program runs), any other launches the route's program; event → the thread
-// awaiting its subject, else its `event` route.
+// program runs), any other launches the route's program; event → admitted
+// through the door when its box's `event` route names kernel.beef (#121, #164:
+// eventDoor, the record rewritten; a bad BUMP or no BEEF writes no entry),
+// then the thread awaiting its subject, else its `event` route.
 //
 // The kernel's tables (#77, #143): objects (the store), heads (heads.zig), the
 // route table (dispatch.zig), the address book (addressbook.zig) and the
@@ -563,13 +565,22 @@ pub const Runtime = struct {
     /// answers — or nothing is written and the door's answer is (`answered`).
     /// `record` is the request record itself (the host need not put it: a
     /// package's BEEF bytes are never stored); without it the record the
-    /// entry names is read from the store.
+    /// entry names is read from the store. An event (#121, #164) likewise:
+    /// its record with the frame or in the store, and through the door when
+    /// its box's route names kernel.beef (eventDoor).
     pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !AdmitResult {
         if (try rt.check(a, entry, record)) |r| return r;
         var e = entry;
         if (Value.cidOf(entry.get("request"))) |rc| {
             const rec = record orelse (try rt.store.get(a, rc)).?;
             switch (try rt.door(a, entry, rec)) {
+                .entry => |x| e = x,
+                .answered => |x| return .{ .answered = x },
+            }
+        } else if (Value.cidOf(entry.get("event"))) |ev| {
+            // #121, #164: an event whose box's route names kernel.beef goes through the door too.
+            const rec = record orelse (try rt.store.get(a, ev)).?;
+            switch (try rt.eventDoor(a, entry, rec, record != null)) {
                 .entry => |x| e = x,
                 .answered => |x| return .{ .answered = x },
             }
@@ -613,11 +624,17 @@ pub const Runtime = struct {
             if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first or sent with the frame (`request`), in its transport's shape (docs/VM.md, \"Requests\")" };
             return null;
         }
-        if (record != null) return .{ .invalid = "admit: a request record comes only with a request entry" };
         if (Value.cidOf(entry.get("event"))) |ev| {
-            if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
+            if (record) |r| {
+                // #121, #164: the event record with the frame (as a request's: a BEEF's bytes are never put), the entry naming it by its CID.
+                if (r != .map) return .{ .invalid = "admit: an event record is a map" };
+                if (!std.mem.eql(u8, try cbor.cidOfValue(a, r), ev)) return .{ .invalid = "admit: the event record is not the one the entry names (its CID)" };
+                return null;
+            }
+            if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first) or sent with the frame (`event`)" };
             return null;
         }
+        if (record != null) return .{ .invalid = "admit: a record comes only with a request entry (`request`) or an event entry (`event`)" };
         // K2: a message is never the host's word. It comes in as the package that carries it (a
         // `local` request {kind: "message", message: <the signed mail record>, body}, or a client's
         // request), and the front door verifies it; only what a step routes becomes a message
@@ -699,6 +716,37 @@ pub const Runtime = struct {
             }
         }
         return .{ .entry = try withRequest(a, entry, try rt.store.put(a, ch.request), try doorValue(a, &ch, null)) };
+    }
+
+    /// The door for an event (#121, #164): the box's `event` route (dispatch.zig forEvent), and the
+    /// filters it names — only `kernel.beef` (an event has no sender: no principal, no gate here; the
+    /// handler's gate is processEvent's) — over the event record, as over a request's package: its
+    /// BEEFs decoded, their BUMPs checked against chain/state, the blocks stored, the bytes replaced
+    /// by the envelope. The entry then names the record as the door handed it back (put here: the
+    /// record the host sent with the frame is never stored as received). A BUMP that does not check,
+    /// or no BEEF at all, is a rejection: nothing written. A route that names no filter: the event as
+    /// today (a record sent with the frame put as it is).
+    fn eventDoor(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: Value, sent: bool) !DoorOut {
+        const box = Value.str(entry.get("box")).?;
+        const at = logm.stampOf(entry.get("time")).?.ms();
+        const rows = (try dispatch.current(a, rt.store)) orelse &.{};
+        const route = dispatch.forEvent(rows, box);
+        const filters: []const Value = if (route) |r| r.filters else &.{};
+        if (filters.len == 0) {
+            if (sent) _ = try rt.store.put(a, record);
+            return .{ .entry = entry };
+        }
+        var ch = Chain{ .request = record, .ran = .init(a), .beefs = .init(a), .blocks = .init(a) };
+        for (filters) |f| {
+            if (try rt.filter(a, f.string, "event", route.?, &ch, at)) |out| {
+                rt.say("door: an event in {s} turned away by {s}: {s}", .{ box, f.string, out.reason orelse "answered" });
+                return .{ .answered = out };
+            }
+        }
+        var m = cbor.MapBuilder.init(a);
+        for (entry.map) |x| try m.put(x.key, x.value);
+        try m.put("event", cbor.cidv(try rt.store.put(a, ch.request)));
+        return .{ .entry = m.value() };
     }
 
     fn namesFilter(r: dispatch.Row, name: []const u8) bool {
@@ -795,6 +843,8 @@ pub const Runtime = struct {
     /// else the rejection or the answer, and nothing is written.
     fn filter(rt: *Runtime, a: std.mem.Allocator, name: []const u8, transport: []const u8, r: dispatch.Row, ch: *Chain, at: i64) !?Answered {
         try ch.ran.append(cbor.string(name));
+        // #121, #164: an event has no sender — kernel.beef is the one filter its route may name (dispatch.zig problem).
+        if (std.mem.eql(u8, transport, "event") and !std.mem.eql(u8, name, doorm.BEEF)) return reject(500, "ERR_FILTER", try std.fmt.allocPrint(a, "{s}: an event route names only kernel.beef", .{name}));
         if (std.mem.eql(u8, name, doorm.BRC104)) {
             if (!std.mem.eql(u8, transport, "http")) return reject(500, "ERR_FILTER", "kernel.brc104 checks an http request");
             const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
@@ -816,7 +866,7 @@ pub const Runtime = struct {
             ch.request = x.value;
             for (x.beefs) |c| try ch.beefs.append(cbor.cidv(c));
             if (x.refused) |why| {
-                rt.say("door: {s} request rejected by kernel.beef: {s}", .{ transport, why });
+                rt.say("door: {s} {s} rejected by kernel.beef: {s}", .{ transport, if (std.mem.eql(u8, transport, "event")) "record" else "request", why });
                 return .{ .kind = "reject", .status = 400, .code = "ERR_BEEF", .reason = why, .principal = ch.principal, .fuel = ch.fuel };
             }
             // #135, signed or validated: no principal, and nothing to validate — neither.
