@@ -75,7 +75,9 @@ test("routes: no sender (#143), the transports, handlers, filters, the keys", ()
   assert.equal(route({ transport: "libp2p", address: "/skein/overlay/sync/1.0.0", filters: ["chain.sync"], handler: undefined }), "");
   assert.match(route({ transport: "libp2p", address: "tm_demo", filters: ["chain.sync"], handler: undefined }), /libp2p topic route names its handler/);
   assert.match(route({ prefix: true }), /a mailbox route has no prefix/);
-  assert.match(route({ transport: "event", filters: ["kernel.beef"] }), /an event route has no filters/);
+  assert.equal(route({ transport: "event", filters: ["kernel.beef"] }), "", "#121: an event route may name kernel.beef");
+  assert.match(route({ transport: "event", filters: ["kernel.brc104"] }), /an event route has no filters but kernel\.beef/);
+  assert.match(route({ transport: "event", filters: ["kernel.beef", "page"] }), /an event route has no filters but kernel\.beef/);
   assert.match(route({ filters: ["kernel.nope"] }), /filter kernel\.nope: the kernel's are kernel\.brc104, kernel\.beef/);
   assert.match(route({ filters: ["nope"] }), /filter nope: not one of this app's/);
   assert.match(route({ filters: ["Other App.x"] }), /not <app>\.<filter>/);
