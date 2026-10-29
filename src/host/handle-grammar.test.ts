@@ -103,9 +103,9 @@ test("overlay requests by topic (#137, #161): a token's names to its path-only i
   const topics: Record<string, string[] | undefined> = {
     [A]: [`tm_color_${A}`, `ls_color_${A}`],
     [B]: [`tm_color_${B}`, `ls_color_${B}`],
-    discovery: ["tm_color", "ls_color_deploys", "tm_twice"],
+    discovery: ["tm_color", "ls_color", "tm_twice"],
     other: ["tm_twice"],
-    off: ["tm_off", "ls_color_deploys"],
+    off: ["tm_off", "ls_color"],
     plain: undefined,
   };
   for (const [h, ts] of Object.entries(topics)) db.add(h, { store: join(home, `${h}.db`), ...(ts ? { topics: JSON.stringify(ts) } : {}) });
@@ -116,8 +116,8 @@ test("overlay requests by topic (#137, #161): a token's names to its path-only i
   assert.deepEqual(submit(`tm_color_${A}`), { handle: A }, "a token's topic: its instance");
   assert.deepEqual(submit("tm_color"), { handle: "discovery" }, "tm_color: the row whose topics name it");
   assert.deepEqual(submit(JSON.stringify(["tm_color"])), { handle: "discovery" });
-  assert.deepEqual(lookup({ service: "ls_color_deploys", query: {} }), { handle: "discovery" }, "ls_color_deploys: the row naming it (the disabled one naming it too is not asked)");
-  assert.deepEqual(lookup({ service: "ls_color_deploys", query: { topic: "tm_color" } }), { handle: "discovery" });
+  assert.deepEqual(lookup({ service: "ls_color", query: {} }), { handle: "discovery" }, "ls_color: the row naming it (the disabled one naming it too is not asked)");
+  assert.deepEqual(lookup({ service: "ls_color", query: { topic: "tm_color" } }), { handle: "discovery" });
   assert.deepEqual(lookup({ service: `ls_color_${B}`, query: {} }), { handle: B });
   assert.deepEqual(lookup({ service: "ls_amm", query: {} }), {}, "a name no row names: no instance (the hostname's, as before)");
   assert.deepEqual(submit("tm_off"), {}, "a disabled instance is not asked");

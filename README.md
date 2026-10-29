@@ -249,7 +249,7 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   `ls_color_<id>`, or a `topic` `tm_color_<id>`) — goes to the enabled
   path-only instance whose handle is that `<id>`, so a wallet keeps one
   provider URL; topics naming two instances, or one here and one not, are 400.
-  Any other name (#137: `tm_color`, `ls_color_deploys`, …) goes to the
+  Any other name (#137: `tm_color`, `ls_color`, …) goes to the
   enabled instance whose row names it in its `topics` (host.db: what the
   instance manager's `create` or `start` named), whether or not it has run
   yet; two instances naming the same name are 400. Nothing maps: the
@@ -259,7 +259,7 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   (as the host skein has it) and has the manager take their messages: `create
   {handle, image?, config?, claim?, beef?, topics?}`, `start {handle,
   topics?}`, `stop {handle}`. `topics` (#137): the overlay names, gossip
-  topics and lookup services alike (`["tm_color", "ls_color_deploys"]`),
+  topics and lookup services alike (`["tm_color", "ls_color"]`),
   the host routes to the instance at the bare host — plain non-empty
   strings, no duplicates; stored with its row; a `start` naming them
   replaces the row's, one naming none keeps them.

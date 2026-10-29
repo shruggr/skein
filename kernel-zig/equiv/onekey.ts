@@ -38,11 +38,11 @@
 //       the pulls over /skein/overlay/sync/1.0.0, answered through O's shared
 //       node by T0's engine) to equal anchors;
 //   (g) #137: alice creates `discovery` (a hostname handle) from the same
-//       image with tm_color and ls_color_deploys configured, NO beef, and
-//       `topics: ["tm_color", "ls_color_deploys"]`: at once (no request to
+//       image with tm_color and ls_color configured, NO beef, and
+//       `topics: ["tm_color", "ls_color"]`: at once (no request to
 //       it first, never stepped) a BEEF POSTed at the bare host with X-Topics
 //       tm_color is routed to it (by its host.db row's topics) and admitted
-//       there; POST /lookup {service: ls_color_deploys} is routed to it; the
+//       there; POST /lookup {service: ls_color} is routed to it; the
 //       token instance T2 (created with its own topics) still routed; a
 //       start with `topics` replaces the row's; stopped, tm_color falls
 //       through again;
@@ -508,10 +508,10 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   check((await seen(T1))?.head === t1Seen, "(f) T1, which declares the sync protocol too, was not asked: the frames named T0's topic");
 
   // ------------------------------------------------ (g) a discovery instance (#137): a non-token name routed by the topics the create named
-  // alice creates `discovery` from the same image with tm_color and ls_color_deploys configured (skein-amm 0.18.1's toggle),
+  // alice creates `discovery` from the same image with tm_color and ls_color configured (skein-amm 0.18.1's toggle),
   // no BEEF, and the create names the topics the host routes to it.
-  const DISC = { overlay: { topics: { tm_color: "topic-demo" }, lookups: { ls_color_deploys: { program: "lookup-demo", topics: ["tm_color"] } } } };
-  const DISC_TOPICS = ["tm_color", "ls_color_deploys"];
+  const DISC = { overlay: { topics: { tm_color: "topic-demo" }, lookups: { ls_color: { program: "lookup-demo", topics: ["tm_color"] } } } };
+  const DISC_TOPICS = ["tm_color", "ls_color"];
   a = await ask(rO, "alice", "create", { handle: "discovery", image: "okimg", config: { overlay: DISC }, topics: DISC_TOPICS }); // {<app>: {<program>: …}}
   const rowD = dbO.get("discovery");
   if (rowD) { stores.push(storeSpec(rowD)); handleOf.set(storeSpec(rowD), "discovery"); }
@@ -534,9 +534,9 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const sDBody = await sD.text();
   check(sent.length === 1 && sent[0]?.handle === "discovery" && sent[0]?.route === "/submit" && sD.status === 200, `(g) the newborn: bare-host POST /submit, X-Topics tm_color → discovery /submit: ${sD.status} ${sDBody.slice(0, 160)}`);
   check(await admittedAt(tD, hD) === true, `(g) discovery admitted it under tm_color (at ${hD})`);
-  const lD = await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color_deploys", query: {} }) });
+  const lD = await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color", query: {} }) });
   const lDBody = await lD.text();
-  check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/lookup" && /UnknownService/.test(lDBody), `(g) bare-host POST /lookup {service: ls_color_deploys} → discovery /lookup, answered by its program (lookup-demo knows only ls_demo): ${lD.status} ${lDBody.slice(0, 160)}`);
+  check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/lookup" && /UnknownService/.test(lDBody), `(g) bare-host POST /lookup {service: ls_color} → discovery /lookup, answered by its program (lookup-demo knows only ls_demo): ${lD.status} ${lDBody.slice(0, 160)}`);
   // The token instance T2, created with topics [tm_color_<id>, ls_color_<id>], still routed.
   await ask(rO, "alice", "start", { handle: T2 });
   const nT = sent.length;
@@ -545,14 +545,14 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   await ask(rO, "alice", "stop", { handle: T2 });
   const mixedG = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": `tm_color,${topicOf(T0)}` }, body: Uint8Array.from([1]) });
   check(mixedG.status === 400, `(g) tm_color beside a token's topic: 400 (${(await mixedG.json() as { description?: string }).description})`);
-  // A start with `topics` replaces the row's: ls_color_deploys no longer routed to discovery, tm_color still is.
+  // A start with `topics` replaces the row's: ls_color no longer routed to discovery, tm_color still is.
   await ask(rO, "alice", "stop", { handle: "discovery" });
   a = await ask(rO, "alice", "start", { handle: "discovery", topics: ["tm_color"] });
   const nR = sent.length;
-  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color_deploys", query: {} }) });
+  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color", query: {} }) });
   const tmR = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
   await tmR.arrayBuffer();
-  check(a[0]?.body.started === true && dbO.get("discovery")?.topics === JSON.stringify(["tm_color"]) && sent.length === nR + 1 && sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/submit", `(g) start {topics: [tm_color]} replaces the row's: ls_color_deploys falls through, tm_color still routed (${dbO.get("discovery")?.topics}; ${sent.length - nR} forwarded)`);
+  check(a[0]?.body.started === true && dbO.get("discovery")?.topics === JSON.stringify(["tm_color"]) && sent.length === nR + 1 && sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/submit", `(g) start {topics: [tm_color]} replaces the row's: ls_color falls through, tm_color still routed (${dbO.get("discovery")?.topics}; ${sent.length - nR} forwarded)`);
   a = await ask(rO, "alice", "stop", { handle: "discovery" });
   const nS = sent.length;
   const offD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });

@@ -1883,7 +1883,7 @@ export class Router {
    *
    *   - a token's name, `tm_color_<id>` / `ls_color_<id>` whose `<id>` is an enabled path-only
    *     instance here: that instance (#161, the handle naming convention; checked first);
-   *   - any other name (`tm_color`, `ls_color_deploys`, …): the enabled instance whose `topics` (the
+   *   - any other name (`tm_color`, `ls_color`, …): the enabled instance whose `topics` (the
    *     names the instance manager's create or start named, host.db) contain it. Whether the instance
    *     has run yet does not matter. Two instances taking the same name: a problem (400, "N instances
    *     here take <name>").
