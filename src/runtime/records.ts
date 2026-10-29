@@ -130,7 +130,7 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   if (x.prefix !== undefined && x.prefix !== null && x.prefix !== false && !(x.prefix === true && t === "http")) return false;
   const filters = x.filters === undefined || x.filters === null ? [] : x.filters;
   if (!Array.isArray(filters) || !filters.every(isFilterRef)) return false;
-  if (filters.length && (t === "event" || t === "local")) return false;
+  if (filters.length && (t === "local" || (t === "event" && !(filters.length === 1 && filters[0] === "kernel.beef")))) return false;
   if (x.fn !== undefined && x.fn !== null && typeof x.fn !== "string") return false;
   // A read route (#143): http, or a libp2p stream protocol (#154: `/…`; a topic carries no answer).
   if (x.program === undefined) return (t === "http" || (t === "libp2p" && x.address.startsWith("/"))) && filters.length > 0 && x.fn === undefined;

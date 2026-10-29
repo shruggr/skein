@@ -228,7 +228,7 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: (f: st
   }
   const filters = r.filters ?? [];
   if (!Array.isArray(filters) || filters.some((f) => typeof f !== "string")) return "filters is a list of filter names";
-  if (filters.length && t === "event") return "an event route has no filters (an event is the host's wiring)";
+  if (filters.length && t === "event" && !(filters.length === 1 && filters[0] === "kernel.beef")) return "an event route has no filters but kernel.beef (an event is the host's wiring: the door validates a BEEF, #121)";
   for (const f of filters as string[]) {
     if (f.startsWith("kernel.")) { if (!KERNEL_FILTERS.includes(f)) return `filter ${f}: the kernel's are ${KERNEL_FILTERS.join(", ")}`; continue; }
     const dot = f.lastIndexOf(".");
