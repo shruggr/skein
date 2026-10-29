@@ -210,6 +210,12 @@ export interface ProvidersOptions {
   };
   /** The certifier (#113): an issue request from the host skein → the answer body (handles.ts). Absent: none. */
   certifier?(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /**
+   * #164: an application host's wiring — an event record {kind: "event", event, app?, …} from `handle`
+   * whose name no stock wiring takes (not broadcast, an intention, payment, nor the libp2p node's),
+   * handed over after its step's commit as `topicEvent`'s are. Absent: logged as ignored.
+   */
+  appEvent?(handle: string, record: Record<string, unknown>): void;
   /** #130: a `payment` event from `handle` — its pay step's (the kernel lets no other step emit one). Absent: no billing (ignored). */
   payment?(handle: string, record: Record<string, unknown>): void;
   /** The libp2p host, when there is one: the instance's node does the work. */
@@ -302,7 +308,7 @@ export class Providers {
   /**
    * An event out (#65, #119): addressed to no one, acted on by its name —
    * `broadcast` → the broadcaster (Arcade); `subscribe` / `unsubscribe` → the
-   * libp2p node (the topics it subscribes: p2p.ts; delivery is the kernel's, by the subscription); any other name: a log
+   * libp2p node (the topics it subscribes: p2p.ts; delivery is the kernel's, by the subscription); any other name: the application host's `appEvent` when it has one (#164), else a log
    * line, nothing else (the step is not told). A broadcast is acted on every
    * time it is handed over (a kernel's start hands over again what a waiting
    * thread awaits: the queue takes a transaction once); any other event is
@@ -334,6 +340,11 @@ export class Providers {
     if (TOPIC_EVENTS.includes(out.address) && m.kind === "event" && m.event === out.address) {
       if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
       this.o.topicEvent(handle, m);
+      return;
+    }
+    if (this.o.appEvent && m.kind === "event" && m.event === out.address) {
+      // #164: the application host's (e.g. the Open Exchange's): it acts on the names it knows.
+      try { this.o.appEvent(handle, m); } catch (e) { this.say(handle, `provider: an event ${out.address}: the host's wiring: ${(e as Error).message}`); }
       return;
     }
     this.say(handle, `provider: an event ${out.address} this host has no wiring for: ignored`);

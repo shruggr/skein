@@ -244,6 +244,11 @@ export interface RouterOptions {
   rootInstance?: string;
   /** #162, SKEIN_IMAGES_DIR (default $SKEIN_HOME/images): the images a create names by name, a directory each (the layout `skein-host add --image <dir>` takes). */
   imagesDir?: string;
+  /**
+   * #164: an application host's wiring (providers.ts `appEvent`): an emitted event whose name no
+   * stock wiring takes, from `handle`, handed over after its step's commit. Absent: logged as ignored.
+   */
+  appEvent?(handle: string, record: Record<string, unknown>): void;
 }
 
 interface Loaded {
@@ -519,6 +524,7 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
+      ...(o.appEvent ? { appEvent: o.appEvent } : {}),
       emitted: (h, rec, place) => this.events.emitted(h, rec, place),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
