@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS instances (
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
   created_at        TEXT NOT NULL,
   kind              TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'mailbox')),
-  owner             TEXT                               -- a mailbox instance's: the identity (hex) whose mailbox it is
+  owner             TEXT,                              -- a mailbox instance's: the identity (hex) whose mailbox it is
+  topics            TEXT                               -- JSON array: the overlay names (topics, lookup services) the host routes to it at the bare host (#137); NULL: none
 );
 -- The fuel of calls (#40): per instance, caller (hex, or '' for none) and op (the route).
 CREATE TABLE IF NOT EXISTS fuel_ledger (
@@ -169,12 +170,23 @@ export interface InstanceRow {
   kind?: Kind;
   /** A mailbox instance's: whose mailbox it is (hex). */
   owner?: string | null;
+  /**
+   * JSON array of the overlay names (gossip topics and lookup services alike) a bare-host POST /submit
+   * or /lookup naming them is routed to this instance by (#137: what the instance manager's create or
+   * start named; Router.overlayTarget); null: none. See topicsOf.
+   */
+  topics?: string | null;
 }
 
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "store", "tree", "source", "knows", "status", "kind", "owner"] as const;
+const FIELDS = ["domain", "identity", "store", "tree", "source", "knows", "status", "kind", "owner", "topics"] as const;
+
+/** The overlay names a row is routed by (#137): its `topics` column, a list (none: empty). */
+export function topicsOf(row: Pick<InstanceRow, "topics">): string[] {
+  return row.topics ? (JSON.parse(row.topics) as string[]) : [];
+}
 
 /** The handles a row knows: a list, or "all" (every other enabled row). */
 export function knowsOf(row: Pick<InstanceRow, "knows">): string[] | "all" {
@@ -206,6 +218,7 @@ export class HostDb {
     if (!cols.has("knows")) this.db.exec("ALTER TABLE instances ADD COLUMN knows TEXT");
     if (!cols.has("kind")) this.db.exec("ALTER TABLE instances ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
     if (!cols.has("owner")) this.db.exec("ALTER TABLE instances ADD COLUMN owner TEXT");
+    if (!cols.has("topics")) this.db.exec("ALTER TABLE instances ADD COLUMN topics TEXT");
   }
 
   /**
@@ -249,6 +262,11 @@ export class HostDb {
   /** Set which handles a row knows (knowsColumn); false if there is no such row. */
   setKnows(handle: string, handles: string[] | "all"): boolean {
     return Number(this.db.prepare("UPDATE instances SET knows = ? WHERE handle = ?").run(knowsColumn(handles), handle).changes) > 0;
+  }
+
+  /** Set the overlay names a row is routed by (#137; topicsOf); an empty list is null; false if there is no such row. */
+  setTopics(handle: string, topics: string[]): boolean {
+    return Number(this.db.prepare("UPDATE instances SET topics = ? WHERE handle = ?").run(topics.length ? JSON.stringify(topics) : null, handle).changes) > 0;
   }
 
   /** Set a row's status; false if there is no such row. */

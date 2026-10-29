@@ -93,38 +93,47 @@ test("the host's domain (H4): from its origin when no onboarding app names one",
   assert.deepEqual(JSON.parse(new TextDecoder().decode(r.body)), { origin: "https://id.example.test", domain: "id.example.test" });
 });
 
-test("overlay requests by topic (#137, #161): a token's names to its path-only instance; any other name to the hostname instance that declares it", async (t) => {
+test("overlay requests by topic (#137, #161): a token's names to its path-only instance; any other name to the instance whose row names it (no libp2p, never stepped)", async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-topics-"));
   const db = new HostDb(join(home, "host.db"));
   const router = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", idleMs: 0, ledgerMs: 60_000 });
   t.after(async () => { await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true }); });
   const A = `${"a".repeat(64)}_0`, B = `${"b".repeat(64)}_0`;
-  for (const h of [A, B, "discovery", "other", "off"]) db.add(h, { store: join(home, `${h}.db`) });
-  db.setStatus("off", "disabled");
-  // What the node's handles take (P2PHost.takers): config topics and liveness topics `<name>-live`.
-  const takes: Record<string, string[]> = {
-    [A]: [`tm_color_${A}`, `tm_color_${A}-live`, `ls_color_${A}-live`, "ls_color_deploys-live", "ls_amm-live"],
-    [B]: [`tm_color_${B}`, `tm_color_${B}-live`, `ls_color_${B}-live`, "ls_color_deploys-live", "ls_amm-live"],
-    discovery: ["tm_color-live", "ls_color_deploys-live"], // skein-overlay 0.17.0: a configured topic declares liveness only
-    other: ["tm_twice", "ls_twice-live"],
-    off: ["tm_off", "ls_color_deploys-live"],
+  // The names the instance manager's create named (host.db `topics`). No libp2p node here, and no row ever stepped.
+  const topics: Record<string, string[] | undefined> = {
+    [A]: [`tm_color_${A}`, `ls_color_${A}`],
+    [B]: [`tm_color_${B}`, `ls_color_${B}`],
+    discovery: ["tm_color", "ls_color_deploys", "tm_twice"],
+    other: ["tm_twice"],
+    off: ["tm_off", "ls_color_deploys"],
+    plain: undefined,
   };
-  takes.discovery!.push("tm_twice"); // a gossip subscription counts too
-  (router as unknown as { takers: (t: string) => string[] }).takers = (topic) => Object.keys(takes).filter((h) => takes[h]!.includes(topic));
-  const submit = (topics: string) => router.overlayTarget("/submit", { method: "POST", url: "https://swap.example.test/submit", headers: { "x-topics": topics }, body: new Uint8Array() } as never);
+  for (const [h, ts] of Object.entries(topics)) db.add(h, { store: join(home, `${h}.db`), ...(ts ? { topics: JSON.stringify(ts) } : {}) });
+  db.setStatus("off", "disabled");
+  const submit = (x: string) => router.overlayTarget("/submit", { method: "POST", url: "https://swap.example.test/submit", headers: { "x-topics": x }, body: new Uint8Array() } as never);
   const lookup = (body: unknown) => router.overlayTarget("/lookup", { method: "POST", url: "https://swap.example.test/lookup", headers: {}, body: new TextEncoder().encode(JSON.stringify(body)) } as never);
 
   assert.deepEqual(submit(`tm_color_${A}`), { handle: A }, "a token's topic: its instance");
-  assert.deepEqual(submit("tm_color"), { handle: "discovery" }, "tm_color: the instance declaring it (tm_color-live)");
+  assert.deepEqual(submit("tm_color"), { handle: "discovery" }, "tm_color: the row whose topics name it");
   assert.deepEqual(submit(JSON.stringify(["tm_color"])), { handle: "discovery" });
-  assert.deepEqual(lookup({ service: "ls_color_deploys", query: {} }), { handle: "discovery" }, "ls_color_deploys: the hostname instance beating it (the token instances beating it too are not asked)");
+  assert.deepEqual(lookup({ service: "ls_color_deploys", query: {} }), { handle: "discovery" }, "ls_color_deploys: the row naming it (the disabled one naming it too is not asked)");
   assert.deepEqual(lookup({ service: "ls_color_deploys", query: { topic: "tm_color" } }), { handle: "discovery" });
   assert.deepEqual(lookup({ service: `ls_color_${B}`, query: {} }), { handle: B });
-  assert.deepEqual(lookup({ service: "ls_amm", query: {} }), {}, "a name only path-only instances declare: no instance (the hostname's, as before)");
+  assert.deepEqual(lookup({ service: "ls_amm", query: {} }), {}, "a name no row names: no instance (the hostname's, as before)");
   assert.deepEqual(submit("tm_off"), {}, "a disabled instance is not asked");
   assert.deepEqual(submit("tm_nobody"), {}, "nothing maps: no instance");
   const two = submit("tm_twice");
   assert.ok("problem" in two && /2 instances here take tm_twice/.test(two.problem), JSON.stringify(two));
   assert.ok("problem" in submit(`tm_color,tm_color_${A}`), "names mapping to two instances: a problem");
   assert.ok("problem" in submit("tm_color,tm_nobody"), "a name mapping nowhere beside one that maps: a problem");
+  // A start's `topics` replaces the row's (Router.manage "start" → setTopics).
+  assert.ok(db.setTopics("other", ["tm_other"]));
+  assert.deepEqual(submit("tm_twice"), { handle: "discovery" }, "after other's topics are replaced, tm_twice is discovery's alone");
+  assert.deepEqual(submit("tm_other"), { handle: "other" });
+  // The manager's create refuses malformed `topics` before it makes anything.
+  const manage = (router as unknown as { manage: (box: string, b: Record<string, unknown>) => Promise<unknown> }).manage.bind(router);
+  for (const bad of ["tm_color", [""], ["tm_color", "tm_color"], [1]]) {
+    await assert.rejects(manage("create", { handle: "newone", owner: "02" + "1".repeat(64), topics: bad }), /topics:/, JSON.stringify(bad));
+  }
+  assert.equal(db.get("newone"), undefined);
 });

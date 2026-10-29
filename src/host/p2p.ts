@@ -628,16 +628,6 @@ export class P2PHost {
     for (const p of want) if (!n.handled.has(p)) { n.handled.add(p); await this.handleProtocol(n, p); }
   }
 
-  /**
-   * The handles on this host's nodes that take `topic` (#137: the router routes a bare-host overlay
-   * request by it): their configs' topics and their apps' liveness topics (#138), in node order.
-   */
-  takers(topic: string): string[] {
-    const out: string[] = [];
-    for (const n of this.nodes.values()) for (const [handle, h] of n.handles) if (this.takes(handle, h).includes(topic)) out.push(handle);
-    return out;
-  }
-
   /** The topics `handle`'s node subscribes for it now: its config's and its apps' liveness topics (#138). */
   listening(handle: string): string[] {
     const n = this.byHandle.get(handle);

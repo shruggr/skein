@@ -133,7 +133,7 @@ import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
-import { HANDLE, pathOnly, TOKEN_HANDLE, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
+import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
@@ -1120,7 +1120,7 @@ export class Router {
    * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
    * registrations) and `skein-host add --mailbox` both come here.
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!validHandle(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
@@ -1140,7 +1140,7 @@ export class Router {
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
     const store = this.newStore(handle);
     if (storeExists(storeSpec({ store, handle }))) throw new Error(`handle ${handle}: a store is at ${storeSpec({ store, handle })} already`);
-    this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain() }); // H4: never the column's `localhost` on a host with a domain
+    this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain(), ...(o.topics?.length ? { topics: JSON.stringify(o.topics) } : {}) }); // #137: the names it is routed by. H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
       await this.image.ready; // #132: born with the chain as the host holds it
@@ -1220,7 +1220,8 @@ export class Router {
       // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
       // skein-amm#4: `beef` — an Atomic BEEF (the token's deploy) handed into the new instance once it is up.
       if (b.beef != null && !(b.beef instanceof Uint8Array)) throw new Error("beef: an Atomic BEEF (bytes)");
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), needsClaim: true });
+      const topics = topicsArg(b.topics);
+      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
       const answer: Record<string, unknown> = { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
       if (b.beef instanceof Uint8Array) answer.delivered = await this.deliverBeef(c.handle, b.beef);
       return answer;
@@ -1230,6 +1231,9 @@ export class Router {
     if (!row) throw new Error(`no instance ${handle}`);
     if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein: it is not started or stopped by a message from itself`);
     if (box === "start") {
+      // #137: `topics` replaces the names the row is routed by; absent keeps them.
+      const topics = topicsArg(b.topics);
+      if (topics) this.o.db.setTopics(handle, topics);
       this.o.db.setStatus(handle, "enabled");
       await this.hydrate(handle);
       await this.refollowHeaders(handle);
@@ -1873,66 +1877,56 @@ export class Router {
   }
 
   /**
-   * #161: an overlay request at the bare host — POST /submit (the topics its X-Topics names: a comma
-   * list or a JSON array, as the overlay reads it) or POST /lookup (its JSON body's `service`, and a
-   * `topic` beside it or in its query) — routed to the instance that serves the names:
+   * #161, #137: an overlay request at the bare host — POST /submit (the topics its X-Topics names: a
+   * comma list or a JSON array, as the overlay reads it) or POST /lookup (its JSON body's `service`,
+   * and a `topic` beside it or in its query) — routed to the instance that serves the names:
    *
    *   - a token's name, `tm_color_<id>` / `ls_color_<id>` whose `<id>` is an enabled path-only
-   *     instance here: that instance (#161);
-   *   - any other name (#137: `tm_color`, `ls_color_deploys`, …): the enabled instance with a
-   *     hostname handle that DECLARES it on this host's libp2p node — a topic by its gossip
-   *     subscription or its liveness topic `<topic>-live` (skein-overlay 0.17.0's configured
-   *     topics declare only the latter), a lookup service by its liveness topic `<service>-live`
-   *     (P2PHost.takers: the handles' config topics and their apps' liveness topics). Path-only (token) instances are not asked
-   *     for these: each serves its token's own names, and the shared ones (`ls_color`, `ls_amm`,
-   *     `ls_color_deploys`) every token instance declares are reached at `/@<id>/lookup`. Two
-   *     instances with hostname handles declaring the same name: a problem (400, "N instances here
-   *     take <name>").
+   *     instance here: that instance (#161, the handle naming convention; checked first);
+   *   - any other name (`tm_color`, `ls_color_deploys`, …): the enabled instance whose `topics` (the
+   *     names the instance manager's create or start named, host.db) contain it. Whether the instance
+   *     has run yet does not matter. Two instances taking the same name: a problem (400, "N instances
+   *     here take <name>").
    *
    * Every name that maps must map to the same instance (else a problem: 400); a name mapping to no
    * instance here beside one that does is a problem too. Nothing maps: no handle (the hostname's
    * instance, or the bare host, as before).
    */
   overlayTarget(path: "/submit" | "/lookup", req: RouterRequest): { handle?: string } | { problem: string } {
-    const names: Array<{ name: string; service: boolean }> = [];
+    const names: string[] = [];
     if (path === "/submit") {
       const h = (req.headers["x-topics"] ?? "").trim();
       if (!h) return {};
-      const topics: string[] = [];
       if (h.startsWith("[")) {
         let j: unknown;
         try { j = JSON.parse(h); } catch { return {}; } // the overlay's own refusal, at no instance: the bare host's
         if (!Array.isArray(j)) return {};
-        for (const t of j) if (typeof t === "string") topics.push(t);
-      } else topics.push(...h.split(",").map((x) => x.trim()).filter(Boolean));
-      for (const t of topics) names.push({ name: t, service: false });
+        for (const t of j) if (typeof t === "string") names.push(t);
+      } else names.push(...h.split(",").map((x) => x.trim()).filter(Boolean));
     } else {
       let j: Record<string, unknown> | undefined;
       try { j = JSON.parse(new TextDecoder().decode(req.body)) as Record<string, unknown>; } catch { return {}; }
       if (!j || typeof j !== "object") return {};
       const q = j.query as Record<string, unknown> | undefined;
-      if (typeof j.service === "string") names.push({ name: j.service, service: true });
-      for (const t of [j.topic, q && typeof q === "object" ? q.topic : undefined]) if (typeof t === "string") names.push({ name: t, service: false });
+      for (const t of [j.service, j.topic, q && typeof q === "object" ? q.topic : undefined]) if (typeof t === "string") names.push(t);
     }
     const enabled = (h: string) => this.o.db.get(h)?.status === "enabled";
+    const rows = this.o.db.list("enabled");
     const mapped: Array<string | undefined> = [];
-    for (const { name, service } of names) {
+    for (const name of names) {
       const id = /^(?:tm|ls)_color_(.+)$/.exec(name)?.[1];
       if (id && TOKEN_HANDLE.test(id) && enabled(id)) { mapped.push(id); continue; }
-      const by = [...new Set([...(service ? [] : this.takers(name)), ...this.takers(`${name}-live`)])].filter((h) => !pathOnly(h) && enabled(h));
+      const by = rows.filter((r) => topicsOf(r).includes(name)).map((r) => r.handle);
       if (by.length > 1) return { problem: `${by.length} instances here take ${name} (${by.join(", ")}): send it to one of them (/@<handle>/${path.slice(1)})` };
       mapped.push(by[0]);
     }
     const hit = [...new Set(mapped.filter((x): x is string => !!x))];
     if (!hit.length) return {};
     if (hit.length > 1) return { problem: `the names map to ${hit.length} instances here (${hit.join(", ")}): one request goes to one; send one per instance` };
-    const stray = names.filter((_, i) => !mapped[i]).map((x) => x.name);
+    const stray = names.filter((_, i) => !mapped[i]);
     if (stray.length) return { problem: `${stray.join(", ")}: no instance here takes ${stray.length > 1 ? "these" : "it"} beside ${hit[0]}: send one request per instance` };
     return { handle: hit[0]! };
   }
-
-  /** The handles on this host's libp2p node(s) that take `topic` (P2PHost.takers; none without libp2p). */
-  takers(topic: string): string[] { return this.p2p?.takers(topic) ?? []; }
 
   /**
    * GET /skeins?key=<hex> at the host's own origin: the skeins on this host whose head `grants`
@@ -2079,6 +2073,16 @@ export class Router {
 export interface SignedClaim { message: Omit<MailRecord, "recipient"> & { recipient?: undefined }; body: Uint8Array }
 
 /** A create's `claim` ({message, body}), checked for its shape (throws; undefined: missing). */
+/**
+ * The instance manager's `topics` (#137): the overlay names (gossip topics and lookup services alike)
+ * the host routes to the instance at the bare host — plain non-empty strings, no duplicates; absent → undefined.
+ */
+function topicsArg(v: unknown): string[] | undefined {
+  if (v == null) return undefined;
+  if (!Array.isArray(v) || v.some((t) => typeof t !== "string" || !t) || new Set(v).size !== v.length) throw new Error("topics: the overlay names the host routes to it, [text, …], each non-empty, no duplicates");
+  return v as string[];
+}
+
 function claimOf(v: unknown): SignedClaim {
   const c = v as { message?: unknown; body?: unknown } | null | undefined;
   if (!c || typeof c !== "object" || !c.message || typeof c.message !== "object" || !(c.body instanceof Uint8Array)) {

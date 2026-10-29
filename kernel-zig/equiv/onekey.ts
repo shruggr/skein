@@ -38,13 +38,14 @@
 //       the pulls over /skein/overlay/sync/1.0.0, answered through O's shared
 //       node by T0's engine) to equal anchors;
 //   (g) #137: alice creates `discovery` (a hostname handle) from the same
-//       image with tm_color and ls_color_deploys configured: a BEEF POSTed at
-//       the bare host with X-Topics tm_color is routed to it (the router asks
-//       the node which instance takes the topic) and admitted there; POST
-//       /lookup {service: ls_color_deploys} is routed to it (its liveness
-//       topic ls_color_deploys-live); a lookup name a token instance (T2)
-//       beats too still goes to discovery (path-only instances not asked for
-//       shared names); stopped, tm_color falls through again;
+//       image with tm_color and ls_color_deploys configured, NO beef, and
+//       `topics: ["tm_color", "ls_color_deploys"]`: at once (no request to
+//       it first, never stepped) a BEEF POSTed at the bare host with X-Topics
+//       tm_color is routed to it (by its host.db row's topics) and admitted
+//       there; POST /lookup {service: ls_color_deploys} is routed to it; the
+//       token instance T2 (created with its own topics) still routed; a
+//       start with `topics` replaces the row's; stopped, tm_color falls
+//       through again;
 //   timings: a gossip message's fan-out to 8 handles on the one node; the
 //       create-by-emit latency.
 //
@@ -418,7 +419,9 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   await (rO as unknown as { image: { headers(raws: Uint8Array[]): Promise<void> } }).image.headers([REGTEST_GENESIS, ...headers.slice(0, hE)]);
   const config = { okt: { onekey: "the admin's initial values" }, overlay: overlayAt(topicOf(T2), TERMS) };
   const tc = Date.now();
-  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, beef: Uint8Array.from(tE.toAtomicBEEF()) });
+  // #137: the create names the overlay names the host routes to it.
+  const T2_TOPICS = [topicOf(T2), `ls_color_${T2}`];
+  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, beef: Uint8Array.from(tE.toAtomicBEEF()), topics: T2_TOPICS });
   const createMs = Date.now() - tc;
   timings.push(`create by emit with the deploy's BEEF (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, the BEEF delivered, to its answer): ${createMs} ms`);
   check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url, delivered}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 260)}`);
@@ -450,6 +453,7 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const row2 = dbO.get(T2);
   if (row2?.status === "enabled") { stores.push(storeSpec(row2)); handleOf.set(storeSpec(row2), T2); }
   check(row2?.status === "enabled", `(e) the row ${T2.slice(0, 8)}…_2 exists, enabled (${row2?.status})`);
+  check(row2?.topics === JSON.stringify(T2_TOPICS), `(e) the row carries the create's topics (${row2?.topics})`);
   if (row2?.status === "enabled") {
     const k2 = (await rO.hydrate(T2)).kernel;
     const g = await k2.store.get(await k2.call("head", "grants") as CID) as { roles?: Record<string, Uint8Array[]> };
@@ -464,6 +468,7 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   a = await ask(rO, "alice", "start", { handle: T2 });
   const restarted = await until("T2 beats again after start", () => liveAt(topicOf(T2)), 5000).catch(() => undefined);
   check(a[0]?.body.started === true && dbO.get(T2)?.status === "enabled" && rO.p2p!.handlesOn(T0).includes(T2) && !!restarted, `(e) start enables it again and its configured topic beats again (${restarted?.length ?? 0} beat(s))`);
+  check(dbO.get(T2)?.topics === JSON.stringify(T2_TOPICS), `(e) a start with no topics keeps the row's (${dbO.get(T2)?.topics})`);
   await ask(rO, "alice", "stop", { handle: T2 });
   // An unmined BEEF: turned away at the door (the HARD RULE), reported in the answer, the instance created and enabled.
   const TU = `${TXID}_10`;
@@ -502,17 +507,15 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   check(lines.some((l) => l.startsWith("[d:") && /sync: /.test(l) && l.includes(oPeer.slice(-8))) || !!caught, "(f) the catch-up was D's puller's, from O's peer");
   check((await seen(T1))?.head === t1Seen, "(f) T1, which declares the sync protocol too, was not asked: the frames named T0's topic");
 
-  // ------------------------------------------------ (g) a discovery instance (#137): a non-token topic routed to the instance that declares it
-  // alice creates `discovery` from the same image with tm_color and ls_color_deploys configured (skein-amm 0.18.0's toggle);
-  // a token instance (T2's config names ls_demo) declares a lookup too: path-only instances are not asked for shared names.
-  const DISC = { overlay: { topics: { tm_color: "topic-demo" }, lookups: { ls_color_deploys: { program: "lookup-demo", topics: ["tm_color"] }, ls_demo: { program: "lookup-demo", topics: ["tm_color"] } } } };
-  a = await ask(rO, "alice", "create", { handle: "discovery", image: "okimg", config: { overlay: DISC } }); // {<app>: {<program>: …}}
+  // ------------------------------------------------ (g) a discovery instance (#137): a non-token name routed by the topics the create named
+  // alice creates `discovery` from the same image with tm_color and ls_color_deploys configured (skein-amm 0.18.1's toggle),
+  // no BEEF, and the create names the topics the host routes to it.
+  const DISC = { overlay: { topics: { tm_color: "topic-demo" }, lookups: { ls_color_deploys: { program: "lookup-demo", topics: ["tm_color"] } } } };
+  const DISC_TOPICS = ["tm_color", "ls_color_deploys"];
+  a = await ask(rO, "alice", "create", { handle: "discovery", image: "okimg", config: { overlay: DISC }, topics: DISC_TOPICS }); // {<app>: {<program>: …}}
   const rowD = dbO.get("discovery");
   if (rowD) { stores.push(storeSpec(rowD)); handleOf.set(storeSpec(rowD), "discovery"); }
-  check(a[0]?.body.handle === "discovery" && rowD?.status === "enabled", `(g) alice's create of discovery answered ${JSON.stringify({ ...a[0]?.body, identity: undefined })}`);
-  // Born with no BEEF, discovery's overlay has not stepped: its configured names are declared on the engine's first step
-  // (skein-overlay 0.17.0), so nothing here takes tm_color yet and a bare-host request for it falls through.
-  check(rO.takers("tm_color-live").length === 0, `(g) before discovery's first step nothing takes tm_color (${rO.takers("tm_color-live").join() || "none"})`);
+  check(a[0]?.body.handle === "discovery" && rowD?.status === "enabled" && rowD?.topics === JSON.stringify(DISC_TOPICS), `(g) alice's create of discovery answered ${JSON.stringify({ ...a[0]?.body, identity: undefined })}, its row's topics ${rowD?.topics}`);
   const fwdG = (rO as unknown as { forward: (h: string, route: string, ...rest: unknown[]) => Promise<unknown> });
   const origG = fwdG.forward.bind(rO);
   const sent: Array<{ handle: string; route: string }> = [];
@@ -523,38 +526,37 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
     const x = await r.json() as { blocks?: Array<{ txids: string[] }> };
     return x.blocks?.some((b) => b.txids.includes(t.id("hex"))) || undefined;
   }, 10_000).catch(() => false);
-  // Its first submission at its own path steps it.
+  // At once — no request to discovery first, its overlay never stepped — a BEEF at the BARE host with X-Topics tm_color lands in it.
   const tD = await token(tE, 1, 8_000);
   const hD = mineAlone(tD);
   await feedHeaders(rO, "discovery", hE + 1);
-  const sD0 = await fetch(`${base}/@discovery/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
-  const sD0Body = await sD0.text();
-  check(sD0.status === 200 && await admittedAt(tD, hD) === true, `(g) a first BEEF at /@discovery/submit (its root route), X-Topics tm_color: ${sD0.status} ${sD0Body.slice(0, 200)}, admitted at ${hD}`);
-  await until("discovery declares tm_color and ls_color_deploys", () => rO.takers("tm_color-live").includes("discovery") && rO.takers("ls_color_deploys-live").includes("discovery") || undefined, 10_000).catch(() => undefined);
-  check(rO.takers("tm_color-live").join() === "discovery" && rO.takers("ls_color_deploys-live").join() === "discovery", `(g) then the node's table: tm_color-live taken by ${rO.takers("tm_color-live").join() || "none"}; ls_color_deploys-live by ${rO.takers("ls_color_deploys-live").join() || "none"}`);
-  const tD2 = await token(tD, 1, 7_000);
-  const hD2 = mineAlone(tD2);
-  await feedHeaders(rO, "discovery", hD2);
-  const sD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD2.toBEEF()) });
+  const sD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
   const sDBody = await sD.text();
-  check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/submit" && sD.status === 200, `(g) bare-host POST /submit, X-Topics tm_color → discovery /submit: ${sD.status} ${sDBody.slice(0, 160)}`);
-  check(await admittedAt(tD2, hD2) === true, `(g) discovery admitted it under tm_color (at ${hD2})`);
+  check(sent.length === 1 && sent[0]?.handle === "discovery" && sent[0]?.route === "/submit" && sD.status === 200, `(g) the newborn: bare-host POST /submit, X-Topics tm_color → discovery /submit: ${sD.status} ${sDBody.slice(0, 160)}`);
+  check(await admittedAt(tD, hD) === true, `(g) discovery admitted it under tm_color (at ${hD})`);
   const lD = await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color_deploys", query: {} }) });
   const lDBody = await lD.text();
   check(sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/lookup" && /UnknownService/.test(lDBody), `(g) bare-host POST /lookup {service: ls_color_deploys} → discovery /lookup, answered by its program (lookup-demo knows only ls_demo): ${lD.status} ${lDBody.slice(0, 160)}`);
-  // ls_demo: discovery (a hostname handle) and T2's config both name it; T2 is stopped, so start it: path-only, not asked.
+  // The token instance T2, created with topics [tm_color_<id>, ls_color_<id>], still routed.
   await ask(rO, "alice", "start", { handle: T2 });
-  await until("T2 beats ls_demo-live again", () => rO.takers("ls_demo-live").includes(T2) || undefined, 10_000).catch(() => undefined);
-  const nG = sent.length;
-  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_demo", query: {} }) });
-  check(rO.takers("ls_demo-live").includes(T2) && sent.length === nG + 1 && sent.at(-1)?.handle === "discovery", `(g) ls_demo, beaten by discovery and the token instance T2: routed to discovery (takers ${rO.takers("ls_demo-live").map((h) => h.slice(0, 9)).join(", ")})`);
+  const nT = sent.length;
+  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: `ls_color_${T2}`, query: {} }) });
+  check(sent.length === nT + 1 && sent.at(-1)?.handle === T2 && sent.at(-1)?.route === "/lookup", `(g) bare-host POST /lookup {service: ls_color_<T2>} → T2 (${sent.at(-1)?.handle.slice(0, 9)})`);
   await ask(rO, "alice", "stop", { handle: T2 });
   const mixedG = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": `tm_color,${topicOf(T0)}` }, body: Uint8Array.from([1]) });
   check(mixedG.status === 400, `(g) tm_color beside a token's topic: 400 (${(await mixedG.json() as { description?: string }).description})`);
+  // A start with `topics` replaces the row's: ls_color_deploys no longer routed to discovery, tm_color still is.
+  await ask(rO, "alice", "stop", { handle: "discovery" });
+  a = await ask(rO, "alice", "start", { handle: "discovery", topics: ["tm_color"] });
+  const nR = sent.length;
+  await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_color_deploys", query: {} }) });
+  const tmR = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
+  await tmR.arrayBuffer();
+  check(a[0]?.body.started === true && dbO.get("discovery")?.topics === JSON.stringify(["tm_color"]) && sent.length === nR + 1 && sent.at(-1)?.handle === "discovery" && sent.at(-1)?.route === "/submit", `(g) start {topics: [tm_color]} replaces the row's: ls_color_deploys falls through, tm_color still routed (${dbO.get("discovery")?.topics}; ${sent.length - nR} forwarded)`);
   a = await ask(rO, "alice", "stop", { handle: "discovery" });
   const nS = sent.length;
   const offD = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_color" }, body: Uint8Array.from(tD.toBEEF()) });
-  check(a[0]?.body.stopped === true && sent.length === nS && offD.status === 404 && rO.takers("tm_color").length === 0, `(g) discovery stopped: tm_color taken by no one, the bare host as before (${offD.status})`);
+  check(a[0]?.body.stopped === true && sent.length === nS && offD.status === 404, `(g) discovery stopped: tm_color taken by no one, the bare host as before (${offD.status})`);
   fwdG.forward = origG;
 
   // ------------------------------------------------ timing: gossip fan-out to 8 handles on the one node
