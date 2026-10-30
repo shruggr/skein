@@ -26,7 +26,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
+import { PrivateKey } from "@bsv/sdk";
 import { RawBox } from "../../src/client/raw.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -165,8 +165,8 @@ for (const mode of ONLY && ONLY !== "e" ? [] : ["wasm", "file", "rocksdb"] as co
     await h.router.hydrate("bench");
     const t0 = performance.now();
     for (let i = 0; i < N; i++) {
-      const af = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()));
-      await af.fetch(`${h.base}/@bench/none`).catch(() => {});
+      // A new client each time: its BRC-103 handshake is one entry and one front-door step (two signer calls).
+      await new RawBox(ephemeralWallet(PrivateKey.fromRandom()), `${h.base}/@bench`).list("inbox").catch(() => {});
     }
     await h.router.settled();
     const ms = performance.now() - t0;
