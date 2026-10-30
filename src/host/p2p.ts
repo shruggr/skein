@@ -135,6 +135,17 @@ export type Frame = { body: Uint8Array } | { closed: true; error?: string };
 /** The stream protocol a signed message travels on to an instance (#70). */
 export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
 
+/**
+ * The overlay's receive row (skein-overlay etc/app.json; the settled sync design, David 2026-10-30):
+ * the host's OWN entry for the BEEFs it fetched (sync.ts `deliver` → Router.p2pInbound), never served
+ * to peers ("not a good door to have": a node takes BEEFs only from paths it chose). Whatever rows an
+ * instance declares, no node handles it inbound.
+ */
+export const RECEIVE_PROTOCOL = "/skein/overlay/beef/1.0.0";
+
+/** Whether a node handles `protocol` inbound for its handles' rows: not the receive row, not the host's own. */
+const inboundRow = (protocol: string, host: Record<string, unknown>) => protocol !== MESSAGE_PROTOCOL && protocol !== RECEIVE_PROTOCOL && !(protocol in host);
+
 export interface P2POptions {
   host: P2PHostConfig;
   /** The instance's peer key (signer.ts peerKey). */
@@ -623,7 +634,7 @@ export class P2PHost {
   /** Handle the protocols the handles declare, unhandle those none declares any more (the host's own aside). */
   private async rehandle(n: Node): Promise<void> {
     const host = this.o.hostProtocols ?? {};
-    const want = new Set([...n.handles.values()].flatMap((h) => h.config.protocols).filter((p) => !(p in host) && p !== MESSAGE_PROTOCOL));
+    const want = new Set([...n.handles.values()].flatMap((h) => h.config.protocols).filter((p) => inboundRow(p, host)));
     for (const p of [...n.handled]) if (!want.has(p)) { n.handled.delete(p); await n.node.unhandle(p); }
     for (const p of want) if (!n.handled.has(p)) { n.handled.add(p); await this.handleProtocol(n, p); }
   }
@@ -721,7 +732,7 @@ export class P2PHost {
     if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(this.nameOf(n), `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
     this.resubscribe(n);
     const host = this.o.hostProtocols ?? {};
-    for (const protocol of config.protocols.filter((p) => !(p in host) && p !== MESSAGE_PROTOCOL)) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
+    for (const protocol of config.protocols.filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
@@ -855,40 +866,51 @@ export class P2PHost {
   /**
    * The beacons `handle`'s node beats (#126): each a new frame (beaconFrame:
    * the body, the beat's time, the instance's signature) published on its topic
-   * every `every` ms, from now on — the topic not subscribed; nothing logged
-   * per beat (a failed beat is dropped: the next one is the retry). One line
-   * when a beacon starts, changes or stops. No node: nothing beats.
+   * every `every` ms — the topic not subscribed; nothing logged per beat (a
+   * failed beat is dropped: the next one is the retry). The FIRST beacon on a
+   * topic publishes at once. A beacon REPLACING one (the same app and topic, a
+   * new body and/or `every`; the settled sync design, David 2026-10-30) swaps
+   * what the next beat carries and leaves the timer alone — no publish now, no
+   * reset — unless `every` changed, when the timer is reset to the new
+   * interval (still no publish now). One line when a beacon starts or stops.
+   * No node: nothing beats.
    */
   beacons(handle: string, beacons: Beacon[]): void {
     const n = this.byHandle.get(handle);
     const hs = n?.handles.get(handle);
     if (!n || !hs) return;
     const want = new Map(beacons.map((b) => [`${b.app} ${b.topic}`, b]));
+    // Each beat a new frame: the entry's body as it stands then, now, signed by the instance's signer (beaconFrame).
+    const beatOf = (k: string) => () => {
+      const x = hs.beats.get(k);
+      if (!x || this.byHandle.get(handle) !== n || n.handles.get(handle) !== hs) return;
+      const b = x.beacon;
+      const { sign, identity } = this.o;
+      if (!sign || !identity) return;
+      void (async () => {
+        const sender = await identity(handle);
+        if (!sender) return;
+        const frame = await beaconFrame(b.topic, b.body, Date.now(), sender, (d) => sign(handle, d));
+        await this.publish(handle, b.topic, frame);
+        // #138: the node's own beat into its liveness set (gossip does not echo it).
+        if (this.live.takes(handle, b.topic)) this.live.observe(handle, b.topic, frame, n.node.peerId.toString());
+      })().catch(() => {});
+    };
     for (const [k, x] of hs.beats) {
       const b = want.get(k);
-      if (b && b.every === x.beacon.every && Buffer.from(b.body).equals(Buffer.from(x.beacon.body))) continue;
+      if (b) {
+        if (b.every !== x.beacon.every) { clearInterval(x.timer); x.timer = setInterval(beatOf(k), b.every); }
+        x.beacon = b; // the next beat carries it
+        continue;
+      }
       clearInterval(x.timer);
       hs.beats.delete(k);
-      if (!b) this.say(handle, `libp2p: beacon ${x.beacon.topic} (app ${x.beacon.app}) stopped`);
+      this.say(handle, `libp2p: beacon ${x.beacon.topic} (app ${x.beacon.app}) stopped`);
     }
     for (const [k, b] of want) {
       if (hs.beats.has(k)) continue;
-      // Each beat a new frame: the body, now, signed by the instance's signer (beaconFrame).
-      const beat = () => {
-        if (this.byHandle.get(handle) !== n || n.handles.get(handle) !== hs) return;
-        const { sign, identity } = this.o;
-        if (!sign || !identity) return;
-        void (async () => {
-          const sender = await identity(handle);
-          if (!sender) return;
-          const frame = await beaconFrame(b.topic, b.body, Date.now(), sender, (d) => sign(handle, d));
-          await this.publish(handle, b.topic, frame);
-          // #138: the node's own beat into its liveness set (gossip does not echo it).
-          if (this.live.takes(handle, b.topic)) this.live.observe(handle, b.topic, frame, n.node.peerId.toString());
-        })().catch(() => {});
-      };
-      hs.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
-      beat();
+      hs.beats.set(k, { beacon: b, timer: setInterval(beatOf(k), b.every) });
+      beatOf(k)();
       this.say(handle, `libp2p: beacon ${b.topic} (app ${b.app}) every ${b.every} ms, ${b.body.length} bytes`);
     }
   }
@@ -948,6 +970,25 @@ export class P2PHost {
       stream.abort(e as Error);
       throw e;
     }
+  }
+
+  /** The protocols `handle`'s node handles inbound now (the libp2p node's own registry: its rows', the host's, /skein/message/1.0.0). */
+  handledProtocols(handle: string): string[] { return this.byHandle.get(handle)?.node.getProtocols() ?? []; }
+
+  /** The addresses `handle`'s node knows for `peer` (its peer store), as multiaddr strings. */
+  async peerAddrs(handle: string, peer: string): Promise<string[]> {
+    const n = this.byHandle.get(handle);
+    if (!n) return [];
+    try { return (await n.node.peerStore.get(peerIdFromString(peer))).addresses.map((a) => a.multiaddr.toString()); } catch { return []; }
+  }
+
+  /** Dial `peer` from `handle`'s node, at `addrs` when given (a start's persisted peers), else as the peer store knows it. */
+  async connect(handle: string, peer: string, addrs: string[] = []): Promise<void> {
+    const n = this.nodeOf(handle);
+    const id = peerIdFromString(peer);
+    if (n.node.getConnections(id).length) return;
+    const mas = addrs.flatMap((a) => { try { const m = multiaddr(a); return [m.getComponents().some((c) => c.name === "p2p") ? m : m.encapsulate(`/p2p/${peer}`)]; } catch { return []; } });
+    await n.node.dial(mas.length ? mas : id, { signal: AbortSignal.timeout(15_000) });
   }
 
   /** The peers `handle`'s node knows subscribe `topic` (GossipSub's view), as peer ID strings. */

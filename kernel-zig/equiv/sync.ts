@@ -1,11 +1,13 @@
-// Overlay sync (shruggr/skein#150) end to end over libp2p: shruggr/skein-chain
-// and shruggr/skein-overlay 0.15.0 (pinned commits, or $SKEIN_CHAIN_DIR /
+// Overlay sync (shruggr/skein#150; the settled design, David 2026-10-30) end to
+// end over libp2p: shruggr/skein-chain 0.7.1 and shruggr/skein-overlay 0.20.0
+// (pinned commits, or $SKEIN_CHAIN_DIR /
 // $SKEIN_OVERLAY_DIR) installed by the owner's messages into stock-system
 // instances on three routers, each topic registered by the owner (the beats
 // are a registered topic's), the validator beating every second:
 //
 //   - two hosts, one topic (tm_sync): a token mined at 2 and submitted to b
-//     reaches a by gossip; their anchors agree at 2;
+//     reaches a by announce-then-fetch (b's admit; a's host fetches the BEEF
+//     from b on /skein/overlay/sync/1.0.0); their anchors agree at 2;
 //   - a offline (its router stopped) for three blocks: b takes a token mined
 //     in each; a back (a new router on the same store, the headers fed): a
 //     hears b's beat, runs the locator exchange on /skein/overlay/sync/1.0.0,
@@ -18,8 +20,9 @@
 //     b holds a token p (unmined, under tm_demo, gossip off for it) that no
 //     other host has; a transfer spending p posted to a without p in its BEEF
 //     is refused at a's door (400 ERR_BEEF MissingInput: skein-sdk's verifier
-//     over the BEEF alone), nothing written — neither the transfer nor p
-//     reaches a (the overlay's want is never reached).
+//     over the BEEF alone), nothing written for it, nothing wanted; p, b's
+//     unmined tail on tm_demo (never announced: gossip off), reaches a and c
+//     by the tail reconcile on b's next beat.
 //
 // Each instance's store then replays to itself exactly.
 //
@@ -47,9 +50,9 @@ import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "924d60f559503e9df59f596bed0162f171f1e768";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "a9ec5ee9ed7aeab011b9458c99ad1d6802d8f60c"; // v0.20.0
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "7da428422ce193a1bb489163637f070860d46ccd"; // v0.7.1
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-sync-"));
@@ -231,12 +234,12 @@ async function bring(h: Name): Promise<void> {
 try {
   overlayDir = checkout(process.env.SKEIN_OVERLAY_DIR, OVERLAY_REPO, OVERLAY_REV, join(home, "overlay"));
   chainDir = checkout(process.env.SKEIN_CHAIN_DIR, CHAIN_REPO, CHAIN_REV, join(home, "chain"));
-  // The validator beats every second (default 30 s); tm_demo publishes nothing (the want below is the only way p travels).
+  // The validator beats every second (default 120 s); tm_demo publishes nothing (p travels nowhere).
   const mf = JSON.parse(readFileSync(join(overlayDir, "etc/app.json"), "utf8")) as { version: string; config: { overlay: Record<string, unknown> } };
   mf.config.overlay.validator = { every: 1000 };
   mf.config.overlay.gossip = { tm_demo: false };
   writeFileSync(join(overlayDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.15.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
+  check(mf.version === "0.20.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
 
   await bring("a");
   await bring("b");
@@ -251,7 +254,7 @@ try {
   const s2 = await submit("b", t2.toBEEF(), "tm_sync");
   check(s2.status === 200, `t2 (mined at ${h2}) posted to b: ${s2.status} ${await s2.text()}`);
   const agree2 = await until("a and b agree at 2", () => sameTip("a", "b")).catch(() => undefined);
-  check(agree2?.tip === 2 && agree2.genesis === 2, `a (by gossip) and b agree: genesis ${agree2?.genesis}, tip ${agree2?.tip}, anchor ${agree2?.anchor.slice(0, 16)}…`);
+  check(agree2?.tip === 2 && agree2.genesis === 2, `a (b's admit, then a fetch from b) and b agree: genesis ${agree2?.genesis}, tip ${agree2?.tip}, anchor ${agree2?.anchor.slice(0, 16)}…`);
 
   // ------------------------------------------------ a offline for three blocks; b takes a token in each
   await quiet();
@@ -283,12 +286,11 @@ try {
   check(fromGenesis?.tip === 5 && fromGenesis.genesis === 2, `c, new, from genesis: equal anchors (genesis ${fromGenesis?.genesis}, tip ${fromGenesis?.tip})`);
   check(!!(await sameTip("a", "c")), "a, b and c agree");
 
-  // ------------------------------------------------ a want: p held only by b; a transfer spending it posted to a without it
+  // ------------------------------------------------ p held only by b; a transfer spending it posted to a without it
   const p = await token(fund, 6);
   const sp = await submit("b", p.toBEEF(), "tm_demo");
   check(sp.status === 200, `p (unmined) posted to b under tm_demo: ${sp.status} ${await sp.text()}`);
   await until("b holds p", async () => (await holdsOn("b", p.id("hex"))).via);
-  check(!(await holdsOn("a", p.id("hex"))).via && !(await holdsOn("c", p.id("hex"))).via, "only b holds p");
   const x = new Transaction();
   x.addInput({ sourceTransaction: p, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
   x.addOutput({ lockingScript: tokenScript(), satoshis: 1 });
@@ -301,7 +303,11 @@ try {
   const rxText = await rx.text();
   check(rx.status === 400 && /MissingInput/.test(rxText), `the transfer, posted to a without p: refused at the door, 400 MissingInput (${rx.status} ${rxText.slice(0, 160)})`);
   await new Promise((r) => setTimeout(r, 3000));
-  check(!(await admittedIn(storeOf("a"), x.id("hex"))) && !(await holdsOn("a", x.id("hex"))).via && !(await holdsOn("a", p.id("hex"))).via, "a holds neither the transfer nor p (nothing written, no want)");
+  check(!(await admittedIn(storeOf("a"), x.id("hex"))) && !(await holdsOn("a", x.id("hex"))).via, "a holds nothing of the transfer (nothing written, nothing wanted)");
+  // The settled design's tail reconcile: p is b's unmined tail on tm_demo (gossip off: no admit announced it), so a's
+  // and c's hosts, on b's next beat (the mined side equal, the tail digest not), ask b's tail and fetch p.
+  const pTail = await until("p reaches a and c by the tail", async () => (await holdsOn("a", p.id("hex"))).via && (await holdsOn("c", p.id("hex"))).via ? true : undefined, 30_000).catch(() => false);
+  check(pTail === true, "p (unmined, never announced) reaches a and c by the tail reconcile on b's beat");
   await quiet();
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

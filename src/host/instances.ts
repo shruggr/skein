@@ -19,7 +19,8 @@
 // instance manager. And billing's (#130, billing.ts): each billed instance as
 // the host last read it (asleep since when: the grace), the periods it ticked
 // (each period's log record, which its tick commits to), and the payments its
-// wallet made (the `payment` events).
+// wallet made (the `payment` events). And overlay sync's: the peers each
+// instance's overlay topics heard beats from (`topic_peers`).
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -125,6 +126,16 @@ CREATE TABLE IF NOT EXISTS billing_payments (
   ours              INTEGER NOT NULL,                 -- 1: its output pays the key the remittance derives from this host's
   checkpoint        TEXT,                             -- the state record CID its other output commits
   PRIMARY KEY (instance, txid)
+) WITHOUT ROWID;
+-- Overlay sync (the settled design, David 2026-10-30): per instance and overlay topic, the peers whose beats on
+-- <topic>-live were kept, with the addresses the node knew for them; a restart dials them and asks at once.
+CREATE TABLE IF NOT EXISTS topic_peers (
+  handle            TEXT NOT NULL,
+  topic             TEXT NOT NULL,                    -- the overlay topic (not its -live)
+  peer_id           TEXT NOT NULL,                    -- the libp2p peer ID
+  addrs             TEXT NOT NULL,                    -- JSON array of multiaddrs (may be empty)
+  last_seen         INTEGER NOT NULL,                 -- ms: the last beat kept from it
+  PRIMARY KEY (handle, topic, peer_id)
 ) WITHOUT ROWID;`;
 
 /**
@@ -280,6 +291,23 @@ export class HostDb {
   }
 
   /** The enabled mailbox instance for identity `owner` (hex). */
+  /** A beat kept from `peer` on `handle`'s overlay `topic` (sync): upserted with its addresses (kept when none are known now). */
+  seenPeer(handle: string, topic: string, peer: string, addrs: string[], now: number): void {
+    this.db.prepare("INSERT INTO topic_peers (handle, topic, peer_id, addrs, last_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (handle, topic, peer_id) DO UPDATE SET addrs = CASE WHEN excluded.addrs = '[]' THEN addrs ELSE excluded.addrs END, last_seen = excluded.last_seen")
+      .run(handle, topic, peer, JSON.stringify(addrs), now);
+  }
+
+  /** The peers `handle`'s overlay `topic` heard beats from, the latest first. */
+  topicPeers(handle: string, topic: string): Array<{ peer: string; addrs: string[]; lastSeen: number }> {
+    return this.db.prepare("SELECT peer_id, addrs, last_seen FROM topic_peers WHERE handle = ? AND topic = ? ORDER BY last_seen DESC, peer_id").all(handle, topic)
+      .map((r) => ({ peer: String(r.peer_id), addrs: JSON.parse(String(r.addrs)) as string[], lastSeen: Number(r.last_seen) }));
+  }
+
+  /** Forget the peers not heard from since `before` (ms). → how many rows went. */
+  prunePeers(before: number): number {
+    return Number(this.db.prepare("DELETE FROM topic_peers WHERE last_seen < ?").run(before).changes);
+  }
+
   mailboxOf(owner: string): InstanceRow | undefined {
     const r = this.db.prepare("SELECT * FROM instances WHERE kind = 'mailbox' AND owner = ? AND status = 'enabled'").get(owner);
     return r ? { ...r } as unknown as InstanceRow : undefined;

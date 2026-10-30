@@ -6,9 +6,12 @@
 // host answers nothing). Checked: a beat whose tip anchor is ours starts
 // nothing; one that is not runs the locator and pulls only what is lacking, in
 // height order, into the receive row as from the peer; a list whose BUMP does
-// not reach our header drops the peer before anything is fetched; a want asks
-// the named peer, else the topic's peers, and ends on unwant; the want events
-// folded. Then two P2PHosts: a host protocol's round trip and the beat hook.
+// not reach our header drops the peer before anything is fetched; an admit
+// fetches from the announcer unless held, a failure moves to the next
+// announcing peer and stops when none is left (no timer); the tail reconcile;
+// one reconcile per peer at a time, restarted only on a changed beat; a start
+// asks without a beat. Then two P2PHosts: a host protocol's round trip and the
+// beat hook.
 // Then two routers (#154): the serving instance's libp2p row
 // /skein/overlay/sync/1.0.0 with a filter (programs/test/sync-demo, standing in
 // for the engine's `sync`) answers each frame at its door, the answer written
@@ -32,7 +35,7 @@ import { Router } from "./router.ts";
 import { Signer } from "./signer.ts";
 import { P2PHost, peerIdOf, type InboundAnswer } from "./p2p.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { foldWants, OverlaySync, peerOf, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
+import { admitOf, OverlaySync, peerOf, SYNC_PROTOCOL } from "./sync.ts";
 import type { LiveBeat } from "./liveness.ts";
 
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
@@ -60,6 +63,8 @@ const hashOf = (height: number) => Buffer.from(sha256d(Buffer.from(`header ${hei
 /** A fake overlay's state: the (height, txid) it holds; its anchors as BRC-136 builds them. */
 class FakeOverlay {
   have: Array<{ height: number; txid: string }> = [];
+  /** Admitted, not mined (the tail), in admission order. */
+  tail: string[] = [];
   delivered: Array<{ peer: string; txid: string }> = [];
   constructor(have: Array<[number, string]>) { this.have = have.map(([height, txid]) => ({ height, txid })); }
   span() { const hs = this.have.map((x) => x.height); return hs.length ? { genesis: Math.min(...hs), tip: Math.max(...hs) } : undefined; }
@@ -78,7 +83,8 @@ class FakeOverlay {
   }
   tipBeat(): Uint8Array {
     const sp = this.span();
-    return dagCbor.encode(sp ? { tipHeight: sp.tip, tipAnchor: Uint8Array.from(Buffer.from(this.anchor(sp.tip)!, "hex")), tailDigest: new Uint8Array(32) } : { tailDigest: new Uint8Array(32) });
+    const tailDigest = this.tail.length ? Uint8Array.from(createHash("sha256").update([...this.tail].sort().join()).digest()) : new Uint8Array(32);
+    return dagCbor.encode(sp ? { tipHeight: sp.tip, tipAnchor: Uint8Array.from(Buffer.from(this.anchor(sp.tip)!, "hex")), tailDigest } : { tailDigest });
   }
   read(path: string, q: Record<string, string>): unknown {
     const sp = this.span();
@@ -95,7 +101,7 @@ class FakeOverlay {
       }
       return { topic: q.topic, blocks, nextHeight: null };
     }
-    if (path === "/holds") return this.have.some((x) => x.txid === q.txid) || q.txid === W && this.holdsW ? { txid: q.txid, via: "admitted", beef: Buffer.from(q.txid!).toString("hex") } : {};
+    if (path === "/holds") return this.have.some((x) => x.txid === q.txid) || this.tail.includes(q.txid!) || q.txid === W && this.holdsW ? { txid: q.txid, via: "admitted", beef: Buffer.from(q.txid!).toString("hex") } : {};
     throw new Error(`no read ${path}`);
   }
   holdsW = false;
@@ -123,6 +129,7 @@ function engineSync(ov: FakeOverlay, frame: Uint8Array): Uint8Array {
     const a = ov.read("/admitted", { topic, fromHeight: String(req.fromHeight), toHeight: String(req.toHeight) }) as { blocks: unknown[]; nextHeight: number | null };
     return dagCbor.encode({ kind: "admitted", topic, blocks: a.blocks, nextHeight: a.nextHeight });
   }
+  if (req.kind === "tail") return dagCbor.encode({ kind: "tail", topic, txids: ov.tail });
   if (req.kind === "tx") {
     const h = ov.read("/holds", { txid: String(req.txid) }) as { beef?: string };
     return dagCbor.encode({ kind: "tx", txid: req.txid, ...(h.beef ? { beef: Uint8Array.from(Buffer.from(h.beef, "hex")) } : {}) });
@@ -133,6 +140,8 @@ function engineSync(ov: FakeOverlay, frame: Uint8Array): Uint8Array {
 /** Instances by handle, each with its overlay and its OverlaySync; requests answered by the other's fake engine. */
 function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) {
   const syncs: Record<string, OverlaySync> = {};
+  /** Every request frame, by asker: `${to} ${kind}`. */
+  const asked: Record<string, string[]> = {};
   const byPeer = (p: string) => Object.keys(overlays).find((h) => peer(h) === p)!;
   const beats: Record<string, LiveBeat[]> = {};
   for (const h of Object.keys(overlays)) {
@@ -144,12 +153,13 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
         const txid = Buffer.from(beef).toString("utf8");
         ov.delivered.push({ peer: from, txid });
         const height = Number(Object.keys(BLOCKS).find((k) => BLOCKS[Number(k)]!.includes(txid)) ?? 0);
-        if (height) ov.have.push({ height, txid });
+        if (height) ov.have.push({ height, txid }); else if (!ov.tail.includes(txid)) ov.tail.push(txid);
         return { verdict: "accept" };
       },
       header: async (_h, height) => BLOCKS[height] ? { hash: hashOf(height), root: rootOf(height) } : undefined,
       request: async (_h, p, body) => {
         const other = byPeer(p);
+        (asked[h] ??= []).push(`${other} ${String((dagCbor.decode(body) as { kind?: unknown }).kind)}`);
         const answer = engineSync(overlays[other]!, body);
         if (o.lie === other) { // a list whose BUMP reaches another root
           const a = dagCbor.decode(answer) as { kind: string; blocks?: Array<{ bump: string; txids: string[] }> };
@@ -158,11 +168,9 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
         }
         return answer;
       },
-      subscribers: () => Object.keys(overlays).filter((x) => x !== h).map(peer),
       beats: () => beats[h] ?? [],
+      ownBeat: () => ov.tipBeat(),
       self: () => peer(h),
-      cooldownMs: 0,
-      wantRetryMs: 20,
     });
   }
   const beat = (to: string, from: string) => {
@@ -170,7 +178,7 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
     beats[to] = [...(beats[to] ?? []).filter((x) => x.from !== b.from), b];
     syncs[to]!.beat(to, "tm_t-live", b);
   };
-  return { syncs, beat };
+  return { syncs, beat, asked };
 }
 
 test("sync: a beat whose tip anchor is ours starts nothing; one that is not: the locator, then only what is lacking, in height order, as from the peer", async () => {
@@ -211,39 +219,115 @@ test("sync: a list whose BUMP does not reach our header drops the peer before an
   assert.deepEqual(a.delivered, [], "dropped: its beats start nothing");
 });
 
-test("sync: a want asks the named peer, else the topic's peers; answered into the receive row; unwant ends it; the events folded", async () => {
+test("sync: announce, then fetch — an admit fetches from the announcer unless held; a failure moves to the next announcing peer; the set exhausted, it stops (no timer) until a new admit", async () => {
   const a = new FakeOverlay([]);
   const b = new FakeOverlay([]);
   const c = new FakeOverlay([]);
+  const { syncs, asked } = world({ a, b, c });
+  const body = (txid: string, topic = "tm_t") => dagCbor.encode({ kind: "admit", txid, topics: { [topic]: { outputsToAdmit: [0], coinsToRetain: [] } } });
+  assert.equal(admitOf("tm_t", body(W)), W);
+  assert.equal(admitOf("tm_t", body(W, "tm_other")), undefined, "an admit not naming the topic");
+  assert.equal(admitOf("tm_t", dagCbor.encode({ kind: "submit", beef: new Uint8Array(4) })), undefined);
+  assert.equal(admitOf("tm_t", new Uint8Array([1, 2, 3])), undefined);
+
+  // c holds W, b does not. b announces first: b asked, nothing; the set exhausted — nothing more, however long.
   c.holdsW = true;
-  const { syncs } = world({ a, b, c });
-  const mh = (h: string) => peerIdOf(signer.peerKey(h)).toMultihash().bytes;
-  assert.equal(peerOf(mh("c")), peer("c"));
-  // Named: c.
-  syncs.a!.want("a", { event: "want", want: { app: "overlay", txid: W, topic: "tm_t", peer: mh("c") } });
-  await syncs.a!.idle();
-  assert.deepEqual(a.delivered, [{ peer: peer("c"), txid: W }]);
-  // No peer: the topic's peers, b (holds nothing) then c.
-  a.delivered = [];
-  syncs.a!.want("a", { event: "want", want: { app: "overlay", txid: W, topic: "tm_t" } });
-  await syncs.a!.idle();
-  assert.deepEqual(a.delivered, [{ peer: peer("c"), txid: W }]);
-  // No one holds it: asked again while it stands; unwant ends it.
-  c.holdsW = false;
-  a.delivered = [];
-  const w: Want = { app: "overlay", txid: Z, topic: "tm_t" };
-  syncs.a!.want("a", { event: "want", want: w });
-  await sleep(50);
-  assert.ok(syncs.a!.busy(), "still asking");
-  syncs.a!.want("a", { event: "unwant", want: w });
-  syncs.a!.stop();
+  syncs.a!.admit("a", "overlay", "tm_t", W, peer("b"));
   await syncs.a!.idle();
   assert.deepEqual(a.delivered, []);
+  assert.deepEqual(syncs.a!.pending("a"), [{ txid: W, peers: [peer("b")], fetching: false }], "kept: waiting for a new admit");
+  await sleep(100);
+  assert.deepEqual(asked.a, ["b tx"], "asked once, never again on a clock");
+  // b again: no new try.
+  syncs.a!.admit("a", "overlay", "tm_t", W, peer("b"));
+  await syncs.a!.idle();
+  assert.deepEqual(asked.a, ["b tx"]);
+  // c announces: one more try, from c — taken, the entry dropped.
+  syncs.a!.admit("a", "overlay", "tm_t", W, peer("c"));
+  await syncs.a!.idle();
+  assert.deepEqual(a.delivered, [{ peer: peer("c"), txid: W }]);
+  assert.deepEqual(syncs.a!.pending("a"), []);
+  // Held now: a later admit asks nobody.
+  syncs.a!.admit("a", "overlay", "tm_t", W, peer("b"));
+  await syncs.a!.idle();
+  assert.deepEqual(asked.a, ["b tx", "c tx"]);
 
-  const ev = (r: Record<string, unknown>) => wantEvent({ kind: "event", app: "overlay", topic: "tm_t", ...r });
-  for (const bad of [{ event: "want", txid: "zz" }, { event: "want", txid: W, peer: "text" }, { event: "beacon", txid: W }]) assert.ok("refused" in ev(bad), JSON.stringify(bad));
-  const evs = [ev({ event: "want", txid: W }), ev({ event: "want", txid: Z }), ev({ event: "want", txid: W }), ev({ event: "unwant", txid: Z }), ev({ event: "want", txid: W, peer: mh("b") })];
-  assert.deepEqual(foldWants(evs.map((e) => e as Exclude<typeof e, { refused: string }>)).map((x) => [x.txid, x.peer ? peerOf(x.peer) : undefined]), [[W, undefined], [W, peer("b")]]);
+  // Two announcers at once, the first fails: the next (in the order heard), one fetch at a time.
+  const V = txidOf("v");
+  b.tail = [V];
+  const d = new FakeOverlay([]);
+  const w2 = world({ d, c, b });
+  w2.syncs.d!.admit("d", "overlay", "tm_t", V, peer("c")); // c does not hold V
+  w2.syncs.d!.admit("d", "overlay", "tm_t", V, peer("b"));
+  await w2.syncs.d!.idle();
+  assert.deepEqual(d.delivered, [{ peer: peer("b"), txid: V }]);
+  assert.deepEqual(w2.asked.d, ["c tx", "b tx"]);
+  // Its own announcement is never fetched.
+  w2.syncs.d!.admit("d", "overlay", "tm_t", txidOf("own"), peer("d"));
+  await w2.syncs.d!.idle();
+  assert.deepEqual(w2.asked.d, ["c tx", "b tx"]);
+});
+
+test("sync: the tail — a beat whose mined side is ours and whose tail digest is not: the tail asked, what we lack fetched from that peer", async () => {
+  const U = txidOf("u"), V = txidOf("v");
+  const a = new FakeOverlay([[2, X], [2, Y], [4, Z]]);
+  const b = new FakeOverlay([[2, X], [2, Y], [4, Z]]);
+  b.tail = [U, V];
+  a.tail = [U];
+  const { syncs, beat, asked } = world({ a, b });
+  beat("a", "b");
+  await syncs.a!.idle();
+  assert.deepEqual(asked.a, ["b tail", "b tx"], "no locator (the tips agree); the tail; only V fetched");
+  assert.deepEqual(a.delivered, [{ peer: peer("b"), txid: V }]);
+  assert.deepEqual(a.tail, [U, V]);
+  // Equal digests now: b's next beat (another body: say, its tail moved and came back) asks nothing.
+  beat("a", "b");
+  await syncs.a!.idle();
+  assert.deepEqual(asked.a, ["b tail", "b tx"], "the same body: no reconcile at all");
+
+  // Both have nothing mined: the mined side is equal, the tail reconciled.
+  const c = new FakeOverlay([]);
+  const e = new FakeOverlay([]);
+  e.tail = [U];
+  const w2 = world({ c, e });
+  w2.beat("c", "e");
+  await w2.syncs.c!.idle();
+  assert.deepEqual(w2.asked.c, ["e tail", "e tx"]);
+  assert.deepEqual(c.tail, [U]);
+  // The mined side not equal: the pull first, then the tail.
+  const f = new FakeOverlay([]);
+  const g = new FakeOverlay([[2, X]]);
+  g.tail = [V];
+  const w3 = world({ f, g });
+  w3.beat("f", "g");
+  await w3.syncs.f!.idle();
+  assert.deepEqual(w3.asked.f, ["g locator", "g admitted", "g tx", "g tail", "g tx"]);
+  assert.deepEqual(f.delivered.map((x) => x.txid), [X, V]);
+});
+
+test("sync: one reconcile per (topic, peer) at a time; a new one only when that peer's latest beat changed; a start asks at once without a beat", async () => {
+  const a = new FakeOverlay([]);
+  const b = new FakeOverlay([[2, X], [2, Y], [4, Z]]);
+  const { syncs, beat, asked } = world({ a, b });
+  beat("a", "b");
+  beat("a", "b"); // while the first runs: nothing more (its end looks at the latest beat: the same body)
+  await syncs.a!.idle();
+  assert.equal(asked.a!.filter((x) => x === "b locator").length, 1);
+  // b moves on (a tail of its own): its new beat starts one more, the tail only.
+  b.tail = [W];
+  b.holdsW = true;
+  beat("a", "b");
+  await syncs.a!.idle();
+  assert.equal(asked.a!.filter((x) => x === "b locator").length, 1);
+  assert.deepEqual(asked.a!.slice(-2), ["b tail", "b tx"]);
+
+  // A start: no beat, the locator and the tail asked at once.
+  const c = new FakeOverlay([]);
+  const w2 = world({ c, b });
+  w2.syncs.c!.reconnect("c", "overlay", "tm_t", peer("b"));
+  await w2.syncs.c!.idle();
+  assert.deepEqual(w2.asked.c!.filter((x) => !x.endsWith("tx")), ["b locator", "b admitted", "b tail"]);
+  assert.deepEqual(c.delivered.map((x) => x.txid), [X, Y, Z, W]);
 });
 
 const HOST_PROTOCOL = "/skein/test/host/1.0.0";
@@ -376,10 +460,9 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
     },
     header: async (_h, height) => BLOCKS[height] ? { hash: hashOf(height), root: rootOf(height) } : undefined,
     request: (h, p, body) => B.r.p2p!.request(h, p, SYNC_PROTOCOL, body),
-    subscribers: () => [],
     beats: () => [],
+    ownBeat: () => c.tipBeat(),
     self: () => peer("beta"),
-    cooldownMs: 0,
   });
   sync.beat("beta", "tm_t-live", { sender: "alpha", at: Date.now(), body: b.tipBeat(), from: peer("alpha") });
   await sync.idle();

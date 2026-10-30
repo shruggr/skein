@@ -1,22 +1,27 @@
-// Undecided is not rejected (shruggr/skein-overlay 0.19.0, shruggr/skein-1color
-// 0.13.0; David 2026-10-30: "we don't mark items which are undecided as
-// invalid"): two hosts with libp2p, each a stock-system instance with the chain
-// app and the 1color app (its engine skein-overlay 0.19.0, its topic manager
-// color-topic) installed by the owner's messages, one 1Color token's topic
-// tm_color_<D>_0 registered on each.
+// Undecided is not rejected, and nothing is wanted (shruggr/skein-overlay
+// 0.19.0 / 0.20.0, shruggr/skein-1color 0.13.1; David 2026-10-30: "we don't
+// mark items which are undecided as invalid", and the settled sync design: no
+// want, no timed retry): two hosts with libp2p, each a stock-system instance
+// with the chain app and the 1color app (its engine skein-overlay 0.20.0, its
+// topic manager color-topic) installed by the owner's messages, one 1Color
+// token's topic tm_color_<D>_0 registered on each.
 //
 //   - b holds the token's deploy D (spending a mined funding transaction F),
 //     a transfer P (spends D) and a transfer C (spends P), each mined alone
-//     with its BUMP, admitted under the topic;
+//     with its BUMP, admitted under the topic; b's beacons are held back
+//     (stopped) while a is set up;
 //   - a, which holds none of them, is posted ONLY C's Atomic BEEF (C + its
 //     BUMP). color-topic cannot read P: MissingParents → the engine pauses C
-//     and wants P (no peer: the topic's mesh, b); b's engine answers P's
-//     Atomic BEEF on /skein/overlay/sync/1.0.0, the host hands it to the
-//     receive row; P is undecided in turn (needs D) → paused, D wanted; D
-//     arrives (needs nothing: a deploy) and is admitted → P resumed and
-//     admitted → C resumed and admitted. a's admitted set equals b's.
-//   - F (a mined funding-only parent of D) is never wanted; nothing on a is
-//     ever recorded or answered as rejected (checked after each step).
+//     waiting [P]; NOTHING is wanted (no want event exists any more) and a
+//     asks nobody;
+//   - b's beacon starts again (the first beat publishes at once): a hears
+//     b's beat, b's tip anchor is not a's → the locator, the pull of b's
+//     admitted lists (D at its height, then P, then C), each BEEF into a's
+//     receive row → D admitted, P admitted → C's pause ends (its resume on
+//     P's admission, or the pulled C, whichever lands first) and C is
+//     admitted once. a's admitted set equals b's.
+//   - F (a mined funding-only parent of D) is never waited on; nothing on a
+//     is ever recorded or answered as rejected (checked after each step).
 //
 // Each instance's store then replays to itself exactly.
 //
@@ -40,14 +45,14 @@ import { BACKEND, routerStore, storeFor } from "./backend.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
-import { peerIdOf } from "../../src/host/p2p.ts";
+import { emittedEvents, peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const COLOR_REPO = "https://github.com/shruggr/skein-1color";
-const COLOR_REV = process.env.SKEIN_1COLOR_REV ?? "27be4eff1b74ab9d783ed6f3f85a12b18364f1f6"; // v0.13.0: color-topic's MissingParents, engine skein-overlay 0.19.0;
+const COLOR_REV = process.env.SKEIN_1COLOR_REV ?? "14a3acc683312775e1ea92d769271f90b5cd1043"; // v0.13.1: color-topic's MissingParents, engine skein-overlay 0.20.0
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "7da428422ce193a1bb489163637f070860d46ccd"; // v0.7.1
 const APP = "1color";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
@@ -218,7 +223,7 @@ async function bring(h: Name, topic: string): Promise<void> {
   await feedHeaders(h);
 }
 
-/** a's results so far, and the checks after each step: nothing rejected, F never wanted. */
+/** a's results so far, and the checks after each step: nothing rejected, F never waited on, no want event. */
 const short = (x: unknown) => typeof x === "string" ? `${x.slice(0, 8)}…` : String(x);
 let shown = 0;
 async function stepCheck(label: string, ids: Record<string, string>): Promise<Array<Record<string, unknown>>> {
@@ -238,18 +243,21 @@ async function stepCheck(label: string, ids: Record<string, string>): Promise<Ar
   shown = rs.length;
   const rejected = rs.filter((x) => x.outcome === "dropped" || x.heard === "rejected" || x.heard === "failed" || (Array.isArray(x.unapplied) && x.unapplied.length > 0) || JSON.stringify(x.answers ?? []).includes("rejected"));
   check(rejected.length === 0, `${label}: nothing recorded or answered as rejected on a (${rejected.length})`);
-  check(!rs.some((x) => Array.isArray(x.waiting) && (x.waiting as string[]).includes(fundTxid)), `${label}: F (D's mined funding parent) never wanted`);
+  check(!rs.some((x) => Array.isArray(x.waiting) && (x.waiting as string[]).includes(fundTxid)), `${label}: F (D's mined funding parent) never waited on`);
+  const v = openStoreFile(storeOf("a"), { readOnly: true });
+  const wants = await emittedEvents(v, (rec) => rec.event === "want" || rec.event === "unwant" ? rec : undefined).finally(() => v.close());
+  check(wants.length === 0 && !rs.some((x) => x.wanted !== undefined), `${label}: no want event on a, no step wanted anything (${wants.length})`);
   return rs;
 }
 
 try {
   colorDir = checkout(process.env.SKEIN_1COLOR_DIR, COLOR_REPO, COLOR_REV, join(home, "1color"));
   chainDir = checkout(process.env.SKEIN_CHAIN_DIR, CHAIN_REPO, CHAIN_REV, join(home, "chain"));
-  // The validator beats once a day here: no beat-driven catch-up (sync.ts's case) runs; only the want path moves a.
+  // The validator beats every 2 s here (the default is 120 s); b's beacons are held back until a is paused.
   const mf = JSON.parse(readFileSync(join(colorDir, "etc/app.json"), "utf8")) as { version: string; config: { overlay: Record<string, unknown> } };
-  mf.config.overlay.validator = { every: 86_400_000 };
+  mf.config.overlay.validator = { every: 2000 };
   writeFileSync(join(colorDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.13.0", `skein-1color ${mf.version} (engine skein-overlay 0.19.0)`);
+  check(mf.version === "0.13.1", `skein-1color ${mf.version} (engine skein-overlay 0.20.0)`);
 
   const D = await tx(fund, 0, colorScript(), 1);
   const hD = mineAlone(D);
@@ -272,26 +280,42 @@ try {
   const onB = await admittedOn("b", topic);
   check(onB === `${hD}:${ids.D} ${hP}:${ids.P} ${hC}:${ids.C}`, `b admitted D, P, C (${onB.replace(/[0-9a-f]{64}/g, (t) => Object.entries(ids).find(([, v]) => v === t)![0])})`);
 
+  // b's beacons held back while a is set up and paused (its node beats nothing; the beacons stand in its log).
+  const bBeacons = (await r("b").hydrate("b")).beacons;
+  r("b").p2p!.beacons("b", []);
+
   // ------------------------------------------------ a: holds none of them; meshed with b on the topic
   await bring("a", topic);
   await until("a and b meshed on the topic", () => (subscribers("a", topic) > 0 && subscribers("b", topic) > 0) || undefined);
   check(await admittedOn("a", topic) === "", "a admitted nothing yet");
   await stepCheck("a up", ids);
 
-  // ------------------------------------------------ C's Atomic BEEF alone to a: undecided, want, answer, resume, admitted
+  // ------------------------------------------------ C's Atomic BEEF alone to a: undecided, paused, nothing asked
   const cBeef = C.toAtomicBEEF();
   const t0 = Date.now();
   const sc = await submit("a", cBeef, topic);
   const scText = await sc.text();
   say(`a: POST /${APP}/submit C alone (${cBeef.length} bytes, C + its BUMP) → ${sc.status} ${scText.slice(0, 160)} (${Date.now() - t0} ms)`);
+  await sleep(3000);
+  await r("a").settled();
+  const paused = await stepCheck("C alone → paused", ids);
+  const firstC = paused.find((x) => x.txid === ids.C && Array.isArray(x.waiting));
+  check(!!firstC && (firstC.waiting as string[]).join() === ids.P, `C undecided: paused waiting [P] (color-topic MissingParents), no verdict`);
+  check(await admittedOn("a", topic) === "", "a admitted nothing: no beat, no want — it waits");
+
+  // ------------------------------------------------ b beats again: a's pull brings D then P; C resumes and is admitted
+  r("b").p2p!.beacons("b", bBeacons);
+  const t1 = Date.now();
   const all = await until("a admits C", async () => { await r("a").settled(); const x = await admittedOn("a", topic); return x.includes(ids.C) ? x : undefined; }, 90_000).catch(() => undefined);
-  say(`a: admitted after ${Date.now() - t0} ms`);
-  const rs = await stepCheck("C alone → admitted", ids);
-  const firstC = rs.find((x) => x.txid === ids.C && Array.isArray(x.waiting));
-  check(!!firstC && (firstC.waiting as string[]).join() === ids.P, `C undecided first: paused waiting [P] (color-topic MissingParents), no verdict`);
-  const firstP = rs.find((x) => x.txid === ids.P && Array.isArray(x.waiting));
-  check(!!firstP && (firstP.waiting as string[]).join() === ids.D, `P (b's answer to the want) undecided in turn: paused waiting [D]`);
-  check(rs.filter((x) => x.op === "resume" && x.outcome === "launched").map((x) => x.txid).join() === [ids.P, ids.C].join(), `resumed in order, never resubmitted: P then C, each launched`);
+  say(`a: admitted after ${Date.now() - t1} ms from b's beat`);
+  const rs = await stepCheck("b's beat → pulled → admitted", ids);
+  // P's admission sends C's resume; the pull lists C too (a lacks it as admitted) and delivers it at its height:
+  // whichever lands first ends the pause and launches C's thread, the other finds nothing to do. Either way C is
+  // admitted once, from its pause, with nothing rejected.
+  const cAdmits = rs.filter((x) => x.admitted === true && (x.txid === ids.C || ((x.admissions ?? []) as Array<{ txid?: string }>).some((a) => a.txid === ids.C))).length;
+  const resumes = rs.filter((x) => x.op === "resume" && x.txid === ids.C && x.outcome !== "woke").map((x) => String(x.outcome)); // "woke": the resume thread's wake at the end of the thread it launched
+  check(cAdmits === 1 && resumes.length === 1 && ["launched", "none"].includes(resumes[0]!), `C's pause ended on P's admission: resumed once (${resumes.join()}), admitted once (${cAdmits})`);
+  check(!rs.some((x) => x.txid === ids.P && Array.isArray(x.waiting)), "P pulled after D: decided at once, never paused");
   check(all === onB, `a's admitted set equals b's (${(all ?? "").replace(/[0-9a-f]{64}/g, (t) => Object.entries(ids).find(([, v]) => v === t)?.[0] ?? t)})`);
   check(admittedTxids(rs).has(ids.D) && admittedTxids(rs).has(ids.P) && admittedTxids(rs).has(ids.C), "a's results admit D, P and C");
   await sleep(1500);

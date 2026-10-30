@@ -1,46 +1,58 @@
-// Overlay sync (shruggr/skein#150; the want half of #112): the host half of
-// keeping an overlay topic's admitted set equal across peers. The overlay
-// engine (shruggr/skein-overlay 0.14.0) keeps, per topic, BRC-136's anchors
-// and answers three reads: `/anchors` (by heights, or its locator), `/admitted`
-// (the admitted lists by height range, each block's txids in block order with
-// a compound BUMP) and `/holds` (whether its state reaches a transaction, with
-// the chain state's Atomic BEEF of it). Its beacon on `<topic>-live` carries
-// `{tipHeight, tipAnchor, tailDigest}`.
+// Overlay sync (shruggr/skein#150; the settled design, David 2026-10-30,
+// shruggr/skein-overlay 0.20.0): the host half of keeping an overlay topic's
+// admitted set equal across peers. The overlay engine keeps, per topic,
+// BRC-136's anchors and answers the sync protocol's frames; its beacon on
+// `<topic>-live` carries `{tipHeight, tipAnchor, tailDigest}`. No timer, no
+// retry on a clock, no backoff anywhere here ("a non-starter").
 //
-//   the beacon      a beat from another peer whose tip anchor is not ours (our
-//                   anchor at its tip height differs, or we have none there) starts
-//                   a catch-up from that peer, at most one per (instance, topic,
-//                   peer) at a time and one per `cooldownMs`.
-//   the locator     on the direct stream /skein/overlay/sync/1.0.0: our anchors at
-//                   tip, tip-1, tip-2, tip-4 … genesis; the peer answers the
-//                   highest height where it agrees, its genesis and its tip.
-//   the pulls       the peer's admitted lists above the agreed height, by ranges
-//                   of `rangeHeights` spread across the peers whose last beat has
-//                   the same tip anchor; each block checked against our headers
-//                   (its hash, the BUMP's root for every txid) before any
-//                   transaction is fetched (a height we hold no header for yet stops
-//                   the range: the next beat tries again); each txid we lack fetched from the peer
-//                   that listed it and handed to the overlay's receive row
-//                   /skein/overlay/beef/1.0.0 (filter kernel.beef → submit) as from
-//                   that peer, block by block in height order. A peer whose list
-//                   fails the check is dropped for the rest of the host's run.
-//   the wants       the engine's `{event: "want", txid, topic, peer?}`: asked of the
-//                   named peer, else of the peers on the topic (its gossip
-//                   subscribers and its beaters), on the same stream; the BEEF
-//                   answered goes into the receive row as from the peer that sent
-//                   it. Asked again with a growing delay while it stands; `unwant`
-//                   ends it. Standing wants are folded from the log at hydrate.
-//   answering       not the host's (shruggr/skein#154): the engine answers the
-//                   stream through the front door, on the libp2p row an app declares
-//                   (`{transport: "libp2p", address: "/skein/overlay/sync/1.0.0",
-//                   filters: ["sync"]}`, its filter `sync` the engine's fn `sync`,
-//                   shruggr/skein-overlay#5): each frame one front-door call, the
-//                   filter's answer written back as the frame (p2p.ts `serve`), nothing
-//                   logged. An app that declares no row serves no sync.
-//   our own reads   the locator and the "what we lack" check read our own overlay's
-//                   state by a kernel call of its engine (fn `anchors`, `admitted`, the
-//                   functions its read routes run; router.ts `overlayRead`), not
-//                   through the app's http table, which an app need not publish.
+//   announce, then  a peer's `admit {txid, topics}` on `<topic>` (router.ts
+//   fetch           p2pInbound takes it, never delivers it to the instance):
+//                   unless the instance holds the txid (the engine's `holds`
+//                   read, by kernel call) or a fetch of it is under way, the
+//                   host asks that peer `{kind: "tx", topic, txid}` and hands
+//                   the BEEF to the overlay's receive row
+//                   /skein/overlay/beef/1.0.0 as from that peer. Per (handle,
+//                   txid) it keeps the SET of peers whose admit named it:
+//                   fetch from one; on a failure (no answer, no `beef`, the
+//                   delivery not taken) the next; the set exhausted, it stops
+//                   and waits for a new admit to add a peer (then one more
+//                   try, from that peer). A delivery taken (accepted, or the
+//                   transaction now held) drops the entry. Nothing logged in
+//                   the instance but the delivered BEEF.
+//   the beat        a beat newly kept from another peer on `<topic>-live`
+//                   starts a reconcile from it — at most one per (handle,
+//                   topic, peer) at a time, and a new one only when that
+//                   peer's LATEST beat body differs from the one that started
+//                   (or, at its end, was the latest for) the last one.
+//   mined history   the reconcile's first half: when its tip anchor is not
+//                   ours, the locator on the direct stream
+//                   /skein/overlay/sync/1.0.0 (our anchors at tip, tip-1,
+//                   tip-2, tip-4 … genesis; the peer answers the highest height
+//                   where it agrees, its genesis and its tip), then the
+//                   peer's admitted lists above the agreed height, by ranges
+//                   of `rangeHeights` spread across the peers whose last beat
+//                   has the same tip anchor; each block checked against our
+//                   headers (its hash, the BUMP's root for every txid) before
+//                   any transaction is fetched (a height we hold no header for
+//                   yet ends the range: the next changed beat resumes it); each
+//                   txid we lack fetched from the peer that listed it into the
+//                   receive row, block by block in height order. A peer whose
+//                   list fails the check is dropped for the rest of the host's
+//                   run.
+//   the tail        the reconcile's second half: when the mined side is equal
+//                   (its tip anchor is ours at its height, or neither has one)
+//                   and its `tailDigest` is not ours (our own beacon's body),
+//                   `{kind: "tail", topic}` to that peer, and each txid we do
+//                   not hold fetched as an announced one (the per-txid set,
+//                   that peer).
+//   a start         `reconnect`: the peers a topic's beats came from (host.db,
+//                   router.ts) asked at once — the locator and the tail —
+//                   without waiting for a beat.
+//   answering       not the host's (#154): the engine answers the stream
+//                   through the front door, on the libp2p row an app declares.
+//   our own reads   the locator, "what we lack" and "do we hold it" read our
+//                   own overlay's state by a kernel call of its engine (fn
+//                   `anchors`, `admitted`, `holds`; router.ts `overlayRead`).
 //
 // The wire, one dag-cbor frame each way:
 //
@@ -50,98 +62,88 @@
 //       → {kind: "admitted", topic, blocks: [{height, blockHash, txids, bump}], nextHeight}   (hex, as /admitted)
 //   {kind: "tx", topic, txid}
 //       → {kind: "tx", txid, beef?: bytes}                                                   (absent: not held)
+//   {kind: "tail", topic}
+//       → {kind: "tail", topic, txids: [hex]}                        the admitted, not mined, in admission order
 //   anything else → {kind: "error", message}
-//
-// The wire is the engine's; the puller speaks it by `request`. Nothing here is
-// logged in the instance: what reaches it is the BEEFs handed to the receive
-// row, each an entry (replayed as any libp2p frame).
 
 import * as dagCbor from "@ipld/dag-cbor";
 import { MerklePath } from "@bsv/sdk";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import * as Digest from "multiformats/hashes/digest";
-import type { InboundAnswer } from "./p2p.ts";
+import { RECEIVE_PROTOCOL, type InboundAnswer } from "./p2p.ts";
 import type { LiveBeat } from "./liveness.ts";
 
 export const SYNC_PROTOCOL = "/skein/overlay/sync/1.0.0";
-/** The overlay's receive row (skein-overlay etc/app.json): one Atomic BEEF per frame. */
-export const BEEF_PROTOCOL = "/skein/overlay/beef/1.0.0";
+/** The overlay's receive row (skein-overlay etc/app.json): the host's own entry, one Atomic BEEF per frame; never served to peers. */
+export const BEEF_PROTOCOL = RECEIVE_PROTOCOL;
 const LIVE = "-live";
 
 export interface SyncOptions {
   /** The app that beats on `<topic>-live` for `handle` (its overlay), if any. */
   overlayOf(handle: string, liveTopic: string): string | undefined;
   /**
-   * Our own overlay's read (shruggr/skein#154): the engine's function `fn` (`anchors`, `admitted`)
-   * over `handle`'s current state, with its read route's query; its JSON answer. Throws on a
-   * status other than 200.
+   * Our own overlay's read (shruggr/skein#154): the engine's function `fn` (`anchors`, `admitted`,
+   * `holds`) over `handle`'s current state, with its read route's query; its JSON answer. Throws on
+   * a status other than 200.
    */
-  local(handle: string, app: string, fn: "anchors" | "admitted", query: Record<string, string>): Promise<unknown>;
+  local(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown>;
   /** One BEEF into the overlay's receive row, as from `peer` (its peer ID). */
   deliver(handle: string, peer: string, beef: Uint8Array): Promise<InboundAnswer>;
   /** The chain state's header at `height`: its hash and merkle root (display hex). */
   header(handle: string, height: number): Promise<{ hash: string; root: string } | undefined>;
   /** One request frame to `peer` on the sync protocol: its answer frame. */
   request(handle: string, peer: string, body: Uint8Array): Promise<Uint8Array>;
-  /** The peers `handle`'s node sees subscribing a gossip topic. */
-  subscribers(handle: string, topic: string): string[];
-  /** The live beats on a liveness topic at `handle` (the liveness tool's). */
+  /** The live beats on a liveness topic at `handle` (the liveness tool's: the latest per sender). */
   beats(handle: string, liveTopic: string): LiveBeat[];
+  /** Our own beacon's body on a liveness topic (what our overlay declared last), if any. */
+  ownBeat(handle: string, liveTopic: string): Uint8Array | undefined;
   /** `handle`'s own peer ID. */
   self(handle: string): string;
   log?(source: string, line: string): void;
-  /** The least time between two catch-ups of one topic from one peer (ms); default 10 000. */
-  cooldownMs?: number;
   /** The heights per ranged pull; default 1 000. */
   rangeHeights?: number;
-  /** The first delay before a want is asked again (ms), doubling to `wantMaxMs`; default 2 000. */
-  wantRetryMs?: number;
-  wantMaxMs?: number;
 }
 
-/** A want the engine emitted (`want` minus `unwant`, shruggr/skein#112). */
-export interface Want { app: string; txid: string; topic: string; peer?: Uint8Array }
-
 /** The beat body's sync fields (skein-overlay topics.zig `beatBody`). */
-interface TipBeat { tipHeight?: number; tipAnchor?: Uint8Array }
+interface SyncBeat { tipHeight?: number; tipAnchor?: Uint8Array; tailDigest?: Uint8Array }
 
 interface Anchors { topic: string; genesisHeight?: number; tipHeight?: number; anchors: Array<{ height: number; anchor: string }> }
 interface AdmittedBlock { height: number; blockHash: string; txids: string[]; bump: string }
 interface Admitted { topic: string; blocks: AdmittedBlock[]; nextHeight: number | null }
 
+/** A transaction announced and not yet taken (per handle and txid): the peers that named it. */
+interface Announced { app: string; topic: string; peers: string[]; tried: Set<string>; fetching: boolean }
+
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
-const wantKey = (w: Want) => `${w.app} ${w.txid} ${w.topic} ${w.peer ? hex(w.peer) : ""}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** A want / unwant event's fields, or why it is not one. */
-export function wantEvent(rec: Record<string, unknown>): { event: "want" | "unwant"; want: Want } | { refused: string } {
-  const event = rec.event;
-  if (event !== "want" && event !== "unwant") return { refused: "not a want" };
-  const { app, txid, topic, peer } = rec;
-  if (typeof app !== "string" || typeof txid !== "string" || !/^[0-9a-f]{64}$/.test(txid) || typeof topic !== "string" || !topic) return { refused: "want: {app, txid (hex), topic, peer?}" };
-  if (peer !== undefined && !(peer instanceof Uint8Array)) return { refused: "want: peer is the peer ID's multihash bytes" };
-  return { event, want: { app, txid, topic, ...(peer ? { peer } : {}) } };
-}
-
-/** The standing wants after `events` (each `want` adds, each `unwant` removes; in order). */
-export function foldWants(events: Array<{ event: "want" | "unwant"; want: Want }>, into: Want[] = []): Want[] {
-  for (const e of events) {
-    const i = into.findIndex((w) => wantKey(w) === wantKey(e.want));
-    if (e.event === "want") { if (i < 0) into.push(e.want); } else if (i >= 0) into.splice(i, 1);
-  }
-  return into;
-}
+const HEX64 = /^[0-9a-f]{64}$/;
 
 /** A peer ID's string from its multihash bytes. */
 export const peerOf = (mh: Uint8Array): string => peerIdFromMultihash(Digest.decode(mh)).toString();
 
+/**
+ * An `admit` announcement on `<topic>` (skein-overlay gossip.zig: dag-cbor `{kind: "admit", txid,
+ * topics: {<topic>: {outputsToAdmit, coinsToRetain}}}`) → its txid, or undefined when the body is
+ * not one naming `topic`.
+ */
+export function admitOf(topic: string, body: Uint8Array): string | undefined {
+  let v: unknown;
+  try { v = dagCbor.decode(body); } catch { return undefined; }
+  if (!v || typeof v !== "object") return undefined;
+  const m = v as { kind?: unknown; txid?: unknown; topics?: unknown };
+  if (m.kind !== "admit" || typeof m.txid !== "string" || !HEX64.test(m.txid)) return undefined;
+  if (!m.topics || typeof m.topics !== "object" || !(topic in (m.topics as object))) return undefined;
+  return m.txid;
+}
+
 export class OverlaySync {
   private readonly o: SyncOptions;
-  /** handle → want key → the want, while it stands. */
-  private wants = new Map<string, Map<string, Want>>();
-  /** Catch-ups running or done lately: `${handle} ${topic} ${peer}` → when it started. */
-  private recent = new Map<string, number>();
+  /** `${handle} ${txid}` → the announced transaction, while it is not taken. */
+  private announced = new Map<string, Announced>();
+  /** Reconciles running: `${handle} ${topic} ${peer}`. */
   private running = new Set<string>();
+  /** The beat body (hex) that started, or ended, the last reconcile per `${handle} ${topic} ${peer}`. */
+  private seen = new Map<string, string>();
   /** Peers caught serving a list that does not check: per handle. */
   private dropped = new Map<string, Set<string>>();
   private inflight = new Set<Promise<unknown>>();
@@ -157,33 +159,109 @@ export class OverlaySync {
     void q.finally(() => this.inflight.delete(q));
   }
 
-  /** Whether anything is under way (a catch-up, a want being asked). */
+  /** Whether anything is under way (a reconcile, a fetch). */
   busy(): boolean { return this.inflight.size > 0; }
 
   async idle(): Promise<void> { while (this.inflight.size) await Promise.all([...this.inflight]); }
 
-  stop(): void { this.stopped = true; this.wants.clear(); }
+  stop(): void { this.stopped = true; this.announced.clear(); }
 
-  // ---------------------------------------------------------------- the beacon and the catch-up
+  /** The announced transactions not taken yet, per handle (tests). */
+  pending(handle: string): Array<{ txid: string; peers: string[]; fetching: boolean }> {
+    return [...this.announced].filter(([k]) => k.startsWith(`${handle} `)).map(([k, e]) => ({ txid: k.slice(handle.length + 1), peers: [...e.peers], fetching: e.fetching }));
+  }
 
-  /** A beat newly kept on `liveTopic` from another peer: a catch-up when its tip anchor is not ours. */
+  private isDropped(handle: string, peer: string): boolean { return this.dropped.get(handle)?.has(peer) ?? false; }
+
+  // ---------------------------------------------------------------- announce, then fetch
+
+  /**
+   * A peer's `admit` for `txid` on `topic` (its announcement), at `handle` whose overlay `app` runs
+   * the topic: fetched from that peer unless the instance holds it or a fetch of it is under way;
+   * the peer joins the transaction's set either way.
+   */
+  admit(handle: string, app: string, topic: string, txid: string, peer: string): void {
+    const p = this.announce(handle, app, topic, txid, peer);
+    if (p) this.track(p);
+  }
+
+  /** `admit`'s work: the fetch it started, if any (the tail awaits it). */
+  private announce(handle: string, app: string, topic: string, txid: string, peer: string): Promise<void> | undefined {
+    if (this.stopped || peer === this.o.self(handle)) return undefined;
+    const k = `${handle} ${txid}`;
+    const e = this.announced.get(k);
+    if (e) {
+      if (!e.peers.includes(peer)) e.peers.push(peer);
+      return e.fetching ? undefined : this.pursue(handle, k, e);
+    }
+    const fresh: Announced = { app, topic, peers: [peer], tried: new Set(), fetching: true };
+    this.announced.set(k, fresh);
+    return (async () => {
+      if (await this.holds(handle, app, txid)) { this.announced.delete(k); fresh.fetching = false; return; }
+      await this.pursue(handle, k, fresh);
+    })();
+  }
+
+  /** Whether `handle`'s overlay state reaches `txid` (its engine's `holds`). */
+  private async holds(handle: string, app: string, txid: string): Promise<boolean> {
+    try {
+      const h = await this.o.local(handle, app, "holds", { txid }) as { txid?: string };
+      return typeof h?.txid === "string";
+    } catch (e) {
+      this.say(handle, `holds ${txid}: ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  /** Fetch an announced transaction from its peers, one after another, until one delivery is taken or none is left. */
+  private async pursue(handle: string, k: string, e: Announced): Promise<void> {
+    e.fetching = true;
+    try {
+      for (;;) {
+        if (this.stopped || this.announced.get(k) !== e) return;
+        const peer = e.peers.find((p) => !e.tried.has(p));
+        if (!peer) return; // exhausted: a new admit adds a peer
+        e.tried.add(peer);
+        const txid = k.slice(handle.length + 1);
+        const taken = await this.fetchInto(handle, peer, e.topic, txid).catch((x) => { this.say(handle, `${e.topic}: ${txid} from ${peer}: ${(x as Error).message}`); return false; });
+        if (taken || await this.holds(handle, e.app, txid)) { this.announced.delete(k); return; }
+      }
+    } finally { e.fetching = false; }
+  }
+
+  // ---------------------------------------------------------------- the beat and the reconcile
+
+  /** A beat newly kept on `liveTopic` from another peer: a reconcile from it when its body changed since the last. */
   beat(handle: string, liveTopic: string, b: LiveBeat): void {
     if (this.stopped || !liveTopic.endsWith(LIVE)) return;
     const app = this.o.overlayOf(handle, liveTopic);
-    if (!app) return;
-    if (this.dropped.get(handle)?.has(b.from)) return;
-    let tip: TipBeat;
-    try { tip = dagCbor.decode(b.body) as TipBeat; } catch { return; }
-    if (typeof tip.tipHeight !== "number" || !(tip.tipAnchor instanceof Uint8Array)) return; // nothing of theirs is mined
-    const topic = liveTopic.slice(0, -LIVE.length);
-    const k = `${handle} ${topic} ${b.from}`;
-    const last = this.recent.get(k);
-    if (this.running.has(k) || (last !== undefined && Date.now() - last < (this.o.cooldownMs ?? 10_000))) return;
-    this.recent.set(k, Date.now());
+    if (!app || this.isDropped(handle, b.from) || b.from === this.o.self(handle)) return;
+    this.start(handle, app, liveTopic.slice(0, -LIVE.length), b.from, b.body);
+  }
+
+  /**
+   * A start (router.ts, the persisted peers): each peer that beat on the topic before asked at once,
+   * the locator and the tail, without a beat. One reconcile per peer, as for a beat.
+   */
+  reconnect(handle: string, app: string, topic: string, peer: string): void {
+    if (this.stopped || this.isDropped(handle, peer) || peer === this.o.self(handle)) return;
+    this.start(handle, app, topic, peer, undefined);
+  }
+
+  private start(handle: string, app: string, topic: string, peer: string, body: Uint8Array | undefined): void {
+    const k = `${handle} ${topic} ${peer}`;
+    if (this.running.has(k)) return; // its end looks at the peer's latest beat
+    if (body && this.seen.get(k) === hex(body)) return;
+    if (body) this.seen.set(k, hex(body));
     this.running.add(k);
-    this.track(this.catchUp(handle, app, topic, b.from, tip.tipHeight, hex(tip.tipAnchor))
-      .catch((e) => this.say(handle, `${topic} from ${b.from}: ${(e as Error).message}`))
-      .finally(() => this.running.delete(k)));
+    this.track(this.reconcile(handle, app, topic, peer, body)
+      .catch((e) => this.say(handle, `${topic} from ${peer}: ${(e as Error).message}`))
+      .finally(() => {
+        this.running.delete(k);
+        // A beat that came while it ran: the latest, if it is not the one already reconciled from.
+        const latest = this.o.beats(handle, `${topic}${LIVE}`).find((x) => x.from === peer);
+        if (latest && !this.stopped && this.seen.get(k) !== hex(latest.body)) this.start(handle, app, topic, peer, latest.body);
+      }));
   }
 
   private async anchors(handle: string, app: string, topic: string, heights?: number[]): Promise<Anchors> {
@@ -197,33 +275,93 @@ export class OverlaySync {
     return a;
   }
 
-  /** Catch `topic` up from `peer`, whose beat named its tip: the locator, then the pulls. */
-  private async catchUp(handle: string, app: string, topic: string, peer: string, tipHeight: number, tipAnchor: string): Promise<void> {
-    const at = await this.anchors(handle, app, topic, [tipHeight]);
-    if (at.anchors.some((x) => x.height === tipHeight && x.anchor === tipAnchor)) return; // its history is ours through its tip
+  /** The beat body's sync fields, or undefined when it does not decode. */
+  private static fields(body: Uint8Array | undefined): SyncBeat | undefined {
+    if (!body) return undefined;
+    try { return dagCbor.decode(body) as SyncBeat; } catch { return undefined; }
+  }
+
+  /**
+   * One reconcile with `peer` on `topic`: its mined history (the locator and the pulls) when its
+   * tip anchor is not ours, then its unmined tail when the mined side is equal and its tail digest
+   * is not ours. No beat (a start): both asked.
+   */
+  private async reconcile(handle: string, app: string, topic: string, peer: string, body: Uint8Array | undefined): Promise<void> {
+    const theirs = OverlaySync.fields(body);
+    if (body && !theirs) return;
+    const hasTip = (b?: SyncBeat) => typeof b?.tipHeight === "number" && b.tipAnchor instanceof Uint8Array;
+    if (!theirs) {
+      await this.catchUp(handle, app, topic, peer);
+    } else if (hasTip(theirs)) {
+      const at = await this.anchors(handle, app, topic, [theirs.tipHeight!]);
+      if (!at.anchors.some((x) => x.height === theirs.tipHeight && x.anchor === hex(theirs.tipAnchor!))) {
+        const done = await this.catchUp(handle, app, topic, peer, { height: theirs.tipHeight!, anchor: hex(theirs.tipAnchor!) });
+        if (!done) return; // a range left for a later beat: the mined side is not equal yet
+      }
+    }
+    if (this.stopped || this.isDropped(handle, peer)) return;
+    if (theirs) {
+      // The mined side equal: its tip anchor ours at its height (after any pull), or neither has one.
+      if (hasTip(theirs)) {
+        const at = await this.anchors(handle, app, topic, [theirs.tipHeight!]);
+        if (!at.anchors.some((x) => x.height === theirs.tipHeight && x.anchor === hex(theirs.tipAnchor!))) return;
+      } else if (typeof (await this.anchors(handle, app, topic)).tipHeight === "number") return;
+      const ours = OverlaySync.fields(this.o.ownBeat(handle, `${topic}${LIVE}`));
+      const a = theirs.tailDigest instanceof Uint8Array ? hex(theirs.tailDigest) : "";
+      const b = ours?.tailDigest instanceof Uint8Array ? hex(ours.tailDigest) : "";
+      if (a === b) return;
+    }
+    await this.tail(handle, app, topic, peer);
+  }
+
+  /** The peer's unmined tail: each txid we do not hold fetched as an announced one from that peer. */
+  private async tail(handle: string, app: string, topic: string, peer: string): Promise<void> {
+    const t = await this.ask(handle, peer, { kind: "tail", topic });
+    const txids = (Array.isArray(t.txids) ? t.txids : []).filter((x): x is string => typeof x === "string" && HEX64.test(x));
+    let asked = 0;
+    // One at a time, in its order (admission order: parents first): each through the per-txid set.
+    for (const txid of txids) {
+      if (this.stopped) return;
+      const known = this.announced.has(`${handle} ${txid}`);
+      if (!known && await this.holds(handle, app, txid)) continue;
+      asked++;
+      await this.announce(handle, app, topic, txid, peer);
+    }
+    if (asked) this.say(handle, `${topic}: ${peer}'s tail: ${txids.length} unmined, ${asked} asked`);
+  }
+
+  /**
+   * Catch `topic` up from `peer`: the locator, then the pulls. `tip`: the tip its beat named (the
+   * ranges are spread across the peers whose last beat names the same); none (a start): that peer
+   * alone. → whether every range was taken (a height we hold no header for, or a list that fails,
+   * leaves it unfinished).
+   */
+  private async catchUp(handle: string, app: string, topic: string, peer: string, tip?: { height: number; anchor: string }): Promise<boolean> {
     const mine = await this.anchors(handle, app, topic);
     const answer = await this.ask(handle, peer, {
       kind: "locator", topic,
       locator: mine.anchors.map((x) => ({ height: x.height, anchor: Uint8Array.from(Buffer.from(x.anchor, "hex")) })),
     });
-    if (typeof answer.tipHeight !== "number" || typeof answer.genesisHeight !== "number") return;
+    if (typeof answer.tipHeight !== "number" || typeof answer.genesisHeight !== "number") return true;
     const from = typeof answer.agreedHeight === "number" ? answer.agreedHeight + 1 : answer.genesisHeight;
     const to = answer.tipHeight;
-    if (from > to) return;
+    if (from > to) return true;
     // The peers whose last beat has the same tip anchor: the ranges are spread across them.
-    const agreeing = [peer, ...this.o.beats(handle, `${topic}${LIVE}`).filter((b) => {
-      if (b.from === peer || b.from === this.o.self(handle) || this.dropped.get(handle)?.has(b.from)) return false;
-      try { const t = dagCbor.decode(b.body) as TipBeat; return t.tipHeight === tipHeight && t.tipAnchor instanceof Uint8Array && hex(t.tipAnchor) === tipAnchor; } catch { return false; }
-    }).map((b) => b.from)];
+    const agreeing = [peer, ...(tip ? this.o.beats(handle, `${topic}${LIVE}`).filter((b) => {
+      if (b.from === peer || b.from === this.o.self(handle) || this.isDropped(handle, b.from)) return false;
+      const t = OverlaySync.fields(b.body);
+      return t?.tipHeight === tip.height && t.tipAnchor instanceof Uint8Array && hex(t.tipAnchor) === tip.anchor;
+    }).map((b) => b.from) : [])];
     this.say(handle, `${topic}: agreed with ${peer} through ${from - 1}; pulling ${from}..${to} from ${agreeing.length} peer(s)`);
     const span = this.o.rangeHeights ?? 1_000;
     const ranges: Array<{ from: number; to: number; peer: string }> = [];
     for (let h = from, i = 0; h <= to; h += span, i++) ranges.push({ from: h, to: Math.min(to, h + span - 1), peer: agreeing[i % agreeing.length]! });
     const lists = await Promise.all(ranges.map(async (r) => ({ r, blocks: await this.pullRange(handle, topic, r.peer, r.from, r.to).catch((e) => { this.say(handle, `${topic}: ${r.from}..${r.to} from ${r.peer}: ${(e as Error).message}`); return undefined; }) })));
+    let whole = true;
     for (const { r, blocks } of lists) {
-      if (!blocks) continue;
+      if (!blocks) { whole = false; continue; }
       const ok = await this.checked(handle, topic, r.peer, blocks);
-      if (!ok) continue;
+      if (!ok) { whole = false; continue; }
       const ours = new Set<string>();
       for (let h: number | null = r.from; h !== null && h <= r.to;) {
         const page = await this.o.local(handle, app, "admitted", { topic, fromHeight: String(h), toHeight: String(r.to) }) as Admitted;
@@ -236,6 +374,7 @@ export class OverlaySync {
         if (lacking.length) await this.landed(handle, app, topic, b.height, lacking);
       }
     }
+    return whole;
   }
 
   /** The peer's admitted lists for `from..to`, every page. */
@@ -255,12 +394,13 @@ export class OverlaySync {
   /**
    * Each block against our headers before any transaction is fetched: its hash ours at its height,
    * the BUMP at that height and every listed txid in it with our merkle root. A failure drops the
-   * peer; a height we hold no header for yet stops the range (ours to fill). → whether all checked.
+   * peer; a height we hold no header for yet stops the range (the next changed beat resumes it).
+   * → whether all checked.
    */
   private async checked(handle: string, topic: string, peer: string, blocks: AdmittedBlock[]): Promise<boolean> {
     for (const b of blocks) {
       if (!(await this.o.header(handle, b.height))) {
-        this.say(handle, `${topic}: no header of ours at ${b.height} yet: ${peer}'s range left for a later beat`);
+        this.say(handle, `${topic}: no header of ours at ${b.height} yet: ${peer}'s range left for its next changed beat`);
         return false;
       }
       const why = await this.problem(handle, b);
@@ -308,48 +448,5 @@ export class OverlaySync {
       if (txids.every((t) => have.has(t))) return;
       await sleep(100);
     }
-  }
-
-  // ---------------------------------------------------------------- wants (#112)
-
-  /** The wants standing for `handle` (folded from its log at hydrate): each asked. */
-  standing(handle: string, wants: Want[]): void {
-    for (const w of wants) this.want(handle, { event: "want", want: w });
-  }
-
-  /** A `want` or `unwant` event from `handle`'s overlay. */
-  want(handle: string, e: { event: "want" | "unwant"; want: Want }): void {
-    if (this.stopped) return;
-    let m = this.wants.get(handle);
-    if (!m) this.wants.set(handle, m = new Map());
-    const k = wantKey(e.want);
-    if (e.event === "unwant") { m.delete(k); return; }
-    if (m.has(k)) return;
-    m.set(k, e.want);
-    this.track(this.pursue(handle, k, e.want));
-  }
-
-  /** Ask for a want until it is answered into the receive row, or it ends. */
-  private async pursue(handle: string, k: string, w: Want): Promise<void> {
-    let delay = this.o.wantRetryMs ?? 2_000;
-    while (!this.stopped && this.wants.get(handle)?.get(k) === w) {
-      const peers = w.peer ? [peerOf(w.peer)] : this.meshOf(handle, w.topic);
-      for (const p of peers) {
-        if (this.wants.get(handle)?.get(k) !== w) return;
-        const ok = await this.fetchInto(handle, p, w.topic, w.txid).catch((e) => { this.say(handle, `want ${w.txid} (${w.topic}) of ${p}: ${(e as Error).message}`); return false; });
-        if (ok) { this.wants.get(handle)?.delete(k); return; } // the engine's unwant follows when it is taken
-      }
-      await sleep(delay);
-      delay = Math.min(delay * 2, this.o.wantMaxMs ?? 60_000);
-    }
-  }
-
-  /** The peers on a topic: its gossip subscribers and its beaters, each once, not this instance. */
-  private meshOf(handle: string, topic: string): string[] {
-    const self = this.o.self(handle);
-    const out = new Set([...this.o.subscribers(handle, topic), ...this.o.beats(handle, `${topic}${LIVE}`).map((b) => b.from)]);
-    out.delete(self);
-    for (const d of this.dropped.get(handle) ?? []) out.delete(d);
-    return [...out];
   }
 }

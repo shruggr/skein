@@ -23,7 +23,13 @@
 //   - the same reads as a kernel call; ingest is refused there (a message only);
 //   - at boot: a system tree (the stock files, bin/chain.wasm, the two rows)
 //     takes the feed, ingests, broadcasts and answers the same way, its writes
-//     under the stock scope `chain/`.
+//     under the stock scope `chain/`;
+//   - a reorg (0.7.1, the settled overlay sync design): a heavier branch
+//     without the proven child turns it back to unproven and broadcasts
+//     nothing (no new post reaches the Arcade, no broadcast event); the child
+//     mined in the new branch, Arcade's status for the new block (the same
+//     token's stream: a new blockHash is a new status) is the proof event —
+//     the same watchers answered `proven` again, with the new height.
 //
 // Both stores then replay to themselves exactly.
 //
@@ -45,12 +51,15 @@ import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { storeSpec } from "../../src/runtime/index-store.ts";
+import { openStoreFile } from "../../src/host/stores.ts";
+import { emittedEvents } from "../../src/host/p2p.ts";
 import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "7da428422ce193a1bb489163637f070860d46ccd"; // v0.7.1: a reorg broadcasts nothing
 const here = dirname(fileURLToPath(import.meta.url));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 
@@ -127,7 +136,7 @@ try {
   check(routeLines.some((l) => l.startsWith("route event chain ")) && routeLines.some((l) => l.startsWith("route mailbox chain [kernel.beef] ")) && routeLines.some((l) => l.startsWith("route mailbox chain/status ")) && routeLines.length === 3,
     `the prompt shows its routes (#143: no sender; the BEEF decoded at the door): ${routeLines.join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.7.0", "the head chain/app is the app record (0.7.0)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.7.1", "the head chain/app is the app record (0.7.1)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   check(rows.length === 3 && rows.every((r) => !("sender" in r) && !("optional" in r)) && rows.map((r) => `${r.transport} ${r.address}`).join(",") === "event chain,mailbox chain,mailbox chain/status"
     && JSON.stringify(rows[1]!.filters) === '["kernel.beef"]',
@@ -279,6 +288,34 @@ try {
   const bootHeads = (await bk.call("head", "chain/state")) as CID | null;
   check(!!bootHeads, "the genesis-wired chain program wrote chain/state (the stock scope)");
   bootStores.push(bootStore);
+
+  // ------------------------------------------------ a reorg (0.7.1): reverted, nothing broadcast; the new proof by the status feed
+  const postsOf = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid).length;
+  const childPosts = postsOf(childTxid);
+  const fork: Uint8Array[] = [];
+  for (let i = 0; i < 3; i++) fork.push(mine(sha256d(fork.at(-1) ?? h1), Buffer.alloc(32, 0x61 + i), 1_790_300_000 + i * 600));
+  await h.router.chainHeaders("ch", "chain", fork); // one run from the fork point (the host chain takes the heavier branch)
+  await h.router.settled();
+  const rs1 = await send({ fn: "status", args: { txid: childTxid } });
+  const s1 = (await answers(rs1, 1, "status after the reorg"))[0]!;
+  check(s1.result?.state === "unproven", `a heavier branch (to 4) without it: the child unproven again (${s1.result?.state})`);
+  await sleep(1500);
+  await h.router.settled();
+  check(postsOf(childTxid) === childPosts, `the reorg broadcast nothing: no new post of the child reached the Arcade (${postsOf(childTxid)} vs ${childPosts})`);
+  const chainResults = async () => {
+    const v = openStoreFile(store, { readOnly: true });
+    try { return await emittedEvents(v, (rec) => rec.event === "broadcast" ? rec : undefined); } finally { await v.close(); }
+  };
+  const broadcastsBefore = (await chainResults()).length;
+  const h5x = mine(sha256d(fork.at(-1)!), internal(childTxid), 1_790_302_000);
+  await h.router.chainHeaders("ch", "chain", [h5x]);
+  await h.router.settled();
+  arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h5x)), blockHeight: 5, merklePath: new MerklePath(5, [[{ offset: 0, hash: childTxid, txid: true }]]).toHex() });
+  const a2c = await answers(r2, 3, "proven again after the reorg").catch(() => undefined);
+  check(a2c?.[2]?.result?.state === "proven" && a2c[2].result.height === 5, `the new proof by the status feed (a new blockHash, the same token's stream): the first watcher answered proven again at 5 (${(a2c ?? []).map((x) => `${x.result?.state}@${x.result?.height ?? "-"}`).join(" → ")})`);
+  const a3c = await answers(r3, 3, "proven again to the second watcher").catch(() => undefined);
+  check(a3c?.[2]?.result?.state === "proven" && a3c[2].result.height === 5, `the second watcher too (${(a3c ?? []).map((x) => x.result?.state).join(" → ")})`);
+  check((await chainResults()).length === broadcastsBefore && postsOf(childTxid) === childPosts, "still no broadcast of it: the proof came without a resubmit");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

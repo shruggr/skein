@@ -130,7 +130,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
 import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
-import { BEEF_PROTOCOL, foldWants, OverlaySync, SYNC_PROTOCOL, wantEvent, type Want } from "./sync.ts";
+import { admitOf, BEEF_PROTOCOL, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
@@ -486,12 +486,13 @@ export class Router {
         // #126: a beacon's beat signed by the instance's signer, as an intention request is.
         sign: (h, data) => this.signAs(h, data),
         identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
-        beat: (h, topic, b) => this.sync?.beat(h, topic, b),
+        beat: (h, topic, b) => { this.sync?.beat(h, topic, b); void this.rememberPeer(h, topic, b.from); },
       });
       const p2pHost = this.p2p;
       this.sync = new OverlaySync({
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
         local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
+        ownBeat: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.body,
         deliver: (h, peer, beef) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef }),
         header: async (h, height) => {
           const row = this.o.db.get(h);
@@ -500,7 +501,6 @@ export class Router {
           try { return await chainHeader(st, height); } finally { st.close(); }
         },
         request: (h, peer, body) => p2pHost.request(h, peer, SYNC_PROTOCOL, body),
-        subscribers: (h, topic) => p2pHost.subscribers(h, topic),
         beats: (h, liveTopic) => p2pHost.live.live(h, liveTopic),
         self: (h) => p2pHost.peerId(h),
         log: (s, l) => this.say(s, l),
@@ -780,6 +780,17 @@ export class Router {
     const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
     try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name; the front door judges the record */ }
+    // The settled sync design (David 2026-10-30, skein-overlay 0.20.0): an `admit` announcement on an overlay
+    // topic is the host's, never the instance's — fetched from the announcer unless held (sync.ts), nothing
+    // logged; GossipSub's verdict ignore (no forward: each node announces its own admission).
+    if (call.topic !== undefined && this.sync) {
+      const app = this.loaded.get(handle)?.beacons.find((b) => b.topic === `${call.topic}-live`)?.app;
+      const txid = app ? admitOf(call.topic, call.body) : undefined;
+      if (app && txid && from) {
+        this.sync.admit(handle, app, call.topic, txid, from);
+        return { verdict: "ignore", reason: "an announcement: the host fetches it" };
+      }
+    }
     const record = call.topic !== undefined
       ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
       : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
@@ -989,8 +1000,8 @@ export class Router {
     // #156: the host chain as it stands, once at each start (not awaited: an admit made here would wait on this load).
     this.sentChain.delete(handle);
     void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the start event not sent: ${(e as Error).message}`));
-    // shruggr/skein#112: the wants standing in the log, asked again.
-    if (this.sync) this.sync.standing(handle, await this.foldWants(storeSpec(row)).catch((e) => { this.say(handle, `sync: the wants not read: ${(e as Error).message}`); return [] as Want[]; }));
+    // The settled sync design: the peers each overlay topic's beats came from (host.db), asked at once.
+    if (this.sync) void this.askKnownPeers(l).catch((e) => this.say(handle, `sync: the known peers not asked: ${(e as Error).message}`));
     await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
@@ -1416,7 +1427,8 @@ export class Router {
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
     if (rec.event === "beacon" || rec.event === "unbeacon") return this.beaconEvent(handle, rec);
-    if (rec.event === "want" || rec.event === "unwant") return this.wantEvent(handle, rec);
+    // An overlay before skein-overlay 0.20.0 emits want / unwant: nothing asks for them any more (the settled sync design).
+    if (rec.event === "want" || rec.event === "unwant") return;
     if (rec.event === "liveness" || rec.event === "unliveness") return this.livenessEvent(handle, rec);
     const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
@@ -1508,21 +1520,44 @@ export class Router {
     }
   }
 
+  /** How long a peer that beat on a topic is remembered without beating again (ms): 30 days (David to review). */
+  static readonly PEER_KEEP_MS = 30 * 86_400_000;
+
   /**
-   * A `want` / `unwant` event from `handle`'s overlay (shruggr/skein#112, #150): the sync asks peers
-   * for the transaction while it stands (sync.ts). An instance still loading reads it from its log.
+   * A beat kept from `peer` on `liveTopic` at `handle` (the settled sync design): when an overlay app
+   * of the instance beats on that topic, the peer and its addresses (the node's peer store) upserted
+   * into host.db `topic_peers`, keyed by the overlay topic. What a restart asks first.
    */
-  private wantEvent(handle: string, rec: Record<string, unknown>): void {
-    const e = wantEvent(rec);
-    if ("refused" in e) { this.say(handle, `sync: ${String(rec.event)}: ${e.refused}`); return; }
-    this.sync?.want(handle, e);
+  private async rememberPeer(handle: string, liveTopic: string, peer: string): Promise<void> {
+    if (!liveTopic.endsWith("-live") || !this.p2p) return;
+    if (!this.loaded.get(handle)?.beacons.some((b) => b.topic === liveTopic)) return;
+    try {
+      this.o.db.seenPeer(handle, liveTopic.slice(0, -"-live".length), peer, await this.p2p.peerAddrs(handle, peer), stampMs(this.now()));
+    } catch (e) { this.say(handle, `sync: peer ${peer} not remembered: ${(e as Error).message}`); }
   }
 
-  /** shruggr/skein#112: the overlays' standing wants, folded from the instance's log (`want` minus `unwant`). */
-  private async foldWants(store: string): Promise<Want[]> {
-    if (!this.sync || !storeExists(store)) return [];
-    const s = openStoreFile(store, { readOnly: true });
-    try { return foldWants(await emittedEvents(s, (rec) => { const e = wantEvent(rec); return "refused" in e ? undefined : e; })); } finally { s.close(); }
+  /**
+   * At a start (hydrate): for each overlay topic the instance beats on, the peers host.db remembers
+   * (rows older than PEER_KEEP_MS pruned first) dialled, a few at a time, failures dropped silently;
+   * each that answers asked at once — the locator and the tail (sync.ts `reconnect`) — without waiting
+   * for a beat.
+   */
+  private async askKnownPeers(l: Loaded): Promise<void> {
+    const handle = l.row.handle;
+    if (!this.p2p || !this.sync) return;
+    this.o.db.prunePeers(stampMs(this.now()) - Router.PEER_KEEP_MS);
+    const jobs: Array<{ app: string; topic: string; peer: string; addrs: string[] }> = [];
+    for (const b of l.beacons) {
+      if (!b.topic.endsWith("-live")) continue;
+      const topic = b.topic.slice(0, -"-live".length);
+      for (const r of this.o.db.topicPeers(handle, topic)) if (r.peer !== this.p2p.peerId(handle)) jobs.push({ app: b.app, topic, peer: r.peer, addrs: r.addrs });
+    }
+    const p2p = this.p2p, sync = this.sync;
+    const one = async (j: (typeof jobs)[number]) => {
+      try { await p2p.connect(handle, j.peer, j.addrs); } catch { return; } // a peer gone: dropped silently
+      sync.reconnect(handle, j.app, j.topic, j.peer);
+    };
+    for (let i = 0; i < jobs.length; i += 4) await Promise.all(jobs.slice(i, i + 4).map(one));
   }
 
   /**
@@ -1534,7 +1569,7 @@ export class Router {
    * app, so the engine reads its configuration from the app record as it does for its read routes.
    * Its answer is the read route's `{status, type, body}`: the body's JSON, or a throw on another status.
    */
-  private async overlayRead(handle: string, app: string, fn: "anchors" | "admitted", query: Record<string, string>): Promise<unknown> {
+  private async overlayRead(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown> {
     const l = await this.hydrate(handle);
     const root = await l.kernel.call("head", appHead(app)) as CID | null;
     if (!root) throw new Error(`${app}: no app record`);

@@ -15,7 +15,7 @@ import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } f
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { beaconBeat, beaconFrame, foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { beaconBeat, beaconFrame, foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -212,4 +212,61 @@ test("p2p: a beacon's beat (#126) is a new frame each time — {body, at, sender
   const forged = (await import("@ipld/dag-cbor")).encode({ ...(b1 as object), sender: other });
   assert.match(String((beaconBeat("t", forged) as { problem: string }).problem), /signature/, "another sender: no");
   assert.match(String((beaconBeat("t", body) as { problem: string }).problem), /dag-cbor|want/);
+});
+
+test("p2p: beacons publish on the timer only (the settled sync design, David 2026-10-30) — the first at once; a replacing body swaps what the next beat carries, no publish now; a new `every` resets the timer, still no publish now", async (t) => {
+  const o = new Signer(PrivateKey.fromHex("47".repeat(32)));
+  const sign = async (h: string, d: Uint8Array) => Uint8Array.from((await o.wallet(h).createSignature({ protocolID: SIGN_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...d] })).signature);
+  const a = new P2PHost({
+    host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap: [], dht: "off", relays: [], mdns: false },
+    keyOf: (h) => o.peerKey(h), inbound: async () => ({ verdict: "accept" }), discoveryMs: 60_000,
+    sign, identity: async (h) => Uint8Array.from(Buffer.from(o.identity(h), "hex")),
+  });
+  t.after(() => a.stop());
+  await a.declare("alpha", { topics: [], protocols: [] });
+  const sent: string[] = [];
+  a.publish = async (_h: string, _t: string, frame: Uint8Array) => {
+    const b = beaconBeat("tm_x-live", frame);
+    sent.push("problem" in b ? "?" : new TextDecoder().decode(b.body));
+    return { seqno: new Uint8Array(8), recipients: 0 };
+  };
+  const body = (s: string) => new TextEncoder().encode(s);
+  a.beacons("alpha", [{ app: "overlay", topic: "tm_x-live", every: 1000, body: body("v1") }]);
+  await until(() => sent.length === 1, "the first beacon publishes at once");
+  // A burst of changes: nothing published now.
+  for (const v of ["v2", "v3", "v4"]) a.beacons("alpha", [{ app: "overlay", topic: "tm_x-live", every: 1000, body: body(v) }]);
+  await sleep(300);
+  assert.deepEqual(sent, ["v1"], "a replacing beacon publishes nothing now");
+  await until(() => sent.length === 2, "the timer's next tick", 3000);
+  assert.deepEqual(sent, ["v1", "v4"], "the tick carries the latest body");
+  // A new `every`: the timer reset to it, nothing now.
+  const n = sent.length;
+  a.beacons("alpha", [{ app: "overlay", topic: "tm_x-live", every: 2500, body: body("v5") }]);
+  await sleep(1500);
+  assert.equal(sent.length, n, "no publish at the change, none at the old interval");
+  await until(() => sent.length === n + 1, "the new interval's first tick", 3000);
+  assert.equal(sent.at(-1), "v5");
+  a.beacons("alpha", []);
+});
+
+test("p2p: the overlay's receive row /skein/overlay/beef/1.0.0 is never handled inbound, whatever the rows declare (the settled sync design: the host's own entry)", async (t) => {
+  const o = new Signer(PrivateKey.fromHex("48".repeat(32)));
+  const calls: InboundCall[] = [];
+  const mk = (bootstrap: string[] = []) => new P2PHost({
+    host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht: "off", relays: [], mdns: false },
+    keyOf: (h) => o.peerKey(h), inbound: async (_h, call) => { calls.push(call); return { verdict: "accept" }; }, discoveryMs: 300,
+  });
+  const a = mk();
+  t.after(() => a.stop());
+  await a.declare("alpha", { topics: [], protocols: [] });
+  const b = mk(a.addrs("alpha"));
+  t.after(() => b.stop());
+  await b.declare("beta", { topics: [], protocols: [RECEIVE_PROTOCOL, "/p/1"] });
+  assert.ok(!b.handledProtocols("beta").includes(RECEIVE_PROTOCOL), "not on the node's registry");
+  assert.ok(b.handledProtocols("beta").includes("/p/1"));
+  await b.declare("beta", { topics: ["one"], protocols: [RECEIVE_PROTOCOL, "/p/1", "/p/2"] });
+  assert.ok(!b.handledProtocols("beta").includes(RECEIVE_PROTOCOL), "nor after a declare again");
+  await until(() => a.node("alpha")!.getConnections().length > 0, "beta connects to alpha");
+  await assert.rejects(a.dial("alpha", b.peerId("beta"), RECEIVE_PROTOCOL, () => {}), "a peer cannot open it");
+  assert.equal(calls.length, 0);
 });

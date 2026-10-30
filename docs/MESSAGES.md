@@ -1384,7 +1384,12 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   a NEW message on `topic` every `every` ms on its own clock — the declared
   body plus the beat's time, signed by the instance's signer (as the host
   signs an intention request), so each beat is fresh and attributable to
-  the instance — and logs nothing per beat. The beat as published (p2p.ts
+  the instance — and logs nothing per beat. **On the timer only** (the
+  settled overlay sync design, David 2026-10-30): the first beacon on a
+  topic publishes at once; a beacon that replaces one (the same app and
+  topic, a new body) swaps what the next beat carries and publishes
+  nothing now, the timer untouched; a new `every` resets the timer to it,
+  still publishing nothing now. The beat as published (p2p.ts
   `beaconFrame`; `beaconBeat` reads and checks one):
 
       dag-cbor {body: bytes, at: int (ms since the epoch, the host's clock),
@@ -1451,6 +1456,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
       {kind: "admitted", topic, fromHeight, toHeight, limit}
           → {kind: "admitted", topic, blocks: [{height, blockHash, txids, bump}], nextHeight}
       {kind: "tx", topic, txid}  → {kind: "tx", txid, beef?: bytes}   (absent: not held)
+      {kind: "tail", topic}      → {kind: "tail", topic, txids: [hex]}   (skein-overlay ≥ 0.20.0: admitted, not mined, in admission order)
       anything else              → {kind: "error", message}
 
   answered from the engine's state (its `anchors`, `admitted` and
@@ -1459,31 +1465,55 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   engine — the app beating on `<topic>-live`, its role `overlay`, fn
   `anchors` / `admitted` — not through the app's http table, which an app
   need not publish; it asks a peer by `request` on the stream.
+  The settled design (David 2026-10-30, skein-overlay ≥ 0.20.0): no timer,
+  no retry on a clock, no backoff anywhere.
+  - **Announce, then fetch.** The `<topic>` mesh carries the engine's
+    `admit {kind: "admit", txid, topics}` (no BEEF), published once by the
+    step that admits a transaction. The host takes it (Router.p2pInbound:
+    an `admit` naming the topic on a topic its overlay beats on is never
+    delivered to the instance; GossipSub's verdict ignore — not forwarded:
+    each node announces its own admission, so bytes spread one hop at a
+    time): unless the instance holds the txid (the engine's `holds`, by
+    kernel call) or a fetch of it is under way, it asks the announcing peer
+    (`tx`) and hands the BEEF to the overlay's receive row
+    `/skein/overlay/beef/1.0.0` as a frame from that peer. Per (instance,
+    txid) it keeps the set of peers whose admit named it: on a failure (no
+    answer, no `beef`, the delivery not taken) the next; the set exhausted,
+    it waits for a new admit to add a peer. A delivery taken drops the
+    entry. Nothing of a peer's admit is logged in the instance.
+  - **The receive row** `/skein/overlay/beef/1.0.0` is the host's own
+    entry: no node handles it inbound, whatever rows an instance declares
+    (p2p.ts `RECEIVE_PROTOCOL`); a peer cannot open it.
   - **Catch-up.** A beat the liveness tool newly keeps from another peer
-    on `<topic>-live`, whose `tipAnchor` is not ours at its `tipHeight`,
-    starts one: our locator (tip, tip-1, tip-2, tip-4 … genesis; empty for a
-    new node) to that peer; from the height after the one it agrees at (its
-    genesis when none), its admitted lists by ranges of 1 000 heights,
-    spread across the peers whose last beat names the same tip anchor. Each
-    block is checked against our chain state's headers (its hash; the BUMP's
-    root for every txid) before a transaction is fetched; a list that fails
-    drops that peer for the host's run; a height we hold no header for yet
-    leaves the range to a later beat. Each txid our admitted lists lack is
-    asked of the peer that listed it (`tx`) and the BEEF handed to the
-    overlay's receive row `/skein/overlay/beef/1.0.0` as a frame from that
-    peer (an entry, as any stream frame): the overlay takes a mined one no
-    one waits on with every topic it serves. Block by block, in height
-    order. At most one catch-up per (instance, topic, peer) at a time, and
-    one per 10 s.
-  - **Wants (#112).** The overlay's `{event: "want", txid, topic, peer?}`
-    is asked (`tx`) of `peer`, else of the topic's peers (the node's gossip
-    subscribers of `<topic>` and the beaters on `<topic>-live`), and the
-    BEEF handed to the receive row as from the peer that sent it; asked
-    again, every 2 s doubling to a minute, while it stands; `unwant` ends
-    it. The standing wants are folded from the log at hydrate (`want` minus
-    `unwant`), as the subscriptions are.
-  - Unbilled, and the tail (`tailDigest`) is not reconciled: a peer whose
-    tail differs is not asked for anything beyond the wants.
+    on `<topic>-live` starts a reconcile with that peer — at most one per
+    (instance, topic, peer) at a time, and a new one only when that peer's
+    latest beat body differs from the one that started (or, at its end, was
+    the latest for) the last. Mined history first, when its `tipAnchor` is
+    not ours at its `tipHeight`: our locator (tip, tip-1, tip-2, tip-4 …
+    genesis; empty for a new node) to that peer; from the height after the
+    one it agrees at (its genesis when none), its admitted lists by ranges
+    of 1 000 heights, spread across the peers whose last beat names the
+    same tip anchor. Each block is checked against our chain state's
+    headers (its hash; the BUMP's root for every txid) before a transaction
+    is fetched; a list that fails drops that peer for the host's run; a
+    height we hold no header for yet ends the range (the next changed beat
+    resumes it). Each txid our admitted lists lack is asked of the peer that
+    listed it (`tx`) and the BEEF handed to the receive row as a frame from
+    that peer (an entry, as any stream frame); the overlay judges it with
+    every topic it serves. Block by block, in height order.
+  - **The tail.** Then, when the mined side is equal (its tip anchor ours
+    at its height, or neither has one) and its `tailDigest` is not ours
+    (our own beacon's body): `tail` to that peer, and each txid we do not
+    hold fetched as an announced one (the per-txid set, that peer).
+  - **Restarts.** host.db `topic_peers (handle, topic, peer_id, addrs,
+    last_seen)` keeps, per instance and overlay topic, the peers whose
+    beats were kept (with the addresses the node knew); rows not seen for
+    30 days are pruned at a start. At a start the host dials them (four at
+    a time, failures dropped) and runs the locator and the tail against
+    each, without waiting for a beat; only a brand-new node waits for one.
+  - **No wants.** An overlay before 0.20.0 emits `{event: "want" |
+    "unwant", …}`; the host ignores them.
+  - Unbilled.
 - **Event streams (#148).** A page follows its app's emitted events live,
   served by the host on the instance's origin, beside the liveness read
   (src/host/events.ts), no program in between:

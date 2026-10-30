@@ -276,8 +276,9 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   (its owner), so the instance is live at once; on a master-key host the
   owner's signed claim stays required. `beef` (skein-amm#4): an Atomic BEEF
   (bytes) the host hands into the new instance once it is claimed, published
-  and following headers — into its receive row `/skein/overlay/beef/1.0.0`,
-  as a catch-up's fetched BEEF is, from the host's own peer; the host names
+  and following headers — into its receive row `/skein/overlay/beef/1.0.0`
+  (the host's own entry, never served to peers), as a fetched BEEF is, from
+  the host's own peer; the host names
   no topic (the instance's engine judges it under the topics its config
   declares). The answer gains `delivered: {verdict, reason?}`; a BEEF the
   door turns away (unmined, a bad BUMP) is reported there, not retried, and
