@@ -183,6 +183,10 @@ echo "== the one-key host (#160, #161, #162): a host with ONE key (SKEIN_KEY_FIL
 "${node[@]}" "$kz/equiv/onekey.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/onekey.ts" || status=1
 
+echo "== the host loads the kernel (the settled split, 2026-10-31): onekey.ts and sync.ts on the WASM host (every instance a set of its host's one SQLite database, kernel-zig/zig-out/web/skein-kernel.wasm on a worker), #157's delivery as an emit (the server's signed answer an entry; forged ones refused at the door), every store replayed by the native kernel to the same state CID; front-door steps/s wasm vs native"
+(cd "$kz" && mise exec -- zig build web)
+"${node[@]}" "$kz/equiv/wasm-host.ts" || status=1
+
 echo "== the collection app (#151): a skein from the default image, claimed; root installs the chain app and shruggr/skein-collection (its engine with it; equiv/collection.ts's pinned commit, or \$SKEIN_COLLECTION_DIR) by message; nothing registered until root registers a collection's topic tm_col_<txid>_<vout> and the lookup ls_collection; the collection's mint, an item mint (another key's item not admitted), a transfer behind a funding input (its satoshi by the ordinal rule; the funding parent ancillary, /holds says so), an OrdLock v2 listing and its purchase, each mined and posted to /collection/submit; the four reads as read routes and as BRC-24 (items, history, listings, sales with its block's time); replayed"
 "${node[@]}" "$kz/equiv/collection.ts" || status=1
 

@@ -24,7 +24,8 @@ import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import { signClaim, signMessage } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
-import { openStoreFile } from "../runtime/index-store.ts";
+import { storeSpec } from "../runtime/index-store.ts";
+import { openStoreFile } from "./stores.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import type { MailRecord } from "./providers.ts";
 import { testHost } from "./testhost.ts";
@@ -98,7 +99,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   const ag = await k.store.get(await k.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
   assert.deepEqual(ag.roles.root!.map((x) => hex(x)), [client], "#143: the claim granted root to the client's own key");
   const first: Array<Record<string, unknown>> = [];
-  const s = openStoreFile(alice.store, { readOnly: true });
+  const s = openStoreFile(storeSpec(alice), { readOnly: true });
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
   assert.equal(first[0]!.transport, "local", "the claim is the first entry after the genesis: nothing reached it before");
   const fwd = await (await h.router.hydrate("alice")).kernel.store.get((first[0] as { request: CID }).request) as { message?: { sender?: unknown; recipient?: unknown; box?: string } };

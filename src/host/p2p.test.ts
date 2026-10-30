@@ -153,6 +153,8 @@ test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #7
   assert.deepEqual(libp2pConfig({}, rows), { topics: ["tm_demo", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "libp2p rows alone start a node");
   assert.deepEqual(libp2pConfig({ libp2p: { topics: ["tm_demo", "g"], listen: ["/ip4/127.0.0.1/tcp/1"] } }, rows), { topics: ["tm_demo", "g", "tm_demo-admit"], protocols: ["/amm/1/swap"], listen: ["/ip4/127.0.0.1/tcp/1"] }, "the genesis's, then the rows', once each");
   assert.deepEqual(libp2pConfig({ libp2p: { topics: ["g"] }, dispatch: [{ transport: "libp2p", address: "tm_demo" }] }, rows), { topics: ["g", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "a genesis row alone subscribes nothing: the tree's config.libp2p says what the node takes");
+  // #155: a stream protocol row is declared whatever installed it — the genesis's too (an image-born instance serves its sync row).
+  assert.deepEqual(libp2pConfig({ dispatch: [{ transport: "libp2p", address: "/skein/overlay/sync/1.0.0" }, { transport: "libp2p", address: "tm_seeded" }] }, [{ transport: "libp2p", address: "/skein/overlay/sync/1.0.0" }, { transport: "libp2p", address: "tm_seeded" }]), { topics: [], protocols: ["/skein/overlay/sync/1.0.0"] }, "#155: the genesis's protocol row declared, its topic row not");
 
   const o = new Signer(PrivateKey.fromHex("45".repeat(32)));
   const calls: InboundCall[] = [];

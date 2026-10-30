@@ -159,7 +159,7 @@ const dPeer = peerIdOf(derived.peerKey("dd")).toString();
 const arcade = await FakeArcade.start();
 const lines: string[] = [];
 const log = (who: string) => (s: string, l: string) => { lines.push(`[${who}:${s}] ${l}`); if (process.env.VERBOSE || /^sync: /.test(l)) process.stdout.write(`  | [${who}:${s}] ${l}\n`); };
-const cliVars = { SKEIN_HOME: homeO, HOME: homeO, SKEIN_KEY_FILE: keyFile, SKEIN_KERNEL_BIN: kernel, ...(BACKEND === "rocksdb" ? { SKEIN_STORE_ROCKSDB: join(homeO, "store-rocksdb") } : BACKEND === "lmdb" ? { SKEIN_STORE: join(homeO, "store") } : {}) };
+const cliVars = { SKEIN_HOME: homeO, HOME: homeO, SKEIN_KEY_FILE: keyFile, SKEIN_KERNEL_BIN: kernel, ...(BACKEND === "rocksdb" ? { SKEIN_STORE_ROCKSDB: join(homeO, "store-rocksdb") } : BACKEND === "lmdb" ? { SKEIN_STORE: join(homeO, "store") } : BACKEND === "wasm" ? { SKEIN_STORE_SQLITE: join(homeO, "store.sqlite") } : {}) };
 async function cli(args: string[]): Promise<{ code: number; out: string[]; err: string[] }> {
   const out: string[] = [], err: string[] = [];
   const code = await main(args, { vars: cliVars, out: (l) => out.push(l), err: (l) => err.push(l) });

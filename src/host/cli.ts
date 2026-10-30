@@ -124,6 +124,11 @@
 //                         process (its host-read socket), so `ls`, explore and the other readers need the host running;
 //                         the one-shot commands that boot (`add --image`, `init`) open the database themselves, so the
 //                         host must be stopped for them (RocksDB: one process per database)
+//   SKEIN_STORE_SQLITE    the settled split (2026-10-31): the host's ONE SQLite database (a file, e.g. $SKEIN_HOME/store.sqlite):
+//                         a new instance's store is its set there (host.db `sqlite:<path>`; the set its handle), run by the
+//                         WASM kernel this process loads (one worker per active instance, wasm-kernel.ts). Over
+//                         SKEIN_STORE_ROCKSDB and SKEIN_STORE. Unset, and no native kernel binary here (the npm package
+//                         ships none): $SKEIN_HOME/store.sqlite
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
@@ -244,7 +249,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) {
-          f.store ??= env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96, #158
+          const sqlite = sqliteStoreOf(env.vars, home);
+          f.store ??= sqlite ? `sqlite:${sqlite}` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96, #158, the settled split
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
@@ -340,7 +346,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
         const [handle] = rest;
         const row = handle ? db.get(handle) : undefined;
         if (handle && !row) { env.err(`skein-host chain: no instance ${handle}`); return 1; }
-        const spec = row ? storeSpec(row) : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}#host/chain` : undefined;
+        const sqlite = sqliteStoreOf(env.vars, homeOf(env.vars));
+        const spec = row ? storeSpec(row) : sqlite ? `sqlite:${sqlite}#host/chain` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}#host/chain` : undefined;
         if (!spec) { env.err("skein-host chain: a handle (its own store's host chain), or SKEIN_STORE_ROCKSDB (the host's)"); return 2; }
         const c = readHostChain(spec);
         env.out(c ? `${c.height}\t${c.hash}\t${c.root.toString()}` : "no host chain");
@@ -730,6 +737,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     ...(v.SKEIN_STORE ? { lmdbStore: resolve(v.SKEIN_STORE) } : {}),
     ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
+    ...((s) => (s ? { sqliteStore: s } : {}))(sqliteStoreOf(v, home)), // the settled split: the wasm kernel
     // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
     ...(v.SKEIN_MANAGER_FOR ? { managerFor: handles(v.SKEIN_MANAGER_FOR) } : {}),
     ...(v.SKEIN_ROOT_INSTANCE ? { rootInstance: v.SKEIN_ROOT_INSTANCE } : {}),
@@ -1036,4 +1044,15 @@ async function run(db: HostDb, rest: string[], env: Env): Promise<number> {
 
 if (import.meta.main) {
   process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${l}\n`), err: (l) => process.stderr.write(`${l}\n`) });
+}
+
+/**
+ * The host's SQLite database for new instances (the settled split, 2026-10-31): SKEIN_STORE_SQLITE, else
+ * $SKEIN_HOME/store.sqlite when this installation has no native kernel binary (the npm package ships the
+ * wasm kernel only) and no other shared store is named; else none (a native kernel per instance store).
+ */
+export function sqliteStoreOf(v: Record<string, string | undefined>, home: string): string | undefined {
+  if (v.SKEIN_STORE_SQLITE) return resolve(v.SKEIN_STORE_SQLITE);
+  if (v.SKEIN_STORE_ROCKSDB || v.SKEIN_STORE) return undefined;
+  return existsSync(v.SKEIN_KERNEL_BIN || KERNEL_BIN) ? undefined : join(home, "store.sqlite");
 }

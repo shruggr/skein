@@ -1,0 +1,3 @@
+# npm pack (the package ships zig-out/web/skein-kernel.wasm; "files" in ../package.json picks what goes in)
+.zig-cache/
+zig-out/bin/

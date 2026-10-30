@@ -619,10 +619,20 @@ export const ROCKSDB = "rocksdb:";
 /** Whether host.db's `store` column names a set of a RocksDB database (#158). */
 export function isRocks(store: string): boolean { return store.startsWith(ROCKSDB); }
 
-/** Whether a store is a set of a host's shared store (LMDB #96, RocksDB #158), not a file of its own. */
-export function isSet(store: string): boolean { return isLmdb(store) || isRocks(store); }
+/**
+ * host.db's `store` column for a set of the host's one SQLite database (the settled split,
+ * 2026-10-31: the host loads the wasm kernel and keeps the storage, src/host/store-sqlite.ts):
+ * `sqlite:<db path>` (the set: the row's handle).
+ */
+export const SQLITE = "sqlite:";
 
-/** A row's store as the kernel's tools and `openStoreFile` name it: its path, `lmdb:<env dir>#<handle>` or `rocksdb:<db dir>#<handle>`. */
+/** Whether host.db's `store` column names a set of the host's SQLite database. */
+export function isSqliteSet(store: string): boolean { return store.startsWith(SQLITE); }
+
+/** Whether a store is a set of a host's shared store (LMDB #96, RocksDB #158, SQLite 2026-10-31), not a file of its own. */
+export function isSet(store: string): boolean { return isLmdb(store) || isRocks(store) || isSqliteSet(store); }
+
+/** A row's store as the kernel's tools and `openStoreFile` name it: its path, `lmdb:<env dir>#<handle>`, `rocksdb:<db dir>#<handle>` or `sqlite:<db path>#<handle>`. */
 export function storeSpec(row: { store: string; handle: string }): string {
   return isSet(row.store) ? `${row.store}#${row.handle}` : row.store;
 }
@@ -634,6 +644,15 @@ export function parseRocksSpec(spec: string): { dir: string; set: string } | und
   const i = rest.lastIndexOf("#");
   if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: a RocksDB store is rocksdb:<db dir>#<set>`);
   return { dir: rest.slice(0, i), set: rest.slice(i + 1) };
+}
+
+/** `sqlite:<db path>#<set>` → its parts; undefined for anything else. */
+export function parseSqliteSpec(spec: string): { db: string; set: string } | undefined {
+  if (!isSqliteSet(spec)) return undefined;
+  const rest = spec.slice(SQLITE.length);
+  const i = rest.lastIndexOf("#");
+  if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: a SQLite set is sqlite:<db path>#<set>`);
+  return { db: rest.slice(0, i), set: rest.slice(i + 1) };
 }
 
 /** `lmdb:<env dir>#<set>` → its parts (kernel-zig/src/any_store.zig parseSpec); undefined for a path. */

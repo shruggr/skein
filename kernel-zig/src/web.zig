@@ -372,7 +372,15 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     };
     if (eq(u8, op, "programs")) {
         var m = cbor.MapBuilder.init(a);
-        for (programsm.program_names) |name| try m.put(name, cbor.cidv(try s.put(a, try programsm.program(a, name))));
+        // With a list of names, only those (serve's: a system tree takes just what it names, no stray records, #36).
+        for (programsm.program_names) |name| {
+            if (v == .array) {
+                var wanted = false;
+                for (v.array) |x| wanted = wanted or std.mem.eql(u8, Value.str(x) orelse "", name);
+                if (!wanted) continue;
+            }
+            try m.put(name, cbor.cidv(try s.put(a, try programsm.program(a, name))));
+        }
         return reply(a, m.value(), null, null);
     }
     if (eq(u8, op, "head")) {

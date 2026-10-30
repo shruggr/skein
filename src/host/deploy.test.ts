@@ -20,7 +20,8 @@ import { planDeploy } from "../client/admin.ts";
 import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { openStoreFile } from "../runtime/index-store.ts";
+import { storeSpec } from "../runtime/index-store.ts";
+import { openStoreFile } from "./stores.ts";
 import type { Store } from "../runtime/store.ts";
 import { currentDispatch } from "../runtime/dispatch.ts";
 import { readFile, readTree, walk } from "../runtime/tree.ts";
@@ -97,7 +98,7 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
     let s = stores.get(handle);
     if (!s) {
       await h.router.hydrate(handle);
-      s = openStoreFile(h.db.get(handle)!.store, { readOnly: true });
+      s = openStoreFile(storeSpec(h.db.get(handle)!), { readOnly: true });
       stores.set(handle, s);
       t.after(() => s!.close());
     }

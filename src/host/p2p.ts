@@ -240,9 +240,12 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * An instance's libp2p config as it stands (#72, #77): the genesis's
  * (libp2pOf: a tree names what its node subscribes in `config.libp2p`),
  * plus the topics and protocols named by the dispatch table's `libp2p`
- * rows added since the genesis (an app's install; address: a topic, or
- * `/<protocol>`) — a genesis row alone subscribes nothing, as a route alone
- * did not — plus the topics the apps subscribed (#119, `subscribed`).
+ * rows added since the genesis (an app's install; address: a topic) — a
+ * genesis topic row alone subscribes nothing, as a route alone did not — and
+ * every stream protocol a `libp2p` row names (`/<protocol>`), whatever
+ * installed it, the genesis included (#155: an image-born instance serves its
+ * sync row; the overlay's receive row stays unserved, P2PHost), plus the
+ * topics the apps subscribed (#119, `subscribed`).
  * `beacons` (#126): an app's beacon (or its liveness, #138: P2PHost.liveness
  * subscribes those topics itself) needs the node, and adds no topic.
  * Undefined: no node — the genesis declares none and nothing needs one.
@@ -250,7 +253,8 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
 export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
   const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
-  const names = rows.filter((r) => r.transport === "libp2p" && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
+  // #155: a stream protocol is declared whatever installed its row; a topic row from the genesis alone subscribes nothing.
+  const names = rows.filter((r) => r.transport === "libp2p" && (String(r.address).startsWith("/") || !seeded.has(String(r.address)))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
   // #126: a beacon needs the node (to publish), not a subscription of its topic.
   if (!base && !names.length && !subscribed.length && !beacons) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];

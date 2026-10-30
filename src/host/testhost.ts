@@ -65,11 +65,13 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   // #96: o.lmdb — every instance a set of one LMDB environment, <home>/store (host.db `lmdb:<dir>`), else a file each.
   // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
-  const storeOf = (handle: string) => (o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : o.lmdb ? `lmdb:${join(home, "store")}` : join(home, "instances", handle, "runtime.db"));
+  // The settled split: o.sqlite (or SKEIN_TEST_STORE=sqlite) — every instance a set of one SQLite database, <home>/store.sqlite, on the wasm kernel.
+  const sqlite = o.sqlite ?? process.env.SKEIN_TEST_STORE === "sqlite";
+  const storeOf = (handle: string) => (sqlite ? `sqlite:${join(home, "store.sqlite")}` : o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : o.lmdb ? `lmdb:${join(home, "store")}` : join(home, "instances", handle, "runtime.db"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
@@ -89,6 +91,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.billing ? { billing: o.billing } : {}),
     ...(o.lmdb ? { lmdbStore: join(home, "store") } : {}),
     ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : {}),
+    // The settled split: the wasm kernel over the host's one SQLite database (SKEIN_TEST_STORE=sqlite: every test host so).
+    ...(sqlite ? { sqliteStore: join(home, "store.sqlite") } : {}),
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
     discovery: fakeDiscovery(db, () => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
@@ -159,9 +163,9 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
  * tool call (`ls | head -3`) and answers "README and **src**." into the
  * owner's mailbox. The peer answers from a script, over its raw transport.
  */
-export async function chatWorld(t: { after(f: () => unknown): void }, dir: string) {
+export async function chatWorld(t: { after(f: () => unknown): void }, dir: string, o: { sqlite?: boolean } = {}) {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
-  const h = await testHost(t, { infer: inferId });
+  const h = await testHost(t, { infer: inferId, ...o });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
   const alpha = h.instance("alpha");

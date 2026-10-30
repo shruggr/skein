@@ -5,6 +5,7 @@
 // `--store` print them. `skein-host peers <handle> list` reads it back from
 // the store. With the real Zig kernel behind a router.
 
+import { storeSpec } from "../runtime/index-store.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, writeFileSync } from "node:fs";
@@ -44,7 +45,7 @@ test("skein peers: add / remove as the owner's messages to the `peers` box, over
   assert.equal(await skein("remove", bob, "--instance", "alpha", "--dry-run"), 0, err.join("\n"));
   assert.match(out.slice(n).join("\n"), /"messageBox":"peers"[\s\S]*1 message to .* \(not sent\)/);
   n = out.length;
-  assert.equal(await skein("remove", bob, "--store", h.db.get("alpha")!.store), 0, err.join("\n"));
+  assert.equal(await skein("remove", bob, "--store", storeSpec(h.db.get("alpha")!)), 0, err.join("\n"));
   assert.match(out.slice(n).join("\n"), /\(not sent\)/);
   assert.equal((await list("alpha")).length, 1, "nothing sent by a dry run");
   assert.equal(await skein("remove", bob, "--instance", "alpha"), 0, err.join("\n"));

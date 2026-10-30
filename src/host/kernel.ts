@@ -28,6 +28,11 @@
 // database (SKEIN_STORE_ROCKSDB), every frame tagged with the instance's
 // handle `h`, and `HostedKernel` its per-instance view with the same surface
 // (`KernelSurface`): hydrate = `open`, stop = `close`. The router holds either.
+// The settled split (2026-10-31): a third, `WasmKernel` (wasm-kernel.ts) — the
+// kernel as a wasm module the host LOADS, one per active instance on a worker
+// thread of this process, over a set of the host's one SQLite database
+// (`sqlite:<path>`); what the npm package runs. These two are the native host,
+// kept for file, LMDB and RocksDB stores.
 
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { spawn, type ChildProcess } from "node:child_process";

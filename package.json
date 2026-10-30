@@ -1,13 +1,11 @@
 {
   "name": "skein",
-  "version": "0.0.1",
-  "description": "A deterministic WASI machine over a content-addressed graph: the node host, the client, its peers, and dev tools (the kernel is kernel-zig).",
+  "version": "0.1.0",
+  "description": "A deterministic WASI machine over a content-addressed graph: the node host (it loads the wasm kernel, kernel-zig built for the web target), the client, its peers, and dev tools.",
   "type": "module",
   "bin": {
-    "skein": "./bin/skein",
-    "skein-dev": "./bin/skein-dev",
-    "skein-host": "./bin/skein-host",
-    "skein-infer": "./bin/skein-infer"
+    "skein": "./bin/skein.js",
+    "skein-host": "./bin/skein-host.js"
   },
   "scripts": {
     "skein": "bin/skein",
@@ -17,7 +15,10 @@
     "web:build": "node --experimental-strip-types --no-warnings web/build.ts",
     "web:serve": "scripts/host/web.sh",
     "web:test": "node --experimental-strip-types --no-warnings --test 'web/*.test.ts'",
-    "web:typecheck": "tsc --noEmit -p web/tsconfig.json"
+    "web:typecheck": "tsc --noEmit -p web/tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "build:kernel": "cd kernel-zig && zig build web",
+    "prepack": "npm run build && npm run build:kernel"
   },
   "license": "MIT",
   "dependencies": {
@@ -43,7 +44,6 @@
     "@libp2p/websockets": "10.1.21",
     "@multiformats/multiaddr": "13.0.3",
     "libp2p": "3.3.11",
-    "lmdb": "3.5.7",
     "multiformats": "^14.0.5"
   },
   "devDependencies": {
@@ -52,5 +52,25 @@
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist",
+    "bin/skein.js",
+    "bin/skein-host.js",
+    "kernel-zig/web/kernel.js",
+    "kernel-zig/web/kernel.d.ts",
+    "kernel-zig/web/store.js",
+    "kernel-zig/web/worker.js",
+    "kernel-zig/web/client.js",
+    "kernel-zig/zig-out/web/skein-kernel.wasm",
+    "wasm/*.wasm",
+    "images",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "lmdb": "3.5.7"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }

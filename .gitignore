@@ -10,3 +10,4 @@ programs/*/zig-out/
 programs/test/*/.zig-cache/
 programs/test/*/zig-out/
 zig-pkg/
+dist/

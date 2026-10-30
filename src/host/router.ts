@@ -121,7 +121,8 @@ import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
-import { isSet, parseRocksSpec, storeSpec } from "../runtime/index-store.ts";
+import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
+import { WasmHost } from "./wasm-kernel.ts";
 import { openStoreFile, storeExists } from "./stores.ts";
 import { rootOf } from "./install.ts";
 import { OVERLAY_ROLE } from "./manifest.ts";
@@ -187,6 +188,12 @@ export interface RouterOptions {
    * there (host.db `rocksdb:<dir>`, the set its handle). Over `lmdbStore`.
    */
   rocksStore?: string;
+  /**
+   * SKEIN_STORE_SQLITE (the settled split, 2026-10-31): the host's one SQLite database (a file); a
+   * new instance's store is then its set there (host.db `sqlite:<path>`, the set its handle), run by
+   * the wasm kernel this process loads (wasm-kernel.ts). Over `rocksStore` and `lmdbStore`.
+   */
+  sqliteStore?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
   instanceOrigin?: string;
   /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
@@ -432,6 +439,17 @@ export class Router {
 
   /** The one-process kernels this router holds (#158), by database directory. */
   private kernelHosts = new Map<string, KernelHost>();
+  private wasmHosts = new Map<string, WasmHost>();
+
+  /** The wasm kernel's host over the SQLite database at `db` (the settled split): its machines, its host chain. */
+  private wasmHost(db: string): WasmHost {
+    let h = this.wasmHosts.get(db);
+    if (!h) {
+      h = WasmHost.acquire(db, { network: this.chainNetwork() ?? "main", log: (l) => this.say("kernel", l) });
+      this.wasmHosts.set(db, h);
+    }
+    return h;
+  }
 
   /** The `skein-kernel host` process for the RocksDB database at `dir` (#158), started on first use. */
   private kernelHost(dir: string): KernelHost {
@@ -679,6 +697,8 @@ export class Router {
     // #158: the one-process kernels released (the last holder's release stops the process: its database flushed).
     await Promise.all([...this.kernelHosts.values()].map((h) => h.release()));
     this.kernelHosts.clear();
+    await Promise.all([...this.wasmHosts.values()].map((h) => h.release()));
+    this.wasmHosts.clear();
     await Promise.all(closed);
   }
 
@@ -904,9 +924,10 @@ export class Router {
     const row = this.o.db.get(handle);
     if (!row) return;
     const rocks = parseRocksSpec(storeSpec(row));
+    const sq = parseSqliteSpec(storeSpec(row));
     let tip: HostChainTip;
-    if (rocks) {
-      tip = await this.kernelHost(rocks.dir).chainHeaders(raws);
+    if (rocks || sq) {
+      tip = rocks ? await this.kernelHost(rocks.dir).chainHeaders(raws) : await this.wasmHost(sq!.db).chainHeaders(raws);
       const l = this.loaded.get(handle);
       if (!l || l.kernel.gone) return;
     } else {
@@ -988,8 +1009,10 @@ export class Router {
       },
     };
     // #158: a RocksDB set is an instance of the host's one kernel process (opened there: hydrate); else a serve process of its own.
+    // The settled split (2026-10-31): a SQLite set's machine is the wasm kernel, loaded in this process on a worker.
     const rocks = parseRocksSpec(ko.db);
-    const kernel: KernelSurface = rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
+    const sq = parseSqliteSpec(ko.db);
+    const kernel: KernelSurface = sq ? await this.wasmHost(sq.db).open(ko) : rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
     let g: { identity?: unknown } | null;
     try {
       if (!(await kernel.store.log.tip())) {
@@ -1236,6 +1259,7 @@ export class Router {
 
   /** host.db's `store` for a new instance (#96): its set in the host's LMDB environment (SKEIN_STORE), else its own file. */
   private newStore(handle: string): string {
+    if (this.o.sqliteStore) return `sqlite:${this.o.sqliteStore}`; // the settled split: the wasm kernel
     if (this.o.rocksStore) return `rocksdb:${this.o.rocksStore}`; // #158
     return this.o.lmdbStore ? `lmdb:${this.o.lmdbStore}` : join(this.o.home ?? ".", "instances", handle, "runtime.db");
   }

@@ -123,7 +123,12 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.ok(s1, "david's session: a record (head `frontdoor/sessions`)");
 
   // Kill both kernels: the next request hydrates a new process over the same store; the sessions are there.
-  const kill = async (handle: string) => { const k = (await h.router.hydrate(handle)).kernel as Kernel; k.proc.kill("SIGKILL"); await k.exited(); };
+  // A killed kernel: a serve process SIGKILLed, or (the settled split) a wasm machine's worker terminated.
+  const kill = async (handle: string) => {
+    const k = (await h.router.hydrate(handle)).kernel as Kernel & { machine?: { worker: { terminate(): Promise<number> } } };
+    if (k.machine) await k.machine.worker.terminate(); else k.proc.kill("SIGKILL");
+    await k.exited();
+  };
   await kill("david");
   await kill("alpha");
   seen.length = 0;

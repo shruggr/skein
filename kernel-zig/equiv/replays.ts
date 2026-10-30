@@ -38,6 +38,8 @@
 
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { parseSqliteSpec } from "../../src/runtime/index-store.ts";
+import { exportSet } from "../../src/host/store-sqlite.ts";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,14 +152,21 @@ for (const source of sources) {
   const lmdbSource = source.startsWith("lmdb:");
   const rocksSource = source.startsWith("rocksdb:");
   const setSource = lmdbSource || rocksSource;
+  // The settled split: a set of a wasm host's SQLite database, `sqlite:<db>#<set>` — exported as a native kernel's store
+  // file (its blocks, the host chain's, its pointers: store-sqlite.ts exportSet) and replayed natively from there: what the
+  // wasm kernel wrote, reproduced by the native reference (requirement 1).
+  const sqliteSet = source.startsWith("sqlite:");
   const src = setSource ? source : join(work, "src.db");
-  if (!setSource) {
+  if (sqliteSet) {
+    const q = parseSqliteSpec(source)!;
+    exportSet(q.db, q.set, src);
+  } else if (!setSource) {
     copyFileSync(source, src);
     if (existsSync(`${source}-wal`)) copyFileSync(`${source}-wal`, `${src}-wal`);
     const d = new DatabaseSync(src); d.exec("PRAGMA wal_checkpoint(TRUNCATE)"); d.close();
   }
   const z1 = join(work, "z1.db"), z2 = join(work, "z2.db");
-  const name = setSource ? `${source.slice(source.lastIndexOf("#") + 1)} (${lmdbSource ? "lmdb" : "rocksdb"} set)` : `${basename(dirname(source))}/${basename(source)}`;
+  const name = setSource || sqliteSet ? `${source.slice(source.lastIndexOf("#") + 1)} (${lmdbSource ? "lmdb" : rocksSource ? "rocksdb" : "wasm host's sqlite"} set)` : `${basename(dirname(source))}/${basename(source)}`;
 
   let t0 = Date.now();
   const r1 = run(["replay", src, z1]);
@@ -216,7 +225,8 @@ for (const source of sources) {
     const ds = dump(src);
     // #156: a RocksDB set reads the host chain through the host/chain set, which is not its own; the
     // replay (a fresh file) holds the blocks its `chain` events name. Compared without those.
-    const sd = dumpDiff(ds, rocksSource ? withoutHostChain(d1, z1) : d1, "source vs replay");
+    // A wasm host's set (exported with the whole host/chain set beside it): both sides without the host chain's blocks.
+    const sd = dumpDiff(sqliteSet ? withoutHostChain(ds, src) : ds, rocksSource || sqliteSet ? withoutHostChain(d1, z1) : d1, "source vs replay");
     diffs.push(...sd);
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
   }

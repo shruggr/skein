@@ -49,7 +49,7 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   await fs.mkdir(join(dir, "tree/src"), { recursive: true });
   await fs.writeFile(join(dir, "tree/src/a.txt"), "alpha\n");
   await fs.writeFile(join(dir, "tree/README"), "hello\n");
-  const w = await chatWorld(t, join(dir, "tree"));
+  const w = await chatWorld(t, join(dir, "tree"), { sqlite: false }); // a store FILE: what skein-dev and SKEIN_DB read
 
   const ix = openStoreFile(w.store, { readOnly: true }) as IndexStore;
   t.after(() => ix.close());

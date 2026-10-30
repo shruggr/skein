@@ -22,12 +22,18 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "node:worker_threads";
 import { decode, encode, fromBytes, type CID } from "../runtime/cid.ts";
-import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseLmdbSpec, parseRocksSpec, type IndexStore } from "../runtime/index-store.ts";
+import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseLmdbSpec, parseRocksSpec, parseSqliteSpec, type IndexStore } from "../runtime/index-store.ts";
+import { openHostDb, setHasState } from "./store-sqlite.ts";
 import { KernelHost } from "./kernel.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 
 /** A store, whichever backend: a file (index-store.ts openStoreFile), or an LMDB set, read only. */
 export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): SqliteStore {
+  const q = parseSqliteSpec(spec);
+  if (q) {
+    if (o.readOnly === false) throw new Error(`${spec}: a SQLite set is read only here (the kernel writes it)`);
+    return openSqliteSetStore(q.db, q.set);
+  }
   const r = parseRocksSpec(spec);
   if (r) {
     if (o.readOnly === false) throw new Error(`${spec}: a RocksDB set is read only here (the kernel writes it; the host never does)`);
@@ -41,6 +47,12 @@ export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): Sql
 
 /** Whether a store is there to read: the file; for an LMDB set, its state pointer (the kernel has committed). */
 export function storeExists(spec: string): boolean {
+  const q = parseSqliteSpec(spec);
+  if (q) {
+    if (!existsSync(q.db)) return false;
+    const db = new DatabaseSync(q.db, { readOnly: true });
+    try { return setHasState(db, q.set); } finally { db.close(); }
+  }
   const r = parseRocksSpec(spec);
   if (r) return rocksReader(r.dir).request({ op: "state", h: r.set }) != null;
   const l = parseLmdbSpec(spec);
@@ -94,6 +106,24 @@ export function openLmdbStore(dir: string, set: string): IndexStore {
   });
 }
 
+/**
+ * A set of the host's SQLite database (the settled split), read only, through the index: the same
+ * reader as a file's, with the gate the wasm host's store keeps (store-sqlite.ts) — a block is there
+ * if the set holds it, or the `host/chain` set does. Its own read-only connection, closed with it.
+ */
+export function openSqliteSetStore(path: string, set: string): IndexStore {
+  const db = openHostDb(path, { readOnly: true });
+  const get = db.prepare(`SELECT b.bytes FROM members m JOIN blocks b ON b.cid = m.cid WHERE m.cid = ?3 AND (m."set" = ?1 OR m."set" = ?2) LIMIT 1`);
+  const has = db.prepare(`SELECT 1 FROM members m WHERE m.cid = ?3 AND (m."set" = ?1 OR m."set" = ?2) LIMIT 1`);
+  const ptr = db.prepare(`SELECT cid FROM pointers WHERE "set" = ? AND name = 'state'`);
+  return indexStoreOver({
+    get: (c) => { const r = get.get(set, CHAIN_SET, c) as { bytes: Uint8Array } | undefined; return r ? new Uint8Array(r.bytes) : undefined; },
+    has: (c) => has.get(set, CHAIN_SET, c) !== undefined,
+    pointer: () => { const r = ptr.get(set) as { cid: Uint8Array } | undefined; return r ? new Uint8Array(r.cid) : undefined; },
+    close: () => db.close(),
+  });
+}
+
 /** The host chain as it stands (#156): its record's CID, tip height and hash; undefined when empty. */
 export type HostChain = { root: CID; height: number; hash: string };
 
@@ -103,6 +133,20 @@ export type HostChain = { root: CID; height: number; hash: string };
  * `host/chain` and the record it names, read directly).
  */
 export function readHostChain(spec: string): HostChain | undefined {
+  const q = parseSqliteSpec(spec);
+  if (q) {
+    // The host's database: the `host/chain` set's pointer `host/chain` (host_chain.zig), and the record it names.
+    if (!existsSync(q.db)) return undefined;
+    const db = new DatabaseSync(q.db, { readOnly: true });
+    try {
+      const p = db.prepare(`SELECT cid FROM pointers WHERE "set" = ? AND name = 'host/chain'`).get(CHAIN_SET) as { cid: Uint8Array } | undefined;
+      if (!p) return undefined;
+      const b = db.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(p.cid) as { bytes: Uint8Array } | undefined;
+      if (!b) return undefined;
+      const v = decode<{ tip?: { height: number | bigint; hash: string } }>(new Uint8Array(b.bytes));
+      return v.tip ? { root: fromBytes(new Uint8Array(p.cid)), height: Number(v.tip.height), hash: v.tip.hash } : undefined;
+    } catch { return undefined; } finally { db.close(); }
+  }
   const r = parseRocksSpec(spec);
   if (r) {
     const v = rocksReader(r.dir).request({ op: "chain" }) as { root: CID; height: number | bigint; hash: string } | null;
@@ -138,6 +182,14 @@ export function readHostChain(spec: string): HostChain | undefined {
 
 /** Every block a store holds (a SQLite file's `blocks`; an LMDB set's members), for a checkpoint's extras. */
 export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Array }> {
+  const q = parseSqliteSpec(spec);
+  if (q) {
+    const db = new DatabaseSync(q.db, { readOnly: true });
+    try {
+      for (const r of db.prepare(`SELECT m.cid, b.bytes FROM members m JOIN blocks b ON b.cid = m.cid WHERE m."set" = ?`).all(q.set) as Array<{ cid: Uint8Array; bytes: Uint8Array }>) yield { cid: fromBytes(new Uint8Array(r.cid)), bytes: new Uint8Array(r.bytes) };
+    } finally { db.close(); }
+    return;
+  }
   const r = parseRocksSpec(spec);
   if (r) {
     // #158: the set's members, listed by the kernel; each block read through it.
