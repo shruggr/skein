@@ -1,6 +1,6 @@
 {
-  "name": "skein",
-  "version": "0.1.0",
+  "name": "@dcasegr/skein",
+  "version": "0.1.1",
   "description": "A deterministic WASI machine over a content-addressed graph: the node host (it loads the wasm kernel, kernel-zig built for the web target), the client, its peers, and dev tools.",
   "type": "module",
   "bin": {
@@ -21,6 +21,9 @@
     "prepack": "npm run build && npm run build:kernel"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@1sat/templates": "^0.0.43",
     "@1sat/utils": "^0.0.42",
