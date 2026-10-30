@@ -191,7 +191,7 @@ The kernel's own filters:
 | filter | runs on | does | yields |
 |---|---|---|---|
 | `kernel.brc104` | http | the BRC-104 request check: the session (the front door's table, `frontdoor/sessions`, by the request's `yourNonce`; not past `defaults.sessionTtlMs`) and the signature over the request (SimplifiedFetchTransport's payload), through the signer. No x-bsv-auth-* headers, an unknown or expired session, a bad signature: reject 401 (a stock client shakes hands again); a malformed one: 400 | **principal**: the client's key; the session the answer is signed on |
-| `kernel.beef` | any byte string in the package (a request's; an event record's on an `event` route that names it, #164) that starts with a BEEF pattern | decoded; every BUMP checked against the chain app's headers (`chain/state`); each transaction stored once as its `bitcoin-tx` block, each BUMP and its merkle nodes; the bytes replaced by the envelope beside a link to the pointer record (#146; docs/VM.md "The door"). A BUMP that does not check, or no chain state: reject 400. No BEEF at all and no principal from an earlier filter: reject 400 "nothing to validate" (#135: signed or validated) | **blocks**: the pointer records (`door.beefs`) |
+| `kernel.beef` | any byte string in the package (a request's; an event record's on an `event` route that names it, #164) that starts with a BEEF pattern | decoded and proven by skein-sdk's verifier over the BEEF alone (`chain/src/spv.zig`: every BUMP against the chain app's headers in `chain/state`, every transaction no BUMP proves spending only transactions before it in the BEEF, scripts verified, no txid-only entry); each transaction stored once as its `bitcoin-tx` block, each BUMP and its merkle nodes; the bytes replaced by the envelope beside a link to the pointer record (#146; docs/VM.md "The door"). Any verifier error (named first in the reason), or no chain state: reject 400 `ERR_BEEF`. No BEEF at all and no principal from an earlier filter: reject 400 "nothing to validate" (#135: signed or validated) | **blocks**: the pointer records (`door.beefs`) |
 
 `kernel.brc104` then `kernel.beef`: signed, and validated if it carries a
 BEEF. `kernel.beef` alone: anyone, if the payload validates (an overlay's
@@ -647,7 +647,7 @@ else this.
 pending at the chain app), `<app>/ls_<service>` (each lookup service's own
 maps), `<app>/gossip` (peers' admits). **The chain is the chain app's**
 (§6a): the overlay links no chain tracker and holds no headers, proofs or
-settlement. A submission's BEEF is decoded at the kernel's door (#121: the submit rows name `filter: "beef"`; every BUMP checked against `chain/state` there, the handler given the pointer record's CID) and judged in the `/submit` call (SPV for the unproven against
+settlement. A submission's BEEF is decoded at the kernel's door (#121: the submit rows name `filter: "beef"`; the BEEF proven there by skein-sdk's verifier against `chain/state`, the handler given the pointer record's CID) and judged in the `/submit` call (SPV for the unproven against
 `chain/state`, read by CID; the topics on the transaction's CID), then the
 submission's thread sends the pointer record to the chain app (`{fn: "ingest", args:
 {beef}}` to the instance itself, box `chain`) and waits on its answers:

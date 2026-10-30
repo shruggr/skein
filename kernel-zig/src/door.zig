@@ -19,19 +19,24 @@
 //                   stock client shakes hands again; 400 for a malformed one).
 //   kernel.beef     every byte string in the package (an http body, a libp2p
 //                   message's body; walked through maps and arrays) that starts
-//                   with a BEEF pattern (beef.zig `patterns`) is decoded; every
-//                   BUMP is checked against the headers in the chain app's state
-//                   (the head `chain/state`, read only); each transaction is
+//                   with a BEEF pattern (beef.zig `patterns`) is decoded and
+//                   proven: skein-sdk's verifier (chain/src/spv.zig `verify`)
+//                   over the BEEF alone — every BUMP's root the header's at its
+//                   height in the chain app's state (the head `chain/state`,
+//                   read only), every transaction no BUMP proves spending only
+//                   transactions before it in the BEEF with its scripts
+//                   verified, no txid-only entry (nothing is known beside the
+//                   BEEF). Any error is a rejection (400 ERR_BEEF, the error's
+//                   name first), as is no chain state. Then each transaction is
 //                   stored as its `bitcoin-tx` block, each BUMP as the raw block
 //                   of its bytes and the merkle nodes it reveals; and the bytes
 //                   are replaced by the envelope — {form, beef: <a link to the
 //                   pointer record>, subject?, vout?} — the record the BEEF
-//                   alone, the envelope beside it (beef.zig, #146). A
-//                   BUMP that does not check is a rejection (400), as is a
-//                   package with no BEEF in it when no filter before it yielded
-//                   a principal (#135: signed or validated — "nothing to
-//                   validate"). A transaction no BUMP proves enters as unproven
-//                   (SPV and status are the chain app's).
+//                   alone (its BUMPs' `proves` the verifier's proven), the
+//                   envelope beside it (beef.zig, #146). A package with no BEEF
+//                   in it when no filter before it yielded a principal is a
+//                   rejection too (#135: signed or validated — "nothing to
+//                   validate").
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -42,6 +47,8 @@ const signer = @import("signer.zig");
 const secp = @import("secp");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
+/// skein-sdk's chain module (build.zig `chainImport`): its BEEF parser and SPV verifier.
+const chain = @import("chainlib");
 
 /// The head the chain app keeps its state under (shruggr/skein-chain; skein-sdk `chain.state`).
 pub const CHAIN_STATE = "chain/state";
@@ -138,39 +145,47 @@ const Walk = struct {
             w.headers = try Headers.open(a, w.s);
             w.opened = true;
         }
-        // Check every BUMP before anything is stored; nothing is stored unless the whole package passes (flush, #143).
+        const h = w.headers orelse {
+            try w.refuse("no chain state: the head {s} is absent (no chain app, or it has seen no header)", .{CHAIN_STATE});
+            return .{ .bytes = b };
+        };
+        // The BEEF proven, always (#121): skein-sdk's verifier over it alone — every BUMP's root the
+        // header's at its height in chain/state, every transaction no BUMP proves spending only
+        // transactions before it in the BEEF with its scripts verified, a txid-only entry never (no
+        // transaction is known beside the BEEF). Any error is the refusal, named.
+        const proven = spv(a, h, b, d) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                try w.refuse("{s}: {s}", .{ @errorName(e), spvWhy(e) });
+                return .{ .bytes = b };
+            },
+        };
+        // What block storage needs: each BUMP's nodes and the header it gives the root of (its
+        // `block`); nothing is stored unless the whole package passes (flush, #143).
         const checked = try a.alloc(beef.Checked, d.bumps.len);
         var nodes: std.ArrayList(beef.Node) = .empty;
         for (d.bumps, checked, 0..) |p, *c, i| {
-            c.* = .{ .block = null };
             const rev = beef.reveal(a, p) catch {
                 try w.refuse("BUMP {d} (height {d}): malformed, or its nodes conflict", .{ i, p.height });
+                c.* = .{ .block = null, .proves = &.{} };
                 continue;
             };
-            _ = beef.proves(a, d, i) catch {
-                try w.refuse("BUMP {d} (height {d}): a transaction marked with it is not in it", .{ i, p.height });
-                continue;
+            var ps: std.ArrayList(usize) = .empty;
+            for (d.txs, proven, 0..) |t, ok, k| if (ok) switch (t.mark) {
+                .bump => |j| if (j == i) try ps.append(a, k),
+                .none => if (beef.holds(p, t.txid, true)) try ps.append(a, k),
+                .txid => {},
             };
-            const h = w.headers orelse {
-                try w.refuse("no chain state to check the BUMPs against: the head {s} is absent (no chain app, or it has seen no header)", .{CHAIN_STATE});
-                continue;
-            };
-            const hdr = (try h.at(a, p.height)) orelse {
-                try w.refuse("BUMP {d}: no header at height {d} in {s}", .{ i, p.height, CHAIN_STATE });
-                continue;
-            };
-            if (!std.mem.eql(u8, &hdr.root, &rev.root)) {
-                try w.refuse("BUMP {d}: its merkle root is not the header's at height {d}", .{ i, p.height });
-                continue;
-            }
+            c.* = .{ .block = null, .proves = ps.items };
+            const hdr = (try h.at(a, p.height)) orelse continue;
+            if (!std.mem.eql(u8, &hdr.root, &rev.root)) continue; // a BUMP proving nothing here (the verifier's "harmless")
             c.block = hdr.cid;
             try nodes.appendSlice(a, rev.nodes);
         }
-        if (d.bumps.len == 0 and w.headers == null) try w.refuse("no chain state: the head {s} is absent (no chain app, or it has seen no header)", .{CHAIN_STATE});
         // Each block once: a block the store holds is not written again.
         for (d.txs) |t| if (t.raw) |raw| try w.once(try beef.txCid(a, t.txid), raw);
         for (d.bumps) |p| try w.once(try cidm.ofRaw(a, p.bytes), p.bytes);
-        if (w.refused == null) for (nodes.items) |n| try w.once(try beef.txCid(a, n.hash), &n.bytes);
+        for (nodes.items) |n| try w.once(try beef.txCid(a, n.hash), &n.bytes);
         const blk = try cbor.block(a, try beef.record(a, d, checked));
         try w.pending.append(a, .{ .cid = blk.cid, .bytes = blk.bytes });
         try w.beefs.append(a, blk.cid);
@@ -187,6 +202,57 @@ const Walk = struct {
         for (w.pending.items) |x| if (!(try w.s.has(x.cid))) try w.s.putBlock(x.cid, x.bytes);
     }
 };
+
+/// skein-sdk's SPV (chain/src/spv.zig `verify`) over the BEEF `b` (the kernel's parse `d` beside it):
+/// `rootAt` the merkle root of chain/state's header at a height, `knownRaw` none — the BEEF stands
+/// alone. Per transaction (wire order), whether a BUMP checked against the header proves it.
+/// error.Disagree: the SDK's parse is not the kernel's (another transaction list or marks).
+fn spv(a: std.mem.Allocator, h: *Headers, b: []const u8, d: beef.Beef) ![]bool {
+    const sb = chain.beef.parse(a, b) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidBeef => return error.InvalidBeef,
+    };
+    if (sb.entries.len != d.txs.len or sb.bumps.len != d.bumps.len) return error.Disagree;
+    for (sb.entries, d.txs) |e, t| {
+        if (!std.mem.eql(u8, &e.txid, &t.txid)) return error.Disagree;
+        const same = switch (t.mark) {
+            .none => e.format == .raw,
+            .bump => |i| e.format == .raw_with_bump and e.bump == i,
+            .txid => e.format == .txid_only,
+        };
+        if (!same) return error.Disagree;
+    }
+    const Ctx = struct {
+        h: *Headers,
+        a: std.mem.Allocator,
+        fn rootAt(ptr: *anyopaque, height: u32) anyerror!?[32]u8 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            return if (try c.h.at(c.a, height)) |x| x.root else null;
+        }
+        fn knownRaw(_: *anyopaque, _: std.mem.Allocator, _: [32]u8) anyerror!?[]const u8 {
+            return null;
+        }
+    };
+    var ctx = Ctx{ .h = h, .a = a };
+    const r = try chain.spv.verify(a, sb, .{ .ptr = &ctx, .rootAtFn = Ctx.rootAt, .knownRawFn = Ctx.knownRaw });
+    return r.proven;
+}
+
+/// What each of the verifier's errors means, for the refusal's reason (its name first).
+fn spvWhy(e: anyerror) []const u8 {
+    return switch (e) {
+        error.InvalidBeef => "skein-sdk's BEEF parser refuses it",
+        error.Disagree => "skein-sdk's parse of it is not the kernel's (the transactions or their marks differ)",
+        error.UnknownHeader => "a BUMP's height has no header in chain/state",
+        error.RootMismatch => "a BUMP's merkle root is not the header's at its height in chain/state",
+        error.NotInBump => "a transaction marked with a BUMP is not in it",
+        error.MissingInput => "a transaction no BUMP proves spends an output of a transaction not before it in the BEEF",
+        error.UnknownTxidOnly => "a txid-only entry: the BEEF stands alone at the door, no transaction is known beside it",
+        error.ScriptFailed => "an unlocking script of a transaction no BUMP proves does not verify",
+        error.NotParentsFirst => "its transactions spend in a cycle: no order puts parents first",
+        else => "the BEEF's check failed",
+    };
+}
 
 /// The rejection `kernel.beef` comes to when nothing admits the request (#135: signed or
 /// validated): no filter before it yielded a principal, and the package held no BEEF to check —

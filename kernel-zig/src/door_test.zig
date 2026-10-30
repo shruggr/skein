@@ -1,5 +1,6 @@
-// The `beef` filter (door.zig) over a store with a chain state: the BUMP
-// check against chain/state's headers, the blocks it stores (each once),
+// The `beef` filter (door.zig) over a store with a chain state: the BEEF
+// proven by skein-sdk's verifier against chain/state's headers (#121), the
+// blocks it stores (each once),
 // the package it hands back (no BEEF bytes: the envelope, linking the pointer
 // record, #146),
 // a rejection (nothing stored), and the bytes put back (restore).
@@ -123,7 +124,7 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     try std.testing.expectEqualSlices(u8, got.beefs[0], again.beefs[0]);
     try std.testing.expectEqual(before, (try ss.allCids(a)).len);
 
-    // A BUMP whose sibling is changed: its root is not the header's — rejected (#143: nothing stored, no entry names it).
+    // A BUMP whose sibling is changed: its root is not the header's — RootMismatch (#143: nothing stored, no entry names it).
     const bad_wire = try a.dupe(u8, wire);
     bad_wire[5 + 5] ^= 0xff;
     var bad = cbor.MapBuilder.init(a);
@@ -131,10 +132,10 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     const held = (try ss.allCids(a)).len;
     const r = try door.filterBeef(a, s, bad.value());
     try std.testing.expect(r.refused != null);
-    try std.testing.expect(contains(r.refused.?, "merkle root"));
-    try std.testing.expect(beef.pointerOf(r.value.get("body").?) != null);
+    try std.testing.expect(std.mem.startsWith(u8, r.refused.?, "RootMismatch"));
+    try std.testing.expectEqual(@as(usize, 0), r.beefs.len);
+    try std.testing.expectEqualSlices(u8, bad_wire, Value.bytesOf(r.value.get("body")).?);
     try std.testing.expectEqual(held, (try ss.allCids(a)).len);
-    try std.testing.expect(!(try s.has(r.beefs[0])));
 
     // A BUMP at a height chain/state has no header for: refused.
     var hi = try a.dupe(u8, wire);
@@ -142,7 +143,7 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     var h = cbor.MapBuilder.init(a);
     try h.put("body", .{ .bytes = hi });
     const r2 = try door.filterBeef(a, s, h.value());
-    try std.testing.expect(contains(r2.refused.?, "no header at height 171"));
+    try std.testing.expect(std.mem.startsWith(u8, r2.refused.?, "UnknownHeader"));
 
     // Bytes that are not a BEEF pass as they are; a byte string deeper in the package is walked too.
     var plain = cbor.MapBuilder.init(a);
@@ -222,4 +223,93 @@ test "door: an unsigned request whose filter found nothing to validate is refuse
     const one: []const []const u8 = &.{"cid"};
     const validated: door.Filtered = .{ .value = pkg.value(), .beefs = one };
     try std.testing.expect(door.nothingValidated(false, validated) == null);
+}
+
+/// A transaction: one input (`prev`:`vout`, unlocking script `unlock`), outputs of 1000 sat each with
+/// the locking scripts given, locktime 0.
+fn txOf(a: std.mem.Allocator, prev: [32]u8, vout: u8, unlock: []const u8, locks: []const []const u8) ![]u8 {
+    var o: std.ArrayList(u8) = .empty;
+    try o.appendSlice(a, &.{ 1, 0, 0, 0, 1 });
+    try o.appendSlice(a, &prev);
+    try o.appendSlice(a, &.{ vout, 0, 0, 0, @intCast(unlock.len) });
+    try o.appendSlice(a, unlock);
+    try o.appendSlice(a, &.{ 0xff, 0xff, 0xff, 0xff, @intCast(locks.len) });
+    for (locks) |l| {
+        try o.appendSlice(a, &.{ 0xe8, 3, 0, 0, 0, 0, 0, 0, @intCast(l.len) });
+        try o.appendSlice(a, l);
+    }
+    try o.appendSlice(a, &.{ 0, 0, 0, 0 });
+    return o.items;
+}
+
+test "door: the BEEF proven, always (#121) — an unproven child of a proven parent passes; no parent, a txid-only parent, a failing script are refused, nothing stored" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try SqliteStore.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer ss.close();
+    const s = ss.store();
+
+    // A parent mined at height 200 (beside a sibling in a two-transaction block): output 0 OP_TRUE,
+    // output 1 OP_FALSE. Its BUMP, and a header at 200 whose merkle root it gives.
+    const parent = try txOf(a, [_]u8{0x11} ** 32, 0, &.{}, &.{ &.{0x51}, &.{0x00} });
+    const ptxid = beef.txidOf(parent);
+    const sib = [_]u8{0x22} ** 32;
+    var bump: std.ArrayList(u8) = .empty;
+    try bump.appendSlice(a, &.{ 0xc8, 1, 2, 0, 0 }); // height 200, depth 1, two leaves: offset 0 (a hash)
+    try bump.appendSlice(a, &sib);
+    try bump.appendSlice(a, &.{ 1, 2 }); // offset 1, a client txid
+    try bump.appendSlice(a, &ptxid);
+    const header = try a.alloc(u8, 80);
+    @memset(header, 0);
+    header[0] = 1;
+    header[36..68].* = cidm.dblSha256(&(sib ++ ptxid));
+    try chainState(a, s, 200, header);
+
+    // The child spends output 0 (OP_TRUE: an empty unlocking script verifies); unmined.
+    const child = try txOf(a, ptxid, 0, &.{}, &.{&.{0x51}});
+    const v1 = try std.mem.concat(a, u8, &.{ &.{ 1, 0, 0xbe, 0xef, 1 }, bump.items, &.{2}, parent, &.{ 1, 0 }, child, &.{0} });
+    var pkg = cbor.MapBuilder.init(a);
+    try pkg.put("body", .{ .bytes = v1 });
+    const got = try door.filterBeef(a, s, pkg.value());
+    try std.testing.expectEqual(@as(?[]const u8, null), got.refused);
+    const rec = (try s.get(a, got.beefs[0])).?;
+    // marks [0, null]; the BUMP proves the parent only (the verifier's proven: [true, false]).
+    const marks = rec.get("marks").?.array;
+    try std.testing.expectEqual(@as(?i128, 0), Value.intOf(marks[0]));
+    try std.testing.expect(marks[1] == .null);
+    const b0 = rec.get("bumps").?.array[0];
+    const proves = b0.get("proves").?.array;
+    try std.testing.expectEqual(@as(usize, 1), proves.len);
+    try std.testing.expectEqual(@as(?i128, 0), Value.intOf(proves[0]));
+    try std.testing.expectEqualSlices(u8, try cidm.ofBitcoin(a, cidm.BITCOIN_BLOCK, header), Value.cidOf(b0.get("block")).?);
+    try std.testing.expect(try s.has(try beef.txCid(a, beef.txidOf(child))));
+    try std.testing.expectEqualSlices(u8, v1, Value.bytesOf((try door.restore(a, s, got.value, got.beefs)).get("body")).?);
+
+    const held = (try ss.allCids(a)).len;
+    const refusedWith = struct {
+        fn f(al: std.mem.Allocator, st: Store, bytes: []const u8, name: []const u8) !void {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("body", .{ .bytes = bytes });
+            const r = try door.filterBeef(al, st, m.value());
+            try std.testing.expect(r.refused != null);
+            if (!std.mem.startsWith(u8, r.refused.?, name)) {
+                std.debug.print("refused: {s}, expected {s}\n", .{ r.refused.?, name });
+                return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqual(@as(usize, 0), r.beefs.len);
+        }
+    }.f;
+    // Another child, alone: no BUMP, its parent not in the BEEF (Atomic BEEF) — MissingInput.
+    const lone = try txOf(a, ptxid, 0, &.{}, &.{&.{ 0x51, 0x51 }});
+    const ltxid = beef.txidOf(lone);
+    try refusedWith(a, s, try std.mem.concat(a, u8, &.{ &.{ 1, 1, 1, 1 }, &ltxid, &.{ 1, 0, 0xbe, 0xef, 0, 1 }, lone, &.{0} }), "MissingInput");
+    // The parent as a txid-only entry (V2): UnknownTxidOnly (nothing is known beside the BEEF).
+    try refusedWith(a, s, try std.mem.concat(a, u8, &.{ &.{ 2, 0, 0xbe, 0xef, 0, 2, 2 }, &ptxid, &.{0}, lone }), "UnknownTxidOnly");
+    // A child spending output 1 (OP_FALSE): ScriptFailed.
+    const fails = try txOf(a, ptxid, 1, &.{}, &.{&.{0x51}});
+    try refusedWith(a, s, try std.mem.concat(a, u8, &.{ &.{ 1, 0, 0xbe, 0xef, 1 }, bump.items, &.{2}, parent, &.{ 1, 0 }, fails, &.{0} }), "ScriptFailed");
+    // Nothing of the refused ones was stored.
+    try std.testing.expectEqual(held, (try ss.allCids(a)).len);
+    try std.testing.expect(!(try s.has(try beef.txCid(a, ltxid))));
 }

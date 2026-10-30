@@ -17,9 +17,10 @@
 // the browser build.
 // The codecs (cid, cbor, mst, secp) are the SDK's (shruggr/skein-sdk, a Zig
 // package dependency by URL+hash in build.zig.zon, #75; with -Dwallet=false).
-// The native build also takes the SDK's `chain` module (as `chainlib`: the
-// host chain's tracker, host_chain.zig, #156), which brings bsvz (the SDK's
-// lazy dependency, fetched by URL+hash); the browser build does not. scripts/sdk-local.sh overrides it with
+// Both builds also take the SDK's `chain` module (as `chainlib`: the door's
+// BEEF parser and SPV verifier, door.zig, #121; natively also the host
+// chain's tracker, host_chain.zig, #156), which brings bsvz (the SDK's lazy
+// dependency, fetched by URL+hash). scripts/sdk-local.sh overrides it with
 // a sibling checkout for development.
 //
 // The browser build (issue #35): `zig build web`, or any wasm target
@@ -35,6 +36,7 @@ pub fn build(b: *std.Build) void {
     const web_target = if (target.result.cpu.arch.isWasm()) target else b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
     const web = webKernel(b, web_target, optimize);
     sdkImports(b, web.artifact.root_module, web_target, optimize);
+    chainImport(b, web.artifact.root_module, web_target, optimize);
     b.step("web", "the browser build: zig-out/web/skein-kernel.wasm").dependOn(&web.step);
     if (target.result.cpu.arch.isWasm()) {
         b.getInstallStep().dependOn(&web.step);
@@ -105,9 +107,9 @@ fn sdkImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTar
     for ([_][]const u8{ "cid", "cbor", "mst", "secp" }) |name| m.addImport(name, sdk.module(name));
 }
 
-/// The SDK's chain module (#156: the host chain's tracker, host_chain.zig), natively only — as
-/// `chainlib`. It brings bsvz (the SDK's lazy dependency) into the native build; the browser build
-/// has neither.
+/// The SDK's chain module, as `chainlib`: the door's BEEF verifier (door.zig, #121) in both builds,
+/// and natively the host chain's tracker (host_chain.zig, #156). It brings bsvz (the SDK's lazy
+/// dependency).
 fn chainImport(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const sdk = b.dependency("skein_sdk", .{ .target = target, .optimize = optimize, .wallet = false });
     m.addImport("chainlib", sdk.module("chain"));

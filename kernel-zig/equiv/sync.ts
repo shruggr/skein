@@ -14,11 +14,12 @@
 //     to its overlay's receive row as from b — until the anchors are equal;
 //   - a third host c from genesis: an empty locator, the whole range, equal
 //     anchors;
-//   - a want (#112): b holds a token p (unmined, under tm_demo, gossip off for
-//     it) that no other host has; a transfer spending p is posted to a without
-//     p in its BEEF: a's overlay pauses it and wants p of the topic's peers, a
-//     host asks them, b's engine answers (fn sync, on its libp2p row) with the chain state's BEEF, a
-//     hands it to the receive row, and the transfer is admitted.
+//   - a BEEF that does not stand alone (#121: "BEEF MUST be proven ALWAYS"):
+//     b holds a token p (unmined, under tm_demo, gossip off for it) that no
+//     other host has; a transfer spending p posted to a without p in its BEEF
+//     is refused at a's door (400 ERR_BEEF MissingInput: skein-sdk's verifier
+//     over the BEEF alone), nothing written — neither the transfer nor p
+//     reaches a (the overlay's want is never reached).
 //
 // Each instance's store then replays to itself exactly.
 //
@@ -295,13 +296,12 @@ try {
   await x.sign();
   const lone = new Beef();
   lone.mergeRawTx(x.toBinary());
-  void submit("a", lone.toBinaryAtomic(x.id("hex")), "tm_sync").catch(() => undefined); // it waits on the pause: its answer is not the point
-  const viaWant = await until("the transfer admitted on a", async () => (await admittedIn(storeOf("a"), x.id("hex"))) || undefined, 60_000).catch(() => false);
-  check(viaWant, `the transfer, posted to a without p, admitted once p came through a want (${x.id("hex").slice(0, 8)}…)`);
-  check((await holdsOn("a", p.id("hex"))).via === "admitted", `a holds p now (${(await holdsOn("a", p.id("hex"))).via})`);
-  // a's admission gossips the transfer: b takes it, and c (which lacks p) pauses it and wants p of the topic's peers.
-  const everywhere = await until("b and c admit the transfer", async () => ((await admittedIn(storeOf("b"), x.id("hex"))) && (await admittedIn(storeOf("c"), x.id("hex")))) || undefined, 60_000).catch(() => false);
-  check(everywhere && (await holdsOn("c", p.id("hex"))).via === "admitted", "the transfer gossiped from a: b admits it, c admits it once p comes through its own want");
+  // #121: the BEEF proven at the door, always — p is not in it and nothing is known beside it: refused.
+  const rx = await submit("a", lone.toBinaryAtomic(x.id("hex")), "tm_sync");
+  const rxText = await rx.text();
+  check(rx.status === 400 && /MissingInput/.test(rxText), `the transfer, posted to a without p: refused at the door, 400 MissingInput (${rx.status} ${rxText.slice(0, 160)})`);
+  await new Promise((r) => setTimeout(r, 3000));
+  check(!(await admittedIn(storeOf("a"), x.id("hex"))) && !(await holdsOn("a", x.id("hex"))).via && !(await holdsOn("a", p.id("hex"))).via, "a holds neither the transfer nor p (nothing written, no want)");
   await quiet();
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

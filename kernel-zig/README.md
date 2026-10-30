@@ -72,8 +72,9 @@ commands with `mise exec --` or activate mise).
   cache, bloom filter, `flush_wal`); not checked against 10.1.3's header. Not
   in the browser build.
 - **skein-sdk** (by tag URL and hash in `build.zig.zon`): the codecs (`cid`,
-  `cbor`, `mst`, `secp`) and, in the native build only, the `chain` module
-  (as `chainlib`: the host chain's tracker, #156), which brings bsvz (the
+  `cbor`, `mst`, `secp`) and the `chain` module (as `chainlib`: the door's
+  BEEF parser and SPV verifier, #121, in both builds; natively also the host
+  chain's tracker, #156), which brings bsvz (the
   SDK's lazy dependency, fetched by URL and hash). `-Dwallet=false`: the
   wallet module is never built.
 
@@ -784,8 +785,12 @@ The `beef` filter (`door.zig`, `beef.zig`): every byte string in the
 package that starts with a BEEF pattern (`beef.patterns`: V1 `0100beef`,
 V2 `0200beef`, Atomic `01010101`+txid, Outpoint `16a7beef`+txid+vout,
 Subject `5709beef`+txid+BEEF V2) is
-decoded; every BUMP checked against the headers in `chain/state` (read
-only; none: refused, "no chain state"); each transaction stored once as its
+decoded and proven by skein-sdk's verifier (`chain/src/spv.zig`
+`verify`, over the BEEF alone: every BUMP's root the header's in
+`chain/state`, read only — none: refused, "no chain state"; every
+transaction no BUMP proves spending only transactions before it in the
+BEEF, its scripts verified; no txid-only entry; any error refused 400
+`ERR_BEEF`, the error's name first); each transaction stored once as its
 `bitcoin-tx` block, each BUMP as the raw block of its bytes and its merkle
 nodes; the bytes replaced by the envelope `{form, beef: <pointer record>,
 subject?, vout?}` (#146), the pointer record the BEEF alone

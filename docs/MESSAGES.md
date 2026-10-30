@@ -468,9 +468,10 @@ has the shapes).
   libp2p message, `p2p` in `libp2p:<topic>`, below) — or a record the door
   validates on the way in (#121, #164): when the box's `event` route names
   `kernel.beef`, the host sends the record beside the entry and the door
-  decodes and checks its BEEFs as it does a request's; the entry names the
+  decodes and proves its BEEFs as it does a request's (skein-sdk's
+  verifier, docs/VM.md "The door"); the entry names the
   record as the door rewrote it (the envelope where the bytes were), and a
-  BUMP that does not check, or no BEEF, writes no entry (the host's
+  BEEF that does not prove, or no BEEF, writes no entry (the host's
   `admitEvent` throws the door's answer). An event goes to the
   thread awaiting its `subject`, else to the first `mailbox` row **from
   anyone** whose address is the entry's box (or `*`); none: recorded,
@@ -1539,7 +1540,8 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   4: topic}` — GossipSub's StrictSign. A bad one is turned away (`reject`;
   #143: no entry), and nothing runs. Then the route's filters (an overlay's
   `<topic>` route: `kernel.beef`, the body's BEEF decoded and replaced by its
-  pointer record; a bad BUMP is `reject`; no chain state to check it by,
+  pointer record; a BEEF that does not prove (skein-sdk's verifier: a bad
+  BUMP, an input not in the BEEF, a script that fails, a txid-only entry) is `reject`; no chain state to check it by,
   `ignore`).
   Then the handler (the route's program and fn, an in-VM call) gets the
   request plus `key` (the 33-byte key out of `from`) and `request` (the

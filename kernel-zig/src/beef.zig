@@ -43,12 +43,14 @@
 //                                            txid-only entry (format 2)
 //    bumps: [{height: int,                   the block height the BUMP names
 //             path: <raw CID>,               the BUMP (BRC-74) exactly as received
-//             block: <bitcoin-block CID>,    the header in chain/state it was checked against
+//             block: <bitcoin-block CID>,    the header in chain/state whose root it gives
 //             proves: [<tx index>, …]}]}     the transactions it proves (marked with it, or flagged
-//                                            as a client txid in its level 0)
+//                                            as a client txid in its level 0): skein-sdk's
+//                                            verifier's proven (door.zig)
 //
-// A transaction no BUMP proves enters as unproven: the door checks BUMPs
-// only (the chain app does SPV and status).
+// This parser is structure only (what block storage and the lossless
+// envelope need): the door proves every BEEF with skein-sdk's verifier
+// (chain/src/spv.zig) before anything is stored (door.zig).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -203,8 +205,8 @@ pub fn txidOf(raw: []const u8) [32]u8 {
 }
 
 /// Decode a BEEF (any form of `patterns`): the transactions in wire order, the BUMPs with their
-/// exact bytes. Structure only: no headers, no scripts (the door checks the BUMPs, the chain app
-/// the rest).
+/// exact bytes. Structure only: no headers, no scripts (the door proves the BEEF with skein-sdk's
+/// verifier, door.zig).
 pub fn parse(a: std.mem.Allocator, bytes: []const u8) Error!Beef {
     const p = recognize(bytes) orelse return error.Malformed;
     var r = Reader{ .b = bytes, .i = if (p.head > 0) 4 else 0 };
@@ -357,8 +359,10 @@ pub fn blockCid(a: std.mem.Allocator, hash: [32]u8) ![]u8 {
     return cidm.create(a, cidm.BITCOIN_BLOCK, cidm.DBL_SHA2_256, &hash);
 }
 
-/// What the door checked each BUMP against: the header's CID (null: nothing to check it by).
-pub const Checked = struct { block: ?[]const u8 };
+/// Per BUMP, what the door found: the header whose merkle root it gives (null: none in chain/state),
+/// and the transactions it proves — those skein-sdk's verifier found proven by it (door.zig); null:
+/// the ones it holds as the wire marks them (`proves`, structure only: the encoder's tests).
+pub const Checked = struct { block: ?[]const u8, proves: ?[]const usize = null };
 
 /// The pointer record for a decoded BEEF (the header's shape): the BEEF alone, no envelope.
 /// `checked` is per BUMP.
@@ -374,14 +378,14 @@ pub fn record(a: std.mem.Allocator, b: Beef, checked: []const Checked) !Value {
         };
     }
     const bumps = try a.alloc(Value, b.bumps.len);
-    for (b.bumps, bumps, 0..) |p, *v, i| {
-        const ps = try proves(a, b, i);
+    for (b.bumps, bumps, checked, 0..) |p, *v, ck, i| {
+        const ps = ck.proves orelse try proves(a, b, i);
         const pv = try a.alloc(Value, ps.len);
         for (ps, pv) |k, *x| x.* = cbor.int(k);
         var m = cbor.MapBuilder.init(a);
         try m.put("height", cbor.int(p.height));
         try m.put("path", cbor.cidv(try cidm.ofRaw(a, p.bytes)));
-        try m.put("block", if (checked[i].block) |c| cbor.cidv(c) else .null);
+        try m.put("block", if (ck.block) |c| cbor.cidv(c) else .null);
         try m.put("proves", .{ .array = pv });
         v.* = m.value();
     }

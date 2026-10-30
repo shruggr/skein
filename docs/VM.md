@@ -738,12 +738,11 @@ state and writing nothing but blocks:
 signature; its standing is that the record validates itself. An `event`
 route may name one filter, `kernel.beef` (no other: not `kernel.brc104`,
 which needs a session, nor an app's), and then the door runs on the event
-record as on a request's package: its BEEFs decoded, their BUMPs checked
-against `chain/state`, the blocks stored, the bytes replaced by the
-envelope. The host sends the record beside the entry (the `admit` frame's
+record as on a request's package: its BEEFs decoded and proven (below),
+the blocks stored, the bytes replaced by the envelope. The host sends the record beside the entry (the `admit` frame's
 `event`), so the bytes are never stored as received; the entry — the same
 shape as any event's, `{kind: "log", prev, n, time, event, box}`, no `door`
-— names the record as the door handed it back. A BUMP that does not check,
+— names the record as the door handed it back. A BEEF that does not prove,
 or no BEEF in the record (no principal: "nothing to validate"): no entry,
 and the host's `admitEvent` throws the door's answer. An event route that
 names no filter (headers, proofs, `chain`, `:ack`): no door, as before.
@@ -783,13 +782,18 @@ txid + vout, Subject BEEF `57 09 be ef` + txid + a BEEF V2 —
 BRC-62/96/95/158/233). For each:
 
 - it decodes the BEEF; one that does not decode is a refusal;
-- it checks **every BUMP** against the headers in the chain app's state
-  (`chain/state`, read only: the header at the BUMP's height, its merkle
-  root): a BUMP that does not give that root, a height with no header, a
-  transaction marked with a BUMP that does not hold it — a refusal; no
+- it **proves** it (#121: "BEEF MUST be proven ALWAYS"): skein-sdk's
+  verifier (`chain/src/spv.zig` `verify`, what the chain app's ingest and
+  the wallet call) over the BEEF alone — every BUMP's merkle root the
+  header's at its height in the chain app's state (`chain/state`, read
+  only), every transaction no BUMP proves spending only outputs of
+  transactions before it in the BEEF with every unlocking script verified,
+  and no txid-only entry (nothing is known beside the BEEF: no store, no
+  chain-held lookup). Any error is a refusal, 400 `ERR_BEEF`, its reason the
+  error's name first (`UnknownHeader`, `RootMismatch`, `NotInBump`,
+  `MissingInput`, `UnknownTxidOnly`, `ScriptFailed`, `NotParentsFirst`); no
   `chain/state` (no chain app, or one that has seen no header) — a refusal,
-  saying so. A transaction no BUMP proves enters as unproven (SPV and status
-  are the chain app's);
+  saying so;
 - it stores each transaction **once** as its `bitcoin-tx` block (CID =
   txid), each BUMP as the raw block of its bytes and the merkle nodes it
   reveals (a block the store holds is not written again);
@@ -806,11 +810,11 @@ record    {kind: "beef", version: 1 | 2,
  txs: [<bitcoin-tx CID>, …],            every transaction in wire order (a V2 txid-only one too)
  marks: [<bump index> | null | "txid"], per transaction: what the wire says beside it
  bumps: [{height, path: <raw CID: the BUMP as received>,
-          block: <bitcoin-block CID: the header checked> | null, proves: [<tx index>]}]}
+          block: <bitcoin-block CID: the header whose root it gives> | null,
+          proves: [<tx index>: proven by it, the verifier's]}]}
 ```
 
-A rejection still stores what decoded (#143: no entry names it — the
-blocks are content-addressed and harmless), but no merkle nodes. With no
+A rejection stores nothing (#143: no entry names it). With no
 BEEF in the package and no principal from a filter before it, `kernel.beef`
 rejects: "nothing to validate" (#135: signed or validated). The encoder — the
 exact wire bytes from the envelope, the record and its blocks — is `beef.zig`
