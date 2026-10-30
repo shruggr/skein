@@ -148,9 +148,9 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   assert.equal((await new RawBox(h.owner, `${h.base}/@david`).list("chat")).length, 0, "nothing reached the owner");
 });
 
-test("the loop: a `message` whose delivery fails transiently is tried again on a deadline (two 503s, then delivered); a permanent failure is an error result at once", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("the loop (#157): a `message` whose recipient's server is down (an unsigned 503) is not answered — the delivery rests, and goes again at the instance's next start (delivered); no deadline, no attempts", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
-  const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "300" } } });
+  const h = await testHost(t, { infer: inferId });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
   const alpha = h.instance("alpha");
@@ -161,17 +161,15 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
 
   // alpha in beta's address book (the admin's), so beta can answer it.
   await new RawBox(h.owner, `${h.base}/@beta`).send(h.db.get("beta")!.identity!, "peers", { op: "add", key: alpha, url: h.origin("alpha") });
-  // beta's messagebox as a flaky remote: of the chats sent to it, the first two answer 503, the fourth 400.
+  // beta's messagebox as a remote that is down: the first chat sent to it answers 503, unsigned (something in front of it).
   const statuses: number[] = [];
   const dispatch = h.router.dispatch.bind(h.router);
   h.router.dispatch = async (req) => {
     const chat = req.method === "POST" && req.url === `${h.origin("beta")}/sendMessage` && (() => { try { return (dagCbor.decode(req.body) as { message?: { messageBox?: string } }).message?.messageBox === "chat"; } catch { return false; } })();
     if (chat) {
-      const n = statuses.length;
-      if (n < 2 || n === 3) {
-        const status = n < 2 ? 503 : 400;
-        statuses.push(status);
-        return { status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({ status: "error", description: n < 2 ? "down for a moment" : "no" })) };
+      if (statuses.length === 0) {
+        statuses.push(503);
+        return { status: 503, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({ status: "error", description: "down for a moment" })) };
       }
       const r = await dispatch(req);
       statuses.push(r.status);
@@ -184,7 +182,6 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
   const script = [
     answer({ content: "", tool_calls: [messageCall("c1", "@beta@localhost", "ping")] }),
     answer({ content: "pong from beta" }),
-    answer({ content: "", tool_calls: [messageCall("c2", "@beta@localhost", "again")] }),
     answer({ content: "done" }),
   ];
   const f = (async (_u: string, init: { body: string }) => { asked.push(JSON.parse(init.body)); return script.shift() ?? new Response("no more", { status: 500 }); }) as unknown as typeof fetch;
@@ -199,19 +196,23 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
     },
   });
 
-  await new RawBox(h.owner, `${h.base}/@alpha`).send(alpha, "chat", { text: "ask beta twice" });
+  await new RawBox(h.owner, `${h.base}/@alpha`).send(alpha, "chat", { text: "ask beta" });
   const mine = new RawBox(h.owner, `${h.base}/@david`);
+  await until("the first delivery", async () => { await peer.poll(); return statuses.length >= 1 || undefined; }, 60_000);
+  await h.router.settled();
+  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver → ") && l.includes("HTTP 503, unsigned: nothing to admit")), "the unanswered delivery's log line says why");
+  assert.deepEqual(statuses, [503], "no attempt but the first while alpha runs: no deadline, no retry");
+  // alpha's next start: the kernel offers the awaited intention again; the host carries it once more.
+  const l = h.router.loaded.get("alpha")!;
+  h.router.loaded.delete("alpha");
+  await l.kernel.stop();
+  await h.router.hydrate("alpha");
   const final = await until("alpha's answer", async () => {
     await peer.poll();
     return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text === "done");
   }, 60_000);
   assert.equal(final.sender, alpha);
-  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver chat for ") && l.endsWith(`→ ${h.origin("beta")}/sendMessage (local): HTTP 503 down for a moment`)), "a failed delivery's log line says why");
-  assert.deepEqual(statuses, [503, 503, 200, 400], "c1: two transient failures, then delivered on the third attempt; c2: one permanent failure, no retry");
+  assert.deepEqual(statuses, [503, 200], "delivered at the restart's re-offer");
   const tools = (i: number) => (asked[i]!.messages as Json[]).filter((m) => m.role === "tool") as Array<{ content: string }>;
-  assert.equal(tools(2).at(-1)!.content, "pong from beta", "the retried message's result is beta's reply");
-  const c2 = tools(3).at(-1)!.content;
-  assert.match(c2, /could not deliver to @beta@localhost/);
-  assert.match(c2, /HTTP 400/);
-  assert.doesNotMatch(c2, /attempts/, "a permanent failure is not retried");
+  assert.equal(tools(2).at(-1)!.content, "pong from beta", "the message's result is beta's reply");
 });

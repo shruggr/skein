@@ -13,7 +13,7 @@ is **one way out**: a step `emit`s a message to a key the address book
 names, or an event, and ends waiting, and the answer is an entry. **A skein
 receives mail only where it verifies the sender itself** (#126 step 4): a
 BRC-104 session to its own front door (`/sendMessage`, which another
-instance reaches with `authfetch`), or libp2p — the delivery session is the
+instance reaches through its host, the `deliver` intention, #157), or libp2p — the delivery session is the
 sender's proof, and a mail record carries no signature of its sender.
 Anything inside a body that must mean something on its own signs itself (a
 claim, a payment). A remote messagebox is a wallet's, never a skein's.
@@ -22,9 +22,10 @@ claim, a payment). A remote messagebox is a wallet's, never a skein's.
 to its waker or its HTTP proxy, whose signed answer comes back); a program
 has no reason to know who those services are. **The signature boundary is
 absolute**: every request out is signed by the instance's key and
-recorded, every answer in is signed and admitted. The one direct HTTP path
-is the kernel's `authfetch` (BRC-104, signed and checked in the kernel, a
-recorded call); mail to a peer's messagebox goes that way. **Broadcast out
+recorded, every answer in is signed and admitted. Mail to a peer's
+messagebox is the `deliver` intention (#157): the host carries the BRC-104
+exchange, and the server's signed answer is the entry (a step never waits on
+the outside world; the in-step `authfetch` is gone). **Broadcast out
 and proof in are unauthenticated, self-validating events** through
 specific wiring (an optional status provider reports statuses as signed
 messages); a **beacon** is an event the libp2p node beats on its own clock;
@@ -516,12 +517,9 @@ routed boxes keep no list: admission is the acknowledgement, the log is
 the queue. **A mailbox exists only where a row to the messagebox
 exists**: a message no row sends the messagebox is refused (`403`).
 
-Delivery out is the messagebox's delivery thread, which `emit`s (#70: no
-step has an http import). The messagebox program record's own `description`
-(kernel-zig/src/programs.zig, images/default/bin/messagebox.json) still says
-"`send` delivers over http (recorded)", from before #70: the description is
-part of the record and so of its CID, and is left until the messagebox is
-re-pinned for another reason.
+Delivery out is the messagebox's delivery thread, which emits the
+`deliver` intention (#70, #157: no step has an http import; the host carries
+it — "Delivery to a messagebox", below).
 
 ## Mailbox instances
 
@@ -644,8 +642,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   step ‖ the emit's place in the step): two threads asking the same thing
   send two messages. **Unsigned** (#126 step 4): no signer call; the
   transport that carries it proves its sender — the instance's own BRC-104
-  session with the recipient's front door (its delivery thread's
-  `authfetch`), libp2p (the peer), or, for a provider on its host, the host
+  session with the recipient's front door (the host's, carrying its
+  delivery thread's `deliver`), libp2p (the peer), or, for a provider on its host, the host
   itself, which carries what its own kernel hands it. The recipient keeps
   the same record. A log written before signed every emit (`[2, "metanet
   handles envelope"]`, key `send`, counterparty anyone, over the record
@@ -727,7 +725,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 | input | when |
 |---|---|
 | `reply: {message, body, box, sender, replyTo}` | a message from the recipient whose body names `replyTo: <the CID>` (`sk.replyOf`; `get` the body) |
-| `undelivered: {message, error}` | a `mailbox` recipient's delivery thread gave up: no answer can come |
+| `undelivered: {message, error}` | a `mailbox` recipient's delivery thread ended errored (the server's signed answer was not a 200): no answer can come |
 | `woke: true` | the waker's answer to the step's `deadline` (#126: its signed message naming the `deadline` event) |
 | `event: {event, box, subject}` | an event about a record the step awaits (#65: a transaction's proof, awaiting its CID) |
 | `message: {message, body, box, sender, subject}` | a subscribed sender's message about a record the step awaits (#65: a status provider's status) |
@@ -783,7 +781,7 @@ The head `peers` — who the instance can reach, and how:
 
 | transport | address | how a message goes out |
 |---|---|---|
-| `mailbox` | the recipient's messagebox URL | the instance's own **delivery thread** (below): a BRC-104 POST with the kernel's `authfetch` |
+| `mailbox` | the recipient's messagebox URL | the instance's own **delivery thread** (below): its `deliver` intention, a BRC-104 POST the host carries (#157) |
 | `libp2p` | a peer ID, or `topic:<name>` | the host's libp2p node: the package `{message, body}` (dag-cbor) as one frame on `/skein/message/1.0.0`, or published on the topic; the libp2p provider answers in box `sent`: `{replyTo, sent: true}` or `{replyTo, seqno, recipients}`, or `{replyTo, error}` |
 | `local` | a provider's name on this host | handed to the provider |
 
@@ -1102,45 +1100,57 @@ to the key it is given or the one its host serves (`sk.peerAt(a, "local",
 mailbox's `cron` box and answers, and ticks, at the sender's messagebox
 (its own address book's), on a BRC-104 session of its own.
 
-### Delivery to a messagebox: authfetch (#70, #126)
+### Delivery to a messagebox: the `deliver` intention (#70, #157)
 
-A `mailbox` recipient's message is delivered by the instance itself: the
-kernel launches the messagebox program as the message's **delivery thread**
-(origin `{program: messagebox, args: {message, transport: "mailbox"}}`),
-which POSTs it with the kernel's **`authfetch`** (#126,
-`programs/messagebox/deliver.zig`):
+A `mailbox` recipient's message is delivered by the instance's own
+**delivery thread** — the kernel launches the messagebox program for it
+(origin `{program: messagebox, args: {message, transport: "mailbox"}}`) —
+and carried by the **host** (`programs/messagebox/deliver.zig`; docs/VM.md,
+"Delivery to a messagebox"):
 
 ```
-step 1   authfetch(<url>, {POST /sendMessage, content-type application/cbor, BRC-231 CBOR {message:
-         {recipient, messageBox, body, subject?, nonce}} — the BRC-33 message, and the emit's own
-         subject and nonce; no signature});
-         200 → finished {delivered: <cid>, url, attempt} (the recipient keeps the same record under
-         the same CID; another CID in the answer fails the delivery)
+step 1   emit {event: "deliver", transport: "mailbox", url, message: <the mail record>} — the kernel adds
+         `nonce` (sha256(thread ‖ step ‖ place), 32 bytes) — and await it; the step ends
+host     BRC-103's handshake at <url>/.well-known/auth (its session, per base URL), then
+         POST <url>/sendMessage, BRC-231 CBOR {message: {recipient, messageBox, body, subject?, nonce}}
+         — the BRC-33 message, and the emit's own subject and nonce; no signature — as a BRC-104
+         request signed with the instance's key (request id = the event's nonce)
+answer   an event entry, box `deliver`: {kind: "delivery", replyTo: <the event>, peer, nonce,
+         yourNonce, signature, status, headers?, body} — the door verifies the server's signature
+         over it and refuses anything else, writing nothing
+step 2   200 and the same CID in the answer → finished {delivered: <cid>, url}; any other status →
+         errored ("Message Box send failed with HTTP <status>: …"), and the thread awaiting the
+         message steps with `undelivered: {message, error}`
 ```
 
-- **The session** is the kernel's (docs/VM.md "authfetch"): per server base
-  URL, in memory, the BRC-103 handshake made when there is none and again
-  when the server answers 401; the request signed and the answer checked
-  through the signer; the exchange a recorded call on the step. `server` is
-  the identity that answered the handshake — the recipient's own, or a
-  mailbox instance's for a mailbox kept for someone. Sending never tells
-  the peer who we are beyond the session (no claim, no registration, #40).
+- **The session is the host's** (#157: a step never waits on the outside
+  world), kept per base URL, made again when the server answers 401;
+  `server` is the identity that answered the handshake — the recipient's
+  own, or a mailbox instance's for a mailbox kept for someone. The request
+  is signed by the instance's key through the host's key holder (the same
+  signer the kernel asks), outside any step. Sending never tells the peer
+  who we are beyond the session (no claim, no registration, #40).
 - **The session is the proof** (#126 step 4): the recipient's front door
   verifies the BRC-104 request and keeps the record with `sender` the
   session's identity; nothing in the message is signed. A mailbox instance
   keeping mail for a wallet keeps it for that wallet to read; it is never
   forwarded into a skein ("Mailbox instances", above).
-- **Failure.** `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
-  `defaults.sendRetryMs` later (default 30 000; a `deadline`) up to
-  `defaults.sendAttempts` attempts in all (default 3); anything else, or
-  the last attempt, ends the delivery thread errored, and the thread
-  awaiting the message is stepped with `undelivered: {message, error}`.
+- **The answer is the proof back**: the server's BRC-104 signature over it
+  (status, signed headers, body, for the request id the instance made),
+  checked at the door through the signer; a forged or misdirected answer is
+  refused there and nothing is written.
+- **No answer at all** (the server unreachable, no handshake): nothing is
+  admitted; the thread rests, and the kernel offers the intention again at
+  every start (once per start, no deadline, no attempts). A host-signed
+  failure report is not built.
 - **Two instances on one host** deliver to each other through the router's
-  in-process path (authfetch's bytes go there too).
+  in-process path (the host's request goes there too).
+- A log written before #157 delivered with the in-step `authfetch` (tried
+  again `defaults.sendRetryMs` later, `defaults.sendAttempts` attempts):
+  it replays from its recorded calls.
 
-A program that speaks another request/response protocol to a BRC-104
-server uses `authfetch` the same way; a plain HTTP request is a `fetch`
-intention (the host's proxy, signed by the instance's key).
+A plain HTTP request is a `fetch` intention (the host's proxy, signed by the
+instance's key).
 
 ### Resolving a handle
 
@@ -1708,7 +1718,7 @@ message {to: "@handle@domain", text}
   text}`; one that rests on its answer takes it as the next user turn.
 - **Undeliverable.** A send whose delivery thread gives up — a key neither
   the address book nor the resolve program's records name (#87: at once), or
-  after its retries — steps the loop with `undelivered`. Either way a `message` becomes
+  a server's signed answer that is not a 200 (#157) — steps the loop with `undelivered`. Either way a `message` becomes
   an error result for the model (`{of, role: "tool", call, to, error}`) and the
   loop goes on; its `infer`, an `error` turn answered to the opener as an
   inference error; its answer to the opener, an `error` turn, and the thread

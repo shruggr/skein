@@ -107,7 +107,7 @@ test "entropy stream and the fixed CIDs" {
     const a = arena.allocator();
     const f = try fixtures(a);
     const e = f.object.get("entropy").?.object;
-    var r = syscalls.Entropy.init(try cidm.parse(a, e.get("entry").?.string), try cidm.parse(a, e.get("thread").?.string));
+    var r = syscalls.Entropy.seeded("", try cidm.parse(a, e.get("entry").?.string), try cidm.parse(a, e.get("thread").?.string));
     var buf: [100]u8 = undefined;
     r.fill(buf[0..37]);
     r.fill(buf[37..]);

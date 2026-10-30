@@ -67,7 +67,8 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   const log = await collect(ix.log.entries());
   assert.ok(log[0]!.entry.genesis, "entry 0 is the genesis");
   // #68: every package a transport carried in is an entry — the handshakes, the import, the chat, the inference answers.
-  assert.ok(log.slice(1).every((e) => ["http", "local"].includes(String((e.entry as unknown as { transport?: string }).transport))), "every other entry is a package as received: an HTTP request, or a provider's answer (#70)");
+  // #157: and a delivery's answer, the server's signed answer to a `deliver` intention: an event in box `deliver`.
+  assert.ok(log.slice(1).every((e) => ["http", "local"].includes(String((e.entry as unknown as { transport?: string }).transport)) || (e.entry as unknown as { box?: string }).box === "deliver"), "every other entry is a package as received: an HTTP request, a provider's answer (#70), or a delivery's signed answer (#157)");
   assert.ok(log.length >= 7, `the handshakes, the import, the chat and the inference answers (${log.length})`);
   assert.equal(fmt((await ix.log.tip())!), fmt(st.log!));
   assert.equal(fmt(log.at(-1)!.cid), fmt(st.log!));
@@ -78,7 +79,8 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   // #70: each message to a mailbox recipient has its delivery thread (the messagebox, args {message, transport: "mailbox"}).
   const isDelivery = async (th: CID) => ((await ix.get(th)) as { args?: { transport?: unknown } }).args?.transport === "mailbox";
   const requests = (await Promise.all(all.map(isRequest))).filter(Boolean).length;
-  assert.equal(requests, log.length - 1, "one front-door thread per request");
+  const packages = log.slice(1).filter((e) => (e.entry as unknown as { box?: string }).box !== "deliver").length; // #157: a delivery's answer steps its thread, launches none
+  assert.equal(requests, packages, "one front-door thread per request");
   const threads = (await Promise.all(all.map(async (th) => (await isRequest(th) || await isDelivery(th) ? undefined : th)))).filter((x): x is CID => !!x);
   assert.ok((await Promise.all(all.map(isDelivery))).filter(Boolean).length >= 2, "the infer and the answer each delivered by a thread of its own");
   const names = await Promise.all(threads.map(async (th) => ((await ix.get(((await ix.get(th)) as { program: CID }).program)) as unknown as { name: string }).name));

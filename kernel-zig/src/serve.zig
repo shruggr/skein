@@ -25,7 +25,6 @@ const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const replay = @import("replay.zig");
-const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const AnyStore = @import("any_store.zig").AnyStore;
 const host_chain = @import("host_chain.zig");
@@ -378,12 +377,6 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    /// One HTTP exchange for authfetch (#126): the router moves the bytes —
-    /// {method, url, headers, body, timeoutMs?} → {status, headers, body} | {error}.
-    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
-        const r = try ctx(p).request(a, "http", try authfetch.httpRequestValue(a, req));
-        return authfetch.httpResultOf(a, r);
-    }
 
     /// A message (#70) or an event (#65) for the host to carry out, told once
     /// its step is committed: {message: <the signed mail record | the event
@@ -473,11 +466,9 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
         .ctx = &server,
         .wallet = Server.pWallet,
-        .http = Server.pHttp,
         .emit = Server.pEmit,
         .on_answer = Server.pOnAnswer,
         .say = Server.pSay,
-        .io = io,
     });
 
     var fds_buf: [2]std.posix.pollfd = undefined;

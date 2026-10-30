@@ -55,7 +55,6 @@ const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const replay = @import("replay.zig");
-const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const rocks = @import("rocksdb_store.zig");
 const any = @import("any_store.zig");
@@ -595,11 +594,9 @@ const Host = struct {
         t.rt = try scheduler.Runtime.init(h.gpa, st.store(), h.runner, .{
             .ctx = t,
             .wallet = pWallet,
-            .http = pHttp,
             .emit = pEmit,
             .on_answer = pOnAnswer,
             .say = pSay,
-            .io = h.io,
         });
         h.q.lock();
         t.state = .open;
@@ -865,11 +862,6 @@ const Host = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
-        const t = inst(p);
-        const r = try t.host.request(a, t.handle, "http", try authfetch.httpRequestValue(a, req));
-        return authfetch.httpResultOf(a, r);
-    }
 
     fn pEmit(p: *anyopaque, o: scheduler.Outgoing) void {
         const t = inst(p);

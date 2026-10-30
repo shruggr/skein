@@ -30,15 +30,17 @@
 // it (`emitted`), and when the step has ended without error the message goes
 // out by the recipient's transport — a `local` provider or the host's libp2p
 // node (handed to the host, Peers.emit, once the state is committed), or a
-// `mailbox` over BRC-103/104, which the instance does itself: the mailbox
-// transport's middleware (the messagebox program) is launched as the
-// message's delivery thread. A key the address book does not name goes to
+// `mailbox`: the mailbox transport's middleware (the messagebox program) is
+// launched as the message's delivery thread, which emits the `deliver`
+// intention (#157) that the host carries over BRC-103/104. A key the address book does not name goes to
 // that middleware too (#87): it reads the resolve program's record of it. The answer comes back as an entry that steps
 // the thread awaiting it. An event is addressed to no one: the host's wiring carries it — among
 // them the intentions (#126: a `deadline`, a `fetch`), which the host answers with a signed
-// message carrying the instance's own signed request for them (intentionAnswer). Nothing outside
-// is asked mid-step but the signer and, through `authfetch` (#126, authfetch.zig), a BRC-104
-// server — both recorded calls, served from the witness on replay.
+// message carrying the instance's own signed request for them (intentionAnswer); a `deliver`
+// (#157) is answered by an entry that stands on its own at the door (the remote peer's BRC-104
+// signature, door.zig deliveryAnswer). Nothing outside is asked mid-step but the signer, a
+// recorded call served from the witness on replay (#157: a step never waits on the outside
+// world; the in-step `authfetch` is gone — a log that made one replays it from its witness).
 //
 // A shell thread that sleeps is not parked mid-instance (there is no JSPI
 // here). The run is abandoned at the sleep, having written its `waiting`
@@ -187,12 +189,6 @@ pub const Peers = struct {
     /// runs: the host holding the client's connection answers it now.
     on_answer: ?*const fn (ctx: *anyopaque, thread: []const u8, entry: []const u8) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
-    /// The host's Io (native): a call's real randomness. The browser build has none.
-    io: ?std.Io = null,
-    /// One HTTP exchange (#126): what `authfetch` hands the runtime — bytes only; the kernel
-    /// signs and verifies. Absent (replay; a host with no HTTP): authfetch is served from the
-    /// witness, or fails.
-    http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult = null,
 };
 
 /// A log entry the processing of which drives a step or a shell.
@@ -232,8 +228,6 @@ pub const Runtime = struct {
     /// #130: what the entry being processed used — its steps' fuel and the billable events — for
     /// the meter (billingAfter); reset as each entry starts.
     usage: billing.Usage = .{},
-    /// authfetch's BRC-103 sessions (#126), per server base URL, in memory only.
-    sessions: authfetch.Sessions,
 
     pub fn init(gpa: std.mem.Allocator, s: Store, r: *runner.Runner, peers: Peers) !*Runtime {
         const rt = try gpa.create(Runtime);
@@ -246,7 +240,6 @@ pub const Runtime = struct {
             .live = std.StringHashMap(void).init(gpa),
             .stepping = std.StringHashMap(void).init(gpa),
             .outbox = std.array_list.Managed(Outgoing).init(gpa),
-            .sessions = authfetch.Sessions.init(gpa),
         };
         rt.has_wallet = peers.wallet != null;
         return rt;
@@ -487,7 +480,6 @@ pub const Runtime = struct {
         rt.outbox.deinit();
         rt.live.deinit();
         rt.stepping.deinit();
-        rt.sessions.deinit();
         rt.life.deinit();
         rt.gpa.destroy(rt);
     }
@@ -768,6 +760,12 @@ pub const Runtime = struct {
         const rows = (try dispatch.current(a, rt.store)) orelse &.{};
         const route = dispatch.forEvent(rows, box);
         const filters: []const Value = if (route) |r| r.filters else &.{};
+        // #157: a delivery's answer stands on its own, wherever it arrives: the server's signature
+        // over it, for this instance's own `deliver` event. Anything else: nothing written.
+        if (doorm.isDeliveryAnswer(record)) if (try rt.deliveryProblem(a, record)) |why| {
+            rt.say("door: a delivery's answer in {s} turned away: {s}", .{ box, why });
+            return .{ .answered = reject(400, "ERR_DELIVERY", why) };
+        };
         if (filters.len == 0) {
             if (sent) _ = try rt.store.put(a, record);
             return .{ .entry = entry };
@@ -783,6 +781,16 @@ pub const Runtime = struct {
         for (entry.map) |x| try m.put(x.key, x.value);
         try m.put("event", cbor.cidv(try rt.store.put(a, ch.request)));
         return .{ .entry = m.value() };
+    }
+
+    /// Why a delivery's answer (#157, door.zig deliveryAnswer) is not one to this instance's own
+    /// `deliver` event, or null.
+    fn deliveryProblem(rt: *Runtime, a: std.mem.Allocator, record: Value) !?[]const u8 {
+        const ev = Value.cidOf(record.get("replyTo")) orelse return "no `replyTo`";
+        const d = rt.store.getOpt(a, ev) orelse return "`replyTo` names no record this instance holds";
+        if (!isEvent(d) or !std.mem.eql(u8, Value.str(d.get("event")).?, "deliver")) return "`replyTo` is not a deliver event";
+        const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
+        return doorm.deliveryAnswer(a, w, record, Value.bytesOf(d.get("nonce")) orelse "");
     }
 
     fn namesFilter(r: dispatch.Row, name: []const u8) bool {
@@ -1994,7 +2002,8 @@ pub const Runtime = struct {
         var info = cbor.MapBuilder.init(a);
         try info.put("event", cbor.cidv(ev));
         try info.put("box", cbor.string(box));
-        if (rec) |r| if (Value.cidOf(r.get("subject"))) |subj| {
+        // #157: a delivery's answer is about the deliver event it names (`replyTo`).
+        if (rec) |r| if (Value.cidOf(r.get(if (doorm.isDeliveryAnswer(r)) "replyTo" else "subject"))) |subj| {
             try info.put("subject", cbor.cidv(subj));
             for (try rt.store.awaiting(a, subj)) |t| {
                 const tip = rt.tipOf(a, t) catch null orelse continue;
@@ -2436,7 +2445,7 @@ pub const Runtime = struct {
             .n = n,
             .at = at,
             .input = try cbor.encode(a, input.value()),
-            .random = syscalls.Entropy.init(ctx.cid, origin),
+            .random = syscalls.Entropy.seeded("", ctx.cid, origin),
             .calls = calls,
             .launched = .init(a),
             .kept = .init(a),
@@ -2835,6 +2844,12 @@ pub const Runtime = struct {
             if (fetchProblem(m)) |why| return imp.failFmt("emit: fetch: {s}", .{why});
             fields = try ownedBy(a, m, st.origin, st.n);
         }
+        if (std.mem.eql(u8, name, "deliver")) {
+            // #157: a message to a mailbox recipient, carried by the host over BRC-103/104; the
+            // answer is an entry that stands on its own at the door (door.zig deliveryAnswer).
+            if (deliverProblem(st, m)) |why| return imp.failFmt("emit: deliver: {s}", .{why});
+            fields = try withNonce(a, m, emitNonce(st));
+        }
         // #130: a payment is the kernel's pay step's alone — the wallet program the kernel launched
         // on its own (no program can launch one: a launched thread is launched by a thread), as the
         // thread's own program (not a callee). Anything else naming it is refused.
@@ -2865,6 +2880,43 @@ pub const Runtime = struct {
         for ([_][]const u8{ "timeoutMs", "maxBytes" }) |k| if (m.get(k)) |x| if (x != .null and x != .int) return "timeoutMs and maxBytes are integers";
         if (m.get("thread") != null or m.get("step") != null) return "`thread` and `step` are the kernel's to set";
         return null;
+    }
+
+    /// Why a `deliver` intention (#157) is not one: {event: "deliver", transport: "mailbox", url:
+    /// <the recipient's messagebox URL>, message: <a mail record this instance holds and sent>};
+    /// `nonce` is the kernel's.
+    fn deliverProblem(st: *StepState, m: Value) ?[]const u8 {
+        const want = "want {event: \"deliver\", transport: \"mailbox\", url, message: <a mail record's CID>}";
+        if (!std.mem.eql(u8, Value.str(m.get("transport")) orelse "", "mailbox")) return want;
+        const url = Value.str(m.get("url")) orelse return want;
+        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) return "the url is not http(s)";
+        const mc = Value.cidOf(m.get("message")) orelse return want;
+        const rec = st.rt.store.getOpt(st.a, mc) orelse return "the message is not in the store";
+        if (!logm.isMail(rec)) return "the message is not a mail record";
+        if (!std.mem.eql(u8, Value.bytesOf(rec.get("sender")).?, st.rt.identity())) return "the message is not this instance's";
+        if (m.get("nonce") != null) return "`nonce` is the kernel's to set";
+        return null;
+    }
+
+    /// An emit's own 32 bytes (#157, as a message's nonce is made, VM.md): sha256(thread ‖ step ‖ the
+    /// emit's place in it) — unique and replayable; it travels in the clear.
+    fn emitNonce(st: *StepState) [32]u8 {
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update(st.origin);
+        var nb: [16]u8 = undefined;
+        std.mem.writeInt(i64, nb[0..8], st.n, .big);
+        std.mem.writeInt(u64, nb[8..16], st.emitted.items.len, .big);
+        h.update(&nb);
+        var d: [32]u8 = undefined;
+        h.final(&d);
+        return d;
+    }
+
+    fn withNonce(a: std.mem.Allocator, m: Value, nonce: [32]u8) !Value {
+        var b = cbor.MapBuilder.init(a);
+        for (m.map) |e| try b.put(e.key, e.value);
+        try b.put("nonce", .{ .bytes = try a.dupe(u8, &nonce) });
+        return b.value();
     }
 
     /// An intention's fields with the thread and step that recorded it: its own record (two
@@ -2992,22 +3044,16 @@ pub const Runtime = struct {
         return out;
     }
 
-    /// `authfetch` (#126, authfetch.zig): a BRC-104 request from this instance, a recorded call.
-    /// The record, at (thread, step, i) as a signer call's: {kind: "authfetch", thread, step, i,
-    /// request: bytes (the import's dag-cbor), answer?: bytes (dag-cbor {status, headers, body}),
-    /// error?: text, calls: [{request, result}] (every signer frame it made: the session's nonce,
-    /// the request's signature, the checks of the server's)}. Replay serves the answer (or the
-    /// failure) from the witness and asks no one; a differing request is a divergence. A request
-    /// that is not one fails here, recording nothing.
+    /// `authfetch` (#126) is gone (#157: a step never waits on the outside world; a mailbox
+    /// delivery is the `deliver` intention, the host carrying the BRC-104 exchange). The import
+    /// stays for the modules built against it: a log that made one replays it from its witness —
+    /// the record at (thread, step, i), {kind: "authfetch", thread, step, i, request: bytes,
+    /// answer?: bytes, error?: text, calls}, read, never written (a differing request is a
+    /// divergence). Anywhere else it fails, recording nothing.
     fn hAuthfetch(imp: *program.Imports, req: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
         const rt = st.rt;
         const a = st.a;
-        const parsed = authfetch.parse(a, req) catch return error.OutOfMemory;
-        const r = switch (parsed) {
-            .ok => |x| x,
-            .bad => |why| return imp.failWith(why),
-        };
         const i = st.calls.items.len;
         const w: ?Value = if (rt.witness) |wi| (wi.find(a, st.origin, st.n, i) catch null) else null;
         if (w) |x| {
@@ -3019,65 +3065,8 @@ pub const Runtime = struct {
             if (Value.bytesOf(x.get("answer"))) |ans| return ans;
             return imp.failWith(Value.str(x.get("error")) orelse "authfetch: failed");
         }
-        if (!rt.has_wallet or rt.peers.http == null) {
-            if (rt.witness != null or !rt.has_wallet) return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (authfetch): no wallet and no recorded answer", .{ short(a, st.origin), st.n, i }));
-            return imp.failWith("authfetch: this host carries no HTTP");
-        }
-        var ac = AuthCall{ .rt = rt, .calls = std.array_list.Managed(Value).init(a), .at = st.at };
-        const env = authfetch.Env{ .ctx = &ac, .identity = rt.identity(), .wallet = AuthCall.wallet, .http = AuthCall.http, .random = AuthCall.random };
-        const out = authfetch.run(a, env, &rt.sessions, r) catch |err| {
-            if (err == error.PeerGone) return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (authfetch): the router is gone", .{ short(a, st.origin), st.n, i }));
-            if (err == error.OutOfMemory) return error.OutOfMemory;
-            return imp.failFmt("authfetch: {s}", .{@errorName(err)});
-        };
-        var rec = cbor.MapBuilder.init(a);
-        try rec.put("kind", cbor.string("authfetch"));
-        try rec.put("thread", cbor.cidv(st.origin));
-        try rec.put("step", cbor.int(st.n));
-        try rec.put("i", cbor.int(i));
-        try rec.put("request", .{ .bytes = req });
-        var answer: ?[]const u8 = null;
-        switch (out) {
-            .answer => |x| {
-                answer = cbor.encode(a, try authfetch.answerValue(a, x)) catch return error.OutOfMemory;
-                try rec.put("answer", .{ .bytes = answer.? });
-            },
-            .failed => |why| try rec.put("error", cbor.string(why)),
-        }
-        try rec.put("calls", .{ .array = ac.calls.items });
-        try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
-        rt.usage.authfetch +|= 1; // #130: a billable event
-        return answer orelse imp.failWith(out.failed);
+        return imp.failWith("authfetch: gone (#157): a step reaches the outside world only by its emits (a mailbox delivery is the `deliver` intention)");
     }
-
-    /// authfetch's world for one call: the signer (each frame kept for the record), the
-    /// runtime's HTTP, real randomness (a nonce no one can guess; replay never asks for it).
-    const AuthCall = struct {
-        rt: *Runtime,
-        calls: std.array_list.Managed(Value),
-        at: i64,
-
-        fn of(ctx: *anyopaque) *AuthCall {
-            return @ptrCast(@alignCast(ctx));
-        }
-        fn wallet(ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]const u8 {
-            const c = of(ctx);
-            const res = try c.rt.peers.wallet.?(c.rt.peers.ctx, a, frame);
-            var m = cbor.MapBuilder.init(a);
-            try m.put("request", .{ .bytes = frame });
-            try m.put("result", .{ .bytes = res });
-            try c.calls.append(m.value());
-            return res;
-        }
-        fn http(ctx: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
-            const c = of(ctx);
-            return c.rt.peers.http.?(c.rt.peers.ctx, a, req);
-        }
-        fn random(ctx: *anyopaque, out: []u8) void {
-            const c = of(ctx);
-            realRandom(c.rt.peers.io, out, c.at);
-        }
-    };
 
     /// A signer call's answer, recorded (#67: the one call a step makes out
     /// mid-step): the witness's on replay (a differing request is a
@@ -3229,29 +3218,36 @@ pub const Runtime = struct {
     /// no writes, nothing sent (a call's imports). The blocks it put come back with its answer (the
     /// door keeps those its `pass` names).
     pub fn callFiltered(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, at: i64, request: Value) !FilterResult {
-        const seed = try cbor.cidOfValue(a, request);
+        const req = try cbor.cidOfValue(a, request);
         try rt.loadGenesis();
-        const r = try rt.callIn(a, rt.store, rt.genesis, rt.cursor, prog, func, arg, null, at, seed);
+        const r = try rt.callIn(a, rt.store, rt.genesis, rt.cursor, prog, func, arg, null, at, req);
         return .{ .ok = r.result.ok, .result = r.result.result, .err = r.result.err, .fuel = r.result.fuel, .puts = r.puts };
     }
 
-    /// A call (#40), or (`seed`: #143) a filter's in the deterministic profile.
-    fn callIn(rt: *Runtime, a: std.mem.Allocator, store: Store, genesis: ?Value, cursor: i64, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64, seed_of: ?[]const u8) !struct { result: CallResult, puts: std.StringHashMap([]const u8) } {
+    /// A call (#40), or (`request`: the request record's CID, #143) a filter's in the deterministic
+    /// profile. Its random is the one rule (syscalls.Entropy.seeded): the head is the log's tip as
+    /// the call reads it; a filter's input is the request record's CID and it runs in (program,
+    /// fn); a call's input is (program, fn, arg, caller) and nothing else.
+    fn callIn(rt: *Runtime, a: std.mem.Allocator, store: Store, genesis: ?Value, cursor: i64, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64, request: ?[]const u8) !struct { result: CallResult, puts: std.StringHashMap([]const u8) } {
         var cs = CallState{ .rt = rt, .store = store, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = undefined, .random = undefined };
         if (genesis == null) return .{ .result = .{ .ok = false, .err = "call: no genesis", .fuel = 0 }, .puts = cs.overlay };
         var meter = engine.Meter.init(callFuelLimit(genesis));
         cs.meter = &meter;
-        if (seed_of) |sd| {
-            cs.random = syscalls.Entropy.init(sd, prog);
+        const head: []const u8 = (try store.logTip(a)) orelse "";
+        if (request) |rc| {
+            cs.random = syscalls.Entropy.seeded(head, rc, try std.mem.concat(a, u8, &.{ prog, func }));
         } else {
-            var seed: [32]u8 = undefined;
-            realRandom(rt.peers.io, &seed, now);
-            cs.random = syscalls.Entropy.init(&seed, prog);
+            var in = cbor.MapBuilder.init(a);
+            try in.put("program", cbor.cidv(prog));
+            try in.put("fn", cbor.string(func));
+            try in.put("arg", .{ .bytes = arg });
+            try in.put("caller", if (caller) |c| Value{ .bytes = c } else .null);
+            cs.random = syscalls.Entropy.seeded(head, try cbor.encode(a, in.value()), "");
         }
         cs.clock.drive(@as(i128, now) * 1_000_000);
         cs.clock.meter = &meter;
         var ctx = try rt.callContext(a, store, genesis, func, arg, caller, now);
-        if (seed_of == null) {
+        if (request == null) {
             var pend = std.array_list.Managed(Value).init(a);
             for (try store.logFrom(a, cursor)) |c| try pend.append(cbor.cidv(c));
             try ctx.put("pending", .{ .array = pend.items });
@@ -3447,7 +3443,7 @@ pub const Runtime = struct {
             t.ctx_input = c.cid;
             t.ctx_at = s.ms();
             t.clock.drive(s.ns());
-            t.random = syscalls.Entropy.init(c.cid, t.origin);
+            t.random = syscalls.Entropy.seeded("", c.cid, t.origin);
         }
     };
 
@@ -3766,16 +3762,3 @@ fn lastLine(a: std.mem.Allocator, stderr: []const u8, code: i32) []const u8 {
     return if (t.len > 0) t else std.fmt.allocPrint(a, "exit {d}", .{code}) catch "failed";
 }
 
-/// Real randomness for a call's stream: a call needs no determinism, and a
-/// nonce it makes (a front door's session nonce) must not be guessable.
-fn realRandom(io: ?std.Io, out: []u8, now: i64) void {
-    if (engine.web) {
-        // The browser build runs no front door; the call's time and a counter will do there.
-        const S = struct {
-            var n: u32 = 0;
-        };
-        S.n +%= 1;
-        var sm = syscalls.SplitMix{ .s = @as(u32, @truncate(@as(u64, @bitCast(now)))) ^ (S.n *% 0x9e3779b9) };
-        sm.fill(out);
-    } else (io orelse @panic("realRandom: no Io")).random(out);
-}

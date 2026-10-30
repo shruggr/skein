@@ -30,8 +30,10 @@
 //            and every event, whatever its name, to the event streams (#148,
 //            events.ts: a page's subscription to its app's events) too
 //
-// (A `mailbox` recipient's message never comes here: the instance delivers
-// it itself, with the kernel's authfetch, #126.)
+//            `deliver` (#157) — a `mailbox` recipient's message, from its
+//            delivery thread: the host carries the BRC-103/104 exchange
+//            (deliver.ts) and admits the server's signed answer, which stands on
+//            its own at the door (`deliver` below)
 //
 // Every answer is a signed message from the provider to the instance — the
 // record an `emit` makes, {kind: "mail", op: "put", sender, recipient, box,
@@ -216,6 +218,12 @@ export interface ProvidersOptions {
    * handed over after its step's commit as `topicEvent`'s are. Absent: logged as ignored.
    */
   appEvent?(handle: string, record: Record<string, unknown>): void;
+  /**
+   * #157: a `deliver` event from `handle` (its CID and record): the host carries it (deliver.ts) and
+   * admits the answer → whether an answer was admitted. Handed over again at the instance's next
+   * start while the thread awaits it: carried again then only if no answer came. Absent: ignored.
+   */
+  deliver?(handle: string, event: CID, record: Record<string, unknown>): Promise<boolean>;
   /** #130: a `payment` event from `handle` — its pay step's (the kernel lets no other step emit one). Absent: no billing (ignored). */
   payment?(handle: string, record: Record<string, unknown>): void;
   /** The libp2p host, when there is one: the instance's node does the work. */
@@ -329,6 +337,17 @@ export class Providers {
       this.taken.add(k);
       const p = this.intention(handle, out.address, m).catch((e) => { this.taken.delete(k); this.say(handle, `provider: ${out.address}: ${(e as Error).message}`); });
       this.track(p);
+      return;
+    }
+    if (out.address === "deliver" && m.kind === "event" && m.event === "deliver") {
+      // #157: a mailbox delivery the host carries; its answer an entry.
+      if (!this.o.deliver) { this.say(handle, "deliver: this host carries no deliveries: ignored"); return; }
+      const id = encode(m).cid;
+      const k = `${handle} ${id}`;
+      if (this.taken.has(k)) return;
+      this.taken.add(k);
+      // No answer (or a failure): forgotten, so the instance's next start (its re-offer) carries it again — once per start.
+      this.track(this.o.deliver(handle, id, m).then((ok) => { if (!ok) this.taken.delete(k); }, (e) => { this.taken.delete(k); this.say(handle, `provider: deliver: ${(e as Error).message}`); }));
       return;
     }
     if (out.address === "payment" && m.kind === "event" && m.event === "payment") {

@@ -13,6 +13,7 @@
 //   skein_result() → ptr                            the last call's result bytes
 //   skein_args() → ptr                              16 × i64: a host call's arguments / result
 //   skein_open(store) → 0 | < 0                       open the shim's store `store` and a runtime over it
+//   skein_open_chain(store, net, n) → 0 | < 0         this module as the host's chain holder (#156) over store `store`
 //   skein_modules() → n                             dag-cbor [{name, cid}]: the pinned modules and files to install
 //   skein_put_block(cid, n, bytes, n) → 0 | < 0     a block, checked against its CID (install, import)
 //   skein_get_block(cid, n) → n | -1                a block's bytes
@@ -21,7 +22,9 @@
 //   skein_drain() → n                               process everything admitted (the step loop)
 //   skein_state() → n                               dag-cbor {state, log, cursor}
 //   skein_call(frame, n) → n                        any other serve op: {op, v} → {ok} | {error, rejected?}
-//                                                   (tip get put append programs head genesis boxes byEnvelope)
+//                                                   (tip get put has putblock restore append programs head genesis
+//                                                   dispatch boxes byEnvelope answer; a chain holder's headers
+//                                                   chain-import chain)
 //   skein_replay(src, dst) → n                      `skein-kernel replay`: the source store's log into dst, no
 //                                                   wallet; the same JSON report
 //   skein_host_call(instance, index, nargs, memlen) → 0 | 1   a program's import (engine_v8.zig)
@@ -38,9 +41,11 @@ const logm = @import("log.zig");
 const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
-const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const engine_v8 = @import("engine_v8.zig");
+const dispatchm = @import("dispatch.zig");
+const host_chain = @import("host_chain.zig");
+const chainlib = @import("chainlib");
 const WebStore = @import("web_store.zig").WebStore;
 const Value = cbor.Value;
 
@@ -117,6 +122,46 @@ export fn skein_host_call(inst: i32, index: u32, nargs: u32, mem_len: u32) i32 {
     return engine_v8.hostCall(inst, index, nargs, mem_len);
 }
 
+// ------------------------------------------------------------------ the host chain (#156)
+
+/// The host chain's holder, when this module was opened as one (skein_open_chain): the header chain
+/// a host keeps once for all its instances, in a store of its own (the host's `host/chain` set).
+var hc: ?*host_chain.HostChain = null;
+
+/// skein_open_chain(store, network, n) → 0 | < 0: this module as the host's chain holder over the
+/// shim's store `store` (no instance, no runtime); `network` main | test | regtest. Its ops then are
+/// skein_call's `headers {raws}`, `chain-import {root, store}` (an image's chain/headers, whose
+/// blocks the shim's store `store` holds — an instance's set) and `chain`, as serve.zig's frames.
+export fn skein_open_chain(store: u32, net: [*]const u8, net_len: usize) i32 {
+    if (rt != null or hc != null) return fail("already open");
+    const network = chainlib.chain.Network.parse(net[0..net_len]) orelse return fail("the network is main, test or regtest");
+    const s = WebStore.bare(gpa, store) catch |err| return fail(@errorName(err));
+    const h = gpa.create(host_chain.HostChain) catch |err| return fail(@errorName(err));
+    h.* = host_chain.HostChain.init(s.backend(), network, std.Io.failing);
+    hc = h;
+    return 0;
+}
+
+const SetReader = struct {
+    id: u32,
+    fn get(ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8 {
+        const r: *SetReader = @ptrCast(@alignCast(ctx));
+        return WebStore.readBlock(r.id, a, cid);
+    }
+};
+
+fn chainOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
+    const h = hc orelse return reply(a, null, try std.fmt.allocPrint(a, "{s}: this module holds no host chain (skein_open_chain)", .{op}), null);
+    var rd: SetReader = undefined;
+    var from: ?host_chain.Reader = null;
+    if (std.mem.eql(u8, op, "chain-import")) if (Value.intOf(v.get("store"))) |id| {
+        rd = .{ .id = @intCast(id) };
+        from = .{ .ctx = &rd, .get = SetReader.get };
+    };
+    const ans = host_chain.run(h, a, op, v, from) catch |err| return reply(a, null, try std.fmt.allocPrint(a, "{s}: {s}", .{ op, @errorName(err) }), null);
+    return reply(a, ans, null, null);
+}
+
 // ------------------------------------------------------------------ the instance
 
 var the_runner: ?*runner.Runner = null;
@@ -147,7 +192,6 @@ export fn skein_open(store: u32) i32 {
     rt = scheduler.Runtime.init(gpa, s.store(), r, .{
         .ctx = @ptrCast(s),
         .wallet = pWallet,
-        .http = pHttp,
         .emit = pEmit,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
@@ -173,10 +217,6 @@ fn pWallet(_: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
     return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
 }
 
-/// One HTTP exchange for authfetch (#126): the page moves the bytes (serve's `http`, the same shape).
-fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
-    return authfetch.httpResultOf(a, try request(a, "http", try authfetch.httpRequestValue(a, req)));
-}
 
 /// A message for the page to carry out (#70): serve's `emit` notice, the same shape.
 fn pEmit(_: *anyopaque, o: scheduler.Outgoing) void {
@@ -289,8 +329,34 @@ export fn skein_state() i32 {
 
 fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     const eq = std.mem.eql;
+    if (host_chain.isOp(op)) return chainOp(a, op, v);
     const r = rt orelse return reply(a, null, "no store open", null);
     const s = r.store;
+    if (eq(u8, op, "has")) {
+        const c = Value.cidOf(v) orelse return error.BadRequest;
+        return reply(a, .{ .bool = try s.has(c) }, null, null);
+    }
+    if (eq(u8, op, "putblock")) {
+        // The loader's pre-fill (issue #4): a block minted elsewhere, hash-checked against its CID (serve's).
+        const c = Value.cidOf(v.get("cid")) orelse return error.BadRequest;
+        const b = Value.bytesOf(v.get("bytes")) orelse return error.BadRequest;
+        if (!cidm.hashMatches(c, b)) return reply(a, null, try std.fmt.allocPrint(a, "putblock: bytes do not hash to {s}", .{try cidm.format(a, c)}), null);
+        try s.putBlock(c, b);
+        return reply(a, cbor.cidv(c), null, null);
+    }
+    if (eq(u8, op, "restore")) {
+        const c = Value.cidOf(v) orelse return error.BadRequest;
+        try ws.?.restore(c);
+        return reply(a, cbor.cidv(c), null, null);
+    }
+    if (eq(u8, op, "dispatch")) {
+        // The dispatch table as it stands (#77), serve's: {tip, rows}.
+        const rows = (try dispatchm.current(a, s)) orelse &.{};
+        var m = cbor.MapBuilder.init(a);
+        try m.put("tip", cbor.optCid(try s.chainTip(a, try dispatchm.origin(a))) orelse .null);
+        try m.put("rows", try dispatchm.valueOf(a, rows));
+        return reply(a, m.value(), null, null);
+    }
     if (eq(u8, op, "tip")) return reply(a, cbor.optCid(try s.logTip(a)) orelse .null, null, null);
     if (eq(u8, op, "get")) {
         const c = Value.cidOf(v) orelse return error.BadRequest;

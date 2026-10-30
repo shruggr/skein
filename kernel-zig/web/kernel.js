@@ -9,8 +9,8 @@
 //                  write their memory and their fuel counter
 //   skein_store    stores by id: key→bytes + named pointers (MemoryStore here,
 //                  IdbStore in store.js), with begin/commit/rollback
-//   skein_peer     the host: request(op, v) answered synchronously (wallet,
-//                  resolve, http — a Worker blocks on a SharedArrayBuffer while
+//   skein_peer     the host: request(op, v) answered synchronously (wallet:
+//                  the signer — a Worker blocks on a SharedArrayBuffer while
 //                  the page answers: worker.js), notify(op, v) (emit: a
 //                  message or an event to carry out; say, panic)
 //

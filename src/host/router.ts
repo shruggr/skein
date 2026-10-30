@@ -142,6 +142,7 @@ import { beaconEvent, beaconsOf, DEFAULT_LISTEN, emittedEvents, foldBeacons, fol
 import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
+import { Deliverer } from "./deliver.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import { allocation, BILLING_HEAD, closedBy, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
@@ -390,6 +391,8 @@ export class Router {
   readonly events: EventStreams;
   /** The certifier (#100, #113): signs the BRC-169 handle certificates, for the host skein's onboarding app (the `certifier` provider). */
   readonly certifier: ProtoWallet;
+  /** #157: the `deliver` intention's carrier (BRC-103/104, the sessions the host keeps). */
+  readonly deliverer: Deliverer;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   /** #156: the host chain record each running instance was last sent (a `chain` event), by handle; cleared at each start. */
@@ -513,6 +516,7 @@ export class Router {
     // The certifier key is the certifier provider's (signer.ts certifierKey: providerKey("certifier")).
     this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
+    this.deliverer = new Deliverer({ http: (req, from) => this.http(req, from), log: (s, l) => this.say(s, l) });
     this.events = new EventStreams({
       open: (h) => { const row = this.o.db.get(h); return row && storeExists(storeSpec(row)) ? openStoreFile(storeSpec(row), { readOnly: true }) : undefined; },
     });
@@ -526,6 +530,7 @@ export class Router {
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
       ...(o.appEvent ? { appEvent: o.appEvent } : {}),
       emitted: (h, rec, place) => this.events.emitted(h, rec, place),
+      deliver: (h, id, rec) => this.deliver(h, id, rec),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
       manager: {
@@ -710,6 +715,27 @@ export class Router {
       this.settle(l);
       return e;
     });
+  }
+
+  /**
+   * #157: a `deliver` intention from `handle`, carried (deliver.ts: BRC-103/104 with the instance's
+   * key) and its answer admitted in box `deliver` — it stands on its own at the door (the server's
+   * signature). No answer: nothing admitted, the thread rests (offered again at its next start).
+   */
+  async deliver(handle: string, id: CID, rec: Record<string, unknown>): Promise<boolean> {
+    const l = await this.hydrate(handle);
+    const mail = await l.kernel.store.get(rec.message as CID) as MailRecord;
+    const body = dagCbor.encode(await l.kernel.store.get(mail.body));
+    const ans = await this.deliverer.carry(handle, l.wallet, id, rec as never, mail, body);
+    if (!ans) return false;
+    try {
+      await this.admitEvent(handle, "deliver", ans);
+      this.say(handle, `deliver → ${String(rec.url)}: HTTP ${ans.status}, the signed answer admitted`);
+      return true;
+    } catch (e) {
+      this.say(handle, `deliver → ${String(rec.url)}: the answer turned away: ${(e as Error).message}`);
+      return false;
+    }
   }
 
   /**
@@ -956,7 +982,6 @@ export class Router {
       db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.kernelEnv(),
       log: (line: string) => this.say(handle, line),
       emit: (o: Outgoing) => this.providers.deliver(handle, o),
-      http: (req: HttpRequest) => this.http(req, handle),
       exited: (code: number | null, signal: string | null) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);

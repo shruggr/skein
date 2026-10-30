@@ -214,7 +214,8 @@ refusal write no entry: the transport answers at once (`admit` answers
 handler runs as the request's logged step. An app's filter is the function
 its app record lists under `filters`, run as a kernel call in the
 **deterministic profile**: the clock is the entry's time (and fuel), the
-randomness is seeded by the request record, nothing pending in its input,
+randomness is the one rule's ("Randomness", below: the log's tip ‖ the
+request record's CID ‖ (program, fn)), nothing pending in its input,
 no network, no writes (a call's imports); the blocks it put are kept only
 if its `pass` names them.
 
@@ -306,16 +307,28 @@ these imports:
   or an event — an intention the runtime answers (#126: a `deadline`, a
   `fetch`) or one it acts on (a broadcast, a subscription, a beacon) — the
   way out (below, "emit");
-- **`authfetch`** (#126): a BRC-104 request to a server, signed and checked in
-  the kernel through the signer, a recorded call — the one direct HTTP path
-  (below, "authfetch");
+- `authfetch` (#126) is **gone** (#157): a step never waits on the outside
+  world. The import stays for the modules built against it, and a log that
+  made one replays it from its witness (below, "authfetch");
 - the entry's time stamp, advanced by fuel (below, "The clock inside a step runs on fuel").
 
 Not provided: wall clock, random, threads, plain network, host filesystem.
 A WASI program with only these imports is deterministic by construction, so
 replay re-executes it and gets the same tree and the same output (the
-signer's answers and authfetch's exchanges are served from the recorded
-calls).
+signer's answers — and, in a log written before #157, authfetch's
+exchanges — are served from the recorded calls).
+
+**Randomness** (David, 2026-10-31): one rule, no branches, no host or OS
+entropy anywhere in the kernel. seed = sha256(the instance's head at that
+moment ‖ the input being processed ‖ the thread or call it runs in), then
+the counter stream (block i = sha256(seed ‖ i as 8 bytes big-endian)). A
+step: its input is the entry's CID and the head is carried in it (the entry
+names its `prev`), so the seed is sha256(entry CID ‖ thread) — the bytes
+every step has drawn since format 2, unchanged. A door filter: the log's tip
+‖ the request record's CID ‖ (program, fn). A kernel call (a read): the
+log's tip ‖ the call's input (dag-cbor {program, fn, arg, caller}) ‖
+nothing. A nonce made from it travels in the clear: it needs to be unique,
+not secret (syscalls.zig `Entropy.seeded`).
 
 The LLM-facing `bash` tool is a **wasm shell**: a bash-compatible shell
 compiled to WASI (brush) running programs that are themselves WASI modules
@@ -382,8 +395,8 @@ status as 1, because `wasi:cli/exit` is ok/err.
 
 ### emit: the one way out (#70, #67)
 
-A step never asks the world anything mid-step but the signer and, through
-the kernel, a BRC-104 server (`authfetch`, #126 — both recorded calls).
+A step never asks the world anything mid-step but the signer (a recorded
+call; #157: the in-step `authfetch` is gone).
 **External communication is a thread**: the step emits a message or
 records an intention, ends `waiting` on what it expects, and the answer
 arrives as an entry that steps the thread again. There is no plain `http`
@@ -395,7 +408,9 @@ admitted by a row or by the instance's own signed request it answers. A
 program reaches the network by an intention the runtime answers (`fetch`:
 the host signs the request with the instance's key to its HTTP proxy, whose
 signed answer comes back), by a message to a service (the libp2p node, the
-cron provider), or by `authfetch` (signed in the kernel).
+cron provider), or by the `deliver` intention (#157: a message to a
+messagebox, carried by the host over BRC-103/104, answered by an entry the
+server signed).
 
 ```
 emit(message) → <cid>     preview1: skein.emit(msg, len, out, cap) → n (the CID, binary; n < 0: the error)
@@ -445,7 +460,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   bytes: two threads asking the same thing send two messages. **No
   signature** (#126 step 4): a skein receives mail only where it verifies
   the sender itself — the recipient's front door on the sender's BRC-104
-  session (the delivery thread's `authfetch`), or libp2p — and keeps the
+  session (the host's, carrying the delivery thread's `deliver`), or libp2p — and keeps the
   same record, so both know the message by one CID. A log written before
   #126 step 4 signed every emit through the signer (a recorded `oracle`
   call: BRC-169's `[2, "metanet handles envelope"]`, key `send`,
@@ -456,8 +471,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 - It goes out **when the step ends without error** (an errored step's
   emits are dropped), by the recipient's transport (docs/MESSAGES.md, "The
   address book"): a `mailbox` recipient's by the instance's own delivery
-  thread (the messagebox program, launched by the kernel, POSTs it with
-  `authfetch`: the kernel holds the BRC-103/104 sessions, #126), a `local` provider's, a `libp2p`
+  thread (the messagebox program, launched by the kernel, emits the
+  `deliver` intention, #157: the host holds the BRC-103/104 session), a `local` provider's, a `libp2p`
   recipient's or the instance's own (the loopback, `local` to `self`)
   handed to the host once the step is committed (the serve frame `emit`). At a start the kernel hands over again what a waiting
   thread still awaits (a host restart loses nothing a provider had); a host
@@ -587,41 +602,58 @@ proxy is.
   wakes from it.) A log written before #126 (a deadline was a signed
   wake-me to the waker, answered by `replyTo`) replays as it was written.
 
-### authfetch: the kernel's BRC-104 client (#126)
+### Delivery to a messagebox: the `deliver` intention (#157)
+
+A message to a `mailbox` recipient is carried by the host, not the step.
+The kernel launches the messagebox program as its delivery thread
+(docs/MESSAGES.md, "Delivery to a messagebox"); its step emits
 
 ```
-authfetch(request) → answer   preview1: skein.authfetch(req, len, out, cap) → n (n < 0: the error)
-                              WIT:      authfetch: func(request: list<u8>) -> result<list<u8>, string>
-request   dag-cbor {url: <the server's base URL>, method? (POST), path? (/; its ?query too),
-                    headers?: {name: text}, body?: bytes, timeoutMs?}
-answer    dag-cbor {status, headers: {name: text}, body: bytes}
+{event: "deliver", transport: "mailbox", url: <the messagebox URL>, message: <the mail record's CID>}
+  → {kind: "event", event: "deliver", app?, transport, url, message,
+     nonce: bytes(32)}     sha256(thread ‖ step ‖ the emit's place in it): unique, replayable
 ```
 
-The kernel is the client (kernel-zig/src/authfetch.zig): the BRC-103
-session with the server at `url` (the handshake at `<url>/.well-known/auth`,
-kept in memory per base URL, made again when the server answers 401 or the
-process restarts), the request signed BRC-104's way (the
-SimplifiedFetchTransport framing: a stock server takes it), the answer's
-signature and identity checked — all through the signer. The runtime only
-moves bytes (the serve frame `http` the kernel asks the host: `{method,
-url, headers, body, timeoutMs?}` → `{status, headers, body}` | `{error}`).
-A 2xx answer must be signed; a failure from something in front of the
-server may come unsigned and is returned as it is. No answer at all is a
-failure whose message starts `transient: `.
+and awaits it; the step ends. The kernel checks the shape (`emit: deliver:
+…`: the transport is `mailbox`, the url http(s), the message a mail record
+this instance holds and sent, `nonce` the kernel's). The host carries it
+after the commit, as every intention: BRC-103's handshake at
+`<url>/.well-known/auth` (its session, per base URL, the host's), then the
+BRC-104 request — `POST <url>/sendMessage`, BRC-231 CBOR {message:
+{recipient, messageBox, body, subject?, nonce}}, request id = the event's
+`nonce`, signed with the instance's key by the host's key holder (outside
+any step). The answer is admitted as an event entry (box `deliver`) whose
+record stands on its own at the door:
 
-The whole exchange is **one recorded call** at (thread, step, i), as a
-signer call is: `{kind: "authfetch", thread, step, i, request: bytes, answer?:
-bytes | error?: text, calls: [{request, result}]}` (`calls`: every signer
-frame it made). Replay serves the answer or the failure from the witness
-and asks no one; a differing request is a divergence. The nonces and the
-request id are real randomness (replay never makes them). A kernel `call`
-refuses it (`authfetch: a kernel call talks to no one`). Errors: `authfetch:
-want {url, …}` and the request's other shape errors, `authfetch: this host
-carries no HTTP`, `transient: …`, `authfetch: …: the answer is not signed` |
-`… does not verify` | `… is from another identity than the session's`.
+```
+{kind: "delivery", replyTo: <the deliver event's CID>, peer: <the server's identity key, 33 bytes>,
+ nonce: <our session nonce>, yourNonce: <the answer's nonce>, signature: bytes, status,
+ headers?: {name: text} (the answer's signed headers), body: bytes}
+```
 
-The messagebox's delivery uses it: a message to a `mailbox` recipient is
-POSTed to `<url>/sendMessage` with authfetch (docs/MESSAGES.md).
+The door (door.zig `deliveryAnswer`, wherever such a record arrives)
+verifies the server's BRC-104 signature: SimplifiedFetchTransport's
+response payload (the request id = the deliver event's `nonce`, the status,
+the signed headers, the body) under `[2, "auth message signature"]`, key
+`"<yourNonce> <nonce>"`, counterparty `peer`, through the signer — and
+refuses anything else (400 `ERR_DELIVERY`), writing nothing: a `replyTo`
+that is not this instance's `deliver` event, a missing field, a signature
+that does not verify. Admitted, it steps the thread awaiting the event
+(input `event: {event: <the answer>, box, subject: <the deliver event>}`).
+No answer at all (the server unreachable): nothing is admitted and the
+thread rests; the kernel offers the intention again at every start, as
+every awaited intention. A host-signed failure report is not built.
+
+### authfetch: gone (#157)
+
+`authfetch(request) → answer` (preview1 `skein.authfetch`, WIT `authfetch`)
+was the kernel's in-step BRC-104 client (#126). It is gone: the import
+answers `authfetch: gone (#157): a step reaches the outside world only by
+its emits …`, recording nothing. It stays in the import table so a module
+built against it still loads, and a log written before #157 replays: its
+recorded call at (thread, step, i) — `{kind: "authfetch", thread, step, i,
+request: bytes, answer?: bytes | error?: text, calls}` — is served from the
+witness (read, never written; a differing request is a divergence).
 
 **Broadcast out is an event** (#65): `emit({event: "broadcast", tx:
 <cid>, beef?: bytes})` lists `{kind: "broadcast", tx, beef?}` in the
@@ -633,14 +665,14 @@ program that does this is the chain app's (shruggr/skein-chain); the
 wallet and the overlay apps send it an `ingest` instead and await its
 answers. docs/MESSAGES.md, "Broadcast out, proofs and statuses in".
 
-**Components** (WASI 0.2) import `emit` and `authfetch` from
+**Components** (WASI 0.2) import `emit` (and, for old modules, `authfetch`) from
 `skein:kernel/skein` like every other call; the world has no `wasi:http`.
 `kernel-zig/test/components/fetch.wasm` (programs/test/fetch) is the
 fixture: it records a `fetch` intention for a GET and writes the answer's
 body on its next step.
 
 The program-facing contract — the address book's shape, each provider's
-boxes and answers, intentions, delivery to a messagebox (authfetch) — is docs/MESSAGES.md,
+boxes and answers, intentions, delivery to a messagebox (`deliver`) — is docs/MESSAGES.md,
 "Outbound: emit, the address book and the providers".
 
 ### Calls: reading the state without an entry (#40)
@@ -668,10 +700,10 @@ function over the current state and return a value. It writes nothing.
   a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`,
   `emit`, `deadline` and `authfetch` are refused (a call sends nothing). The signer
   (`wallet`) is answered by the host and **not recorded**.
-- **No determinism.** Nothing replays a call, so it needs none: its clock is
-  the host's `now` (plus fuel, as in a step), its random is real entropy
-  (a session nonce made there must not be guessable), and the host's answers
-  are whatever they are at the time.
+- **Not replayed.** Nothing replays a call: its clock is the host's `now`
+  (plus fuel, as in a step), and the host's answers are whatever they are
+  at the time. Its random is the one rule's ("Randomness", above): the
+  log's tip ‖ (program, fn, arg, caller) — no host entropy.
 - **Fuel** is limited by `callFuelLimit` in the genesis's `defaults`
   (default 10^10) and reported with every answer, success or not, for the
   host's ledger; it is never in the log.

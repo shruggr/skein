@@ -42,7 +42,8 @@
 
 import { AuthFetch, KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type HttpRequest, type HttpResponse, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
+import { Deliverer } from "../../src/host/deliver.ts";
 import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
@@ -129,10 +130,11 @@ export class WebKernel {
     },
   };
   /** The one call in: the arrival's body and its stamp; the kernel appends it (#163). Admitted and durable when this resolves (processing is drain's). */
-  async admit(body: Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}, time: Stamp = now()): Promise<CID> {
+  async admit(body: Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}, time: Stamp = now()): Promise<CID> {
     const frame: Record<string, unknown> = { entry: { ...body, time } };
     if (records.body) frame.body = records.body;
     if (records.request) frame.request = records.request;
+    if (records.event) frame.event = records.event;
     const r = WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply);
     // #143: what the door turned away or answered writes no entry.
     const answered = (r as { answered?: Record<string, unknown> } | null)?.answered;
@@ -168,10 +170,12 @@ export class BrowserHost {
   readonly providers: Providers;
   /** What happened, for the page and the tests. */
   readonly events: Array<{ kind: string; [k: string]: unknown }> = [];
+  private readonly deliverer: Deliverer;
 
   constructor(o: HostOptions) {
     this.o = o;
     this.wire = new WalletWireProcessor(o.wallet);
+    this.deliverer = new Deliverer({ http: (req) => this.http(req), log: (_s, l) => this.log(l) });
     const master = new KeyDeriver(providerMaster(o.db ?? `skein-${o.handle}`));
     this.providers = new Providers({
       keyOf: (name: ProviderName) => master.derivePrivateKey([2, "skein provider"], name, "self"),
@@ -179,6 +183,8 @@ export class BrowserHost {
       identity: async () => this.identity ? keyBytes(this.identity) : undefined,
       sign: async (_h, data) => Uint8Array.from((await this.o.wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] })).signature),
       fetch: (req) => this.http(req),
+      // #157: a mailbox delivery the page carries (deliver.ts, the page wallet's key); the server's signed answer an event entry.
+      deliver: (_h, id, rec) => this.deliver(id, rec),
       now: () => Date.now(),
       log: (_s, l) => this.log(l),
     });
@@ -272,16 +278,6 @@ export class BrowserHost {
     switch (op) {
       case "wallet":
         return dagCbor.encode(Uint8Array.from(await this.wire.transmitToWallet([...(arg as Uint8Array)])));
-      case "http": {
-        // #126: the kernel's authfetch — it signs and verifies; the page moves the bytes. No answer at all: {error}.
-        const q = arg as { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number };
-        try {
-          const r = await this.http({ method: q.method, url: q.url, headers: q.headers ?? {}, ...(q.body?.length ? { body: q.body } : {}), ...(q.timeoutMs !== undefined ? { timeoutMs: Number(q.timeoutMs) } : {}) });
-          return dagCbor.encode({ status: r.status, headers: r.headers, body: r.body });
-        } catch (e) {
-          return dagCbor.encode({ error: (e as Error).message });
-        }
-      }
     }
     throw new Error(`this host answers no ${op}`);
   }
@@ -299,6 +295,19 @@ export class BrowserHost {
     if (op === "say" || op === "panic") { this.log(String(v)); return; }
     // #70: a signed message the instance emitted, its step committed: the page's providers carry it.
     if (op === "emit") { this.providers.deliver(this.o.handle, dagCbor.decode(v as Uint8Array) as Outgoing); return; }
+  }
+
+  /** #157: a `deliver` intention, carried; the answer admitted in box `deliver` (it stands on its own at the door). */
+  private async deliver(id: CID, rec: Record<string, unknown>): Promise<boolean> {
+    const mail = await this.kernel.store.get(rec.message as CID) as unknown as MailRecord;
+    const body = dagCbor.encode(await this.kernel.store.get(mail.body));
+    const ans = await this.deliverer.carry(this.o.handle, this.o.wallet, id, rec as never, mail, body);
+    if (!ans) return false;
+    return await this.serial(async () => {
+      try { await this.kernel.admit({ event: encode(ans).cid, box: "deliver" } as never, { event: ans }, now()); } catch (e) { this.log(`deliver: the answer turned away: ${(e as Error).message}`); return false; }
+      await this.kernel.drain();
+      return true;
+    });
   }
 
   /** A provider's answer (#70): a signed message, appended as a `local` request; the front door checks it and routes it. */

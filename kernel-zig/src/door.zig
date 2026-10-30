@@ -414,3 +414,54 @@ pub fn brc104(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, now: i64, 
     if (res.len == 0 or res[0] != 0) return failed("Invalid signature in generalMessage");
     return .{ .pass = .{ .caller = peer, .theirs = sess.theirs, .request_id = request_id } };
 }
+
+// ------------------------------------------------------------------ a delivery's answer (#157)
+
+/// The record a `deliver` intention is answered with (#157): an event the host admits, standing on
+/// its own — {kind: "delivery", replyTo: <the deliver event's CID>, peer: <the answering server's
+/// identity key, 33 bytes>, nonce: <our session nonce, base64 text>, yourNonce: <the answer's own
+/// nonce, base64 text>, signature: bytes, status, headers?: {name: text} (the answer's signed
+/// ones: x-bsv-* but x-bsv-auth-*, authorization), body: bytes}.
+pub const DELIVERY = "delivery";
+
+pub fn isDeliveryAnswer(v: Value) bool {
+    if (v != .map) return false;
+    return std.mem.eql(u8, Value.str(v.get("kind")) orelse "", DELIVERY);
+}
+
+/// Why a delivery's answer does not stand (null: it does): the server's BRC-104 signature over the
+/// answer — SimplifiedFetchTransport's response payload (the request id: the deliver event's
+/// `nonce`, 32 bytes; the status; the signed headers, lower-cased and sorted; the body) under
+/// [2, "auth message signature"], key "<yourNonce> <nonce>", counterparty `peer` — checked through
+/// the signer, as authfetch checked an answer in the step before #157 and kernel.brc104 checks a
+/// request. `request_id`: the deliver event's nonce.
+pub fn deliveryAnswer(a: std.mem.Allocator, w: ?Signer, rec: Value, request_id: []const u8) !?[]const u8 {
+    if (request_id.len != 32) return "the deliver event has no 32-byte nonce";
+    const peer = Value.bytesOf(rec.get("peer")) orelse return "no `peer`";
+    if (!secp.isKey(peer)) return "`peer` is not an identity key";
+    const ours = Value.str(rec.get("nonce")) orelse return "no `nonce`";
+    const theirs = Value.str(rec.get("yourNonce")) orelse return "no `yourNonce`";
+    if (ours.len == 0 or theirs.len == 0) return "an empty nonce";
+    const sig = Value.bytesOf(rec.get("signature")) orelse return "no `signature`";
+    const status = Value.intOf(rec.get("status")) orelse return "no `status`";
+    if (status < 0 or status > 999) return "`status` is not an HTTP status";
+    const body = Value.bytesOf(rec.get("body")) orelse return "no `body`";
+    var hs = std.array_list.Managed(authfetch.Header).init(a);
+    if (rec.get("headers")) |h| if (h != .null) {
+        if (h != .map) return "`headers`: want {name: text}";
+        for (h.map) |e| {
+            const k = try std.ascii.allocLowerString(a, e.key);
+            const v = Value.str(e.value) orelse return "`headers`: want {name: text}";
+            const signed = (std.mem.startsWith(u8, k, "x-bsv-") and !std.mem.startsWith(u8, k, "x-bsv-auth")) or std.mem.eql(u8, k, "authorization");
+            if (!signed) return "`headers` holds only the answer's signed headers";
+            try hs.append(.{ .name = k, .value = v });
+        }
+    };
+    std.mem.sort(authfetch.Header, hs.items, {}, authfetch.lessHeader);
+    const payload = try authfetch.responsePayload(a, request_id, @intCast(status), hs.items, body);
+    const key_id = try std.fmt.allocPrint(a, "{s} {s}", .{ theirs, ours });
+    const sg = w orelse return "this host has no signer to check the signature with";
+    const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return "the signature does not verify";
+    if (res.len == 0 or res[0] != 0) return "the signature does not verify";
+    return null;
+}

@@ -28,8 +28,8 @@ app's `<app>/…`; a genesis-wired program's genesis `scopes`); every package
 a transport carries in is an entry and the front door is stepped on it; a
 step's way out is `emit` (a message to a key the address book
 names — unsigned, its transport proves its sender, #126 step 4 — or an event: an intention the runtime answers, a broadcast, a
-subscription, a beacon) and `authfetch` (#126: the kernel's BRC-104 client,
-a recorded call), and the answer is an entry; a deadline or a shell's sleep
+subscription, a beacon, a `deliver` to a messagebox the host carries over
+BRC-104 — #157: the in-step `authfetch` is gone), and the answer is an entry; a deadline or a shell's sleep
 is a `deadline` event the host's waker keeps (#126). The host
 (`src/host/`, TypeScript) drives it over one channel per kernel; the host
 is transports + providers + store + signer and routes nothing. History: the
@@ -1136,6 +1136,33 @@ tables, TS-built state CIDs, "vs the source" tips) and the replays of copies
 of the stores under `~/.skein` (they predate fuel; the live instances
 re-genesis when they move to this build).
 
+## The machine and the native host (the settled split, 2026-10-31)
+
+The **machine** is the step machine for ONE instance — the log, the door,
+dispatch, the scheduler, program execution, the signer import, content
+addressing: everything below but the native host's files. It builds two
+ways from the same source:
+
+- **`zig build web`** → `zig-out/web/skein-kernel.wasm` (`web.zig` the
+  exported ABI, `engine_v8.zig` the engine through the host's wasm runtime,
+  `web_store.zig` the host's store by id): **the node host loads it**, one
+  per active instance on a worker thread, its storage the host's own (one
+  SQLite database for the host, `src/host/store-sqlite.ts`; the host chain
+  held by one more machine over the `host/chain` set,
+  `skein_open_chain`) — what the npm package ships (`src/host/wasm-kernel.ts`);
+  the browser host loads the same file.
+- **`zig build`** → `zig-out/bin/skein-kernel`: the **native host**, the
+  hosted version, a peer of the node host kept here beside the machine:
+  `serve.zig` + `ipc.zig` (one instance per process over pipes), `host.zig`
+  + `rocksdb_store.zig` (#158: one process, a worker pool over a RocksDB
+  database), the store backends `sqlite_store.zig`, `lmdb_store.zig`,
+  `any_store.zig`, `migrate.zig`, `vendor/`, the engine
+  `engine_wasmtime.zig`, and the tools (`replay.zig`, `dump.zig`,
+  `fuel.zig`, `cmd_shell.zig`, `main.zig`). The node host still runs it for
+  a store spec that is a file, an LMDB set or a RocksDB set (the rack's
+  hosted shape); `skein-kernel replay` is the native reference a wasm
+  host's store is checked against.
+
 ## Layout
 
 | file | what (the TypeScript it was ported from; the machine's parts were deleted in #55) |
@@ -1160,9 +1187,9 @@ re-genesis when they move to this build).
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (fuel accounting as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
 | `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key, the genesis's seed, the kernel's `peers` operation (`write`) |
-| `authfetch.zig` | `authfetch` (#126): the BRC-103/104 client — sessions per base URL, the SimplifiedFetchTransport framing, the signer's frames |
+| `authfetch.zig` | BRC-104's SimplifiedFetchTransport framing (the payloads a request and a response sign), which the door checks; the in-step client it was (#126) is gone (#157) |
 | `beef.zig`, `door.zig`, `door_test.zig` | the door (#121): BEEF's pattern table, decoder and encoder, the BUMP's nodes and root; the row filters (`beef`) over a package, against `chain/state`'s headers; `restore` |
-| `signer.zig` | the kernel's own BRC-100 frames (#70, #126): `createSignature` (an emitted message), `createHmac` and `verifySignature` (authfetch), the answer |
+| `signer.zig` | the kernel's own BRC-100 frames (#70, #126): `createSignature` (an emitted message), `createHmac` and `verifySignature` (the door's BRC-104 checks), the answer |
 
 ## What is not the same, or not here
 

@@ -2,7 +2,7 @@
 // wasm kernel (kernel.js) and its stores. A Worker, because the kernel runs
 // programs synchronously — `new WebAssembly.Module` of a program, and its
 // host calls — which a page's main thread may not do for large modules, and
-// because the kernel's requests to its host (wallet, resolve, http) must be
+// because the kernel's requests to its host (wallet: the signer) must be
 // answered while it waits: it posts the request and blocks on a
 // SharedArrayBuffer (Atomics.wait) until the page has written the answer
 // (client.js). That needs a cross-origin isolated page (COOP/COEP headers).

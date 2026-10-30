@@ -7,10 +7,8 @@
 //                        proof's event) · answer (#66: wait on the thread a request entry launched; its answer once it
 //                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
 //                        over the state, no entry, no writes: host-side reads only) · idle · start · running
-//   the kernel asks      wallet (a BRC-100 wire frame → its answer: the signer, #67) · http (#126: one
-//                        HTTP exchange for the kernel's authfetch — the kernel signs and verifies, this
-//                        side moves the bytes: {method, url, headers, body, timeoutMs?} → {status,
-//                        headers, body} | {error})
+//   the kernel asks      wallet (a BRC-100 wire frame → its answer: the signer, #67; #157: nothing
+//                        else — the in-step authfetch and its `http` frame are gone)
 //   the host chain       headers {raws} · chain-import {set, root} · chain (#156: the header chain the
 //                        host keeps once, in the kernel process — a serve instance's in its own store —
 //                        → {root, height, hash, added?, replaced?} | null)
@@ -45,7 +43,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
-import type { HttpRequest, HttpResponse, Outgoing } from "./providers.ts";
+import type { Outgoing } from "./providers.ts";
 
 const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 /** The kernel binary: $SKEIN_KERNEL_BIN, else kernel-zig's release build. */
@@ -70,8 +68,6 @@ export interface KernelOptions {
   domain: string;
   /** Answers the kernel's `wallet` frames: the instance's signer. Absent: every wallet call fails. */
   wallet?: WalletInterface;
-  /** One HTTP exchange for the kernel's authfetch (#126): bytes only. Absent: the kernel's authfetch gets {error}. */
-  http?(req: HttpRequest): Promise<HttpResponse>;
   /** A message (#70) or an event (#65) the kernel hands over to carry out (the `emit` notice): a `local` provider's, the libp2p node's, the broadcaster's (providers.ts). Absent: dropped. */
   emit?(o: Outgoing): void;
   /** Log lines (the kernel's stderr and this side's notes). */
@@ -186,17 +182,6 @@ async function kernelRequest(k: KernelSurface, wire: WalletWireProcessor | undef
       case "wallet":
         if (!wire) throw new Error("no wallet");
         return answer(Uint8Array.from(await wire.transmitToWallet([...(f.v as Uint8Array)])));
-      case "http": {
-        // #126: authfetch's exchange; a failure to get any answer is the kernel's to record.
-        const q = f.v as { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number | bigint };
-        if (!o.http) return answer({ error: "this host carries no HTTP for the kernel" });
-        try {
-          const r = await o.http({ method: q.method, url: q.url, headers: q.headers ?? {}, ...(q.body?.length ? { body: q.body } : {}), ...(q.timeoutMs !== undefined ? { timeoutMs: Number(q.timeoutMs) } : {}) });
-          return answer({ status: r.status, headers: r.headers, body: r.body });
-        } catch (e) {
-          return answer({ error: (e as Error).message ?? String(e) });
-        }
-      }
       case "emit":
         // A signed message (#70) or an event (#65) to carry out, its step committed: nothing goes back.
         o.emit?.(f.v as Outgoing);

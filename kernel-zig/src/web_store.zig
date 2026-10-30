@@ -8,6 +8,8 @@
 const std = @import("std");
 const storem = @import("store.zig");
 const index = @import("index.zig");
+const cbor = @import("cbor");
+const Value = cbor.Value;
 
 // The shim's stores (`skein_store`), by id.
 const shim = struct {
@@ -55,7 +57,44 @@ pub const WebStore = struct {
         return s.ix.store();
     }
 
-    fn backend(s: *WebStore) index.Backend {
+    /// A checkpoint (issue #4): its blocks already put, the state record becomes this empty
+    /// store's state (sqlite_store.zig restore).
+    pub fn restore(s: *WebStore, state: []const u8) !void {
+        if (s.read_only) return error.ReadOnly;
+        if (s.ix.work.tip.get() != null or s.ix.work.cursor != 0) return error.StoreNotEmpty;
+        var arena = std.heap.ArenaAllocator.init(s.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const b = (try getFn(s, a, state)) orelse return error.MissingState;
+        const v = cbor.decode(a, b) catch return error.BadState;
+        if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", index.STATE_KIND)) return error.BadState;
+        if ((Value.intOf(v.get("format")) orelse 0) != index.FORMAT) return error.PredatesFuel;
+        try beginFn(s);
+        errdefer rollbackFn(s);
+        try setPointerFn(s, index.POINTER, state);
+        try commitFn(s);
+        s.ix.forest.reset(true);
+        if (!try s.ix.load()) return error.MissingState;
+    }
+
+    /// The shim's store `id` as a bare backend, no index over it (the host chain's store, #156:
+    /// host_chain.zig keeps its record under a pointer of its own, outside any instance's log).
+    pub fn bare(alloc: std.mem.Allocator, id: u32) !*WebStore {
+        const s = try alloc.create(WebStore);
+        s.* = .{ .id = id, .alloc = alloc, .ix = undefined, .read_only = false };
+        return s;
+    }
+
+    /// A read of the shim's store `id` by CID (host_chain.zig Reader: an instance's set for chain-import).
+    pub fn readBlock(id: u32, a: std.mem.Allocator, cid: []const u8) !?[]u8 {
+        const n = shim.get(id, cid.ptr, cid.len);
+        if (n < 0) return null;
+        const b = try a.alloc(u8, @intCast(n));
+        shim.take(b.ptr);
+        return b;
+    }
+
+    pub fn backend(s: *WebStore) index.Backend {
         return .{ .ctx = s, .vt = &vt };
     }
 

@@ -58,9 +58,18 @@ pub const Entropy = struct {
     buf: [32]u8 = undefined,
     off: usize = 32,
 
-    pub fn init(entry: []const u8, thread: []const u8) Entropy {
+    /// The one randomness rule (David, 2026-10-31): seed = sha256(the instance's head at that
+    /// moment ‖ the input being processed ‖ the thread or call it runs in), then the counter
+    /// stream. Nothing else feeds it: no host or OS entropy anywhere in the kernel. A step passes
+    /// its entry's CID as the input and an empty head — the entry names its predecessor (`prev`),
+    /// so its CID already commits to the head; the bytes are the ones every step has drawn since
+    /// format 2, sha256(entry CID ‖ thread). A filter: the log's tip ‖ the request record's CID ‖
+    /// (program, fn). A call: the log's tip ‖ the call's input (program, fn, arg, caller). A nonce
+    /// made from it travels in the clear: it needs to be unique, not secret.
+    pub fn seeded(head: []const u8, input: []const u8, thread: []const u8) Entropy {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
-        h.update(entry);
+        h.update(head);
+        h.update(input);
         h.update(thread);
         return .{ .key = h.finalResult() };
     }

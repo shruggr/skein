@@ -1,28 +1,27 @@
-//! Delivery (#70, #67, #126): the outbound middleware of the `mailbox`
+//! Delivery (#70, #67, #126, #157): the outbound middleware of the `mailbox`
 //! transport. A message a step emits to a recipient whose address book entry
 //! is `{transport: "mailbox", address: <messagebox URL>}` — or, for a key the
 //! address book does not name, whose record the resolve program kept
-//! (`resolve/peers`, #87) — is delivered by the instance itself: the kernel
-//! launches this program as the message's **delivery thread** (args
-//! {message: <the mail record>, transport: "mailbox"}), and the
-//! thread POSTs it to <url>/sendMessage with `authfetch` (#126: the kernel's
-//! BRC-103/104 client — the session, the request's signature and the
-//! answer's check are the kernel's, through the signer, and the exchange is a
-//! recorded call on the step). The body is BRC-231 CBOR: {message:
-//! {recipient, messageBox, body, subject?, nonce}} — the BRC-33 message, its
-//! sender the session's identity (#126 step 4: the session is the proof; no
-//! signature), and the emit's `subject` and `nonce`, so the recipient keeps the
-//! record this instance emitted, under the same CID. 200 and that CID →
-//! finished {delivered: <cid>, url, attempt}.
-//!
-//! Failure: `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
-//! at `defaults.sendRetryMs` (default 30 000) — a deadline (#126: an
-//! intention the runtime answers) — up to `defaults.sendAttempts` attempts in
-//! all (default 3); anything else, or the last attempt, ends the thread
-//! errored, and the kernel steps the thread awaiting the message with
-//! `undelivered: {message, error}` (no answer can come). Sending never tells
-//! the peer who we are beyond the session (no claim, no registration:
-//! application wiring, #40).
+//! (`resolve/peers`, #87) — is delivered by the instance: the kernel launches
+//! this program as the message's **delivery thread** (args {message: <the
+//! mail record>, transport: "mailbox"}), and its first step emits the
+//! `deliver` intention (#157) — {event: "deliver", transport: "mailbox", url:
+//! <the messagebox URL>, message: <the mail record's CID>}, the kernel adding
+//! its `nonce` — and awaits it. A step never waits on the outside world: the
+//! HOST carries it (BRC-103's handshake at <url>/.well-known/auth, then a
+//! BRC-104 POST to <url>/sendMessage signed with the instance's key, the body
+//! BRC-231 CBOR {message: {recipient, messageBox, body, subject?, nonce}} —
+//! the BRC-33 message, and the emit's own subject and nonce, so the recipient
+//! keeps the record this instance emitted, under the same CID), and the answer
+//! comes back as an entry that stands on its own at the door: the server's
+//! BRC-104 signature over it (door.zig deliveryAnswer). That steps this
+//! thread: 200 and that CID → finished {delivered: <cid>, url}; any other
+//! status → errored with it, and the kernel steps the thread awaiting the
+//! message with `undelivered: {message, error}`. No answer at all (the server
+//! unreachable): nothing is admitted and the thread rests; the kernel offers
+//! the intention again at every start (no deadline, no attempts here).
+//! Sending never tells the peer who we are beyond the session (no claim, no
+//! registration: application wiring, #40).
 const std = @import("std");
 const cbor = @import("cbor");
 const cid = cbor.cidm;
@@ -34,15 +33,9 @@ const eql = std.mem.eql;
 
 /// The resolve program's records (#87), read, never written here.
 const RESOLUTIONS = "resolve/peers";
-const SEND_ATTEMPTS = 3;
-const SEND_RETRY_MS = 30_000;
 
 fn trimSlash(s: []const u8) []const u8 {
     return std.mem.trimEnd(u8, s, "/");
-}
-
-fn transientStatus(status: i128) bool {
-    return status >= 500 or status == 408 or status == 425 or status == 429;
 }
 
 fn describe(a: Allocator, body: []const u8) []const u8 {
@@ -53,87 +46,6 @@ fn describe(a: Allocator, body: []const u8) []const u8 {
     if (j == .object) if (j.object.get("description")) |d| if (d == .string) return d.string;
     return body[0..@min(body.len, 200)];
 }
-
-fn setting(in: Value, name: []const u8, def: i64) i64 {
-    const d = in.get("defaults") orelse return def;
-    const s = Value.str(d.get(name)) orelse return def;
-    const v = std.fmt.parseInt(i64, s, 10) catch return def;
-    return if (v > 0) v else def;
-}
-
-/// The thread's state, as its last step wrote it (stdout), or null on its first step.
-fn saved(a: Allocator, in: Value) !?Value {
-    const tip = Value.cidOf(in.get("tip")) orelse return null;
-    const u = try sk.get(a, tip);
-    const res = u.get("result") orelse return null;
-    const out = cbor.decode(a, Value.bytesOf(res.get("stdout")) orelse "") catch return null;
-    return if (out == .map) out else null;
-}
-
-const Ctx = struct {
-    a: Allocator,
-    in: Value,
-    mc: []const u8,
-    msg: Value,
-    body: []const u8,
-    url: []const u8,
-    to: []const u8,
-    at: i128,
-    attempt: i64,
-
-    /// One attempt: the message POSTed to <url>/sendMessage over the kernel's BRC-104 session.
-    fn send(c: *Ctx) !void {
-        const a = c.a;
-        var m = cbor.MapBuilder.init(a);
-        try m.put("recipient", .{ .bytes = c.to });
-        try m.put("messageBox", cbor.string(Value.str(c.msg.get("box")) orelse ""));
-        try m.put("body", .{ .bytes = c.body });
-        try m.put("subject", c.msg.get("subject"));
-        try m.put("nonce", c.msg.get("nonce"));
-        var outer = cbor.MapBuilder.init(a);
-        try outer.put("message", m.value());
-        var h = cbor.MapBuilder.init(a);
-        try h.put("content-type", cbor.string("application/cbor"));
-        const ans = sk.authfetch(a, trimSlash(c.url), .{ .path = "/sendMessage", .headers = h.value(), .body = try cbor.encode(a, outer.value()) }) catch |err| {
-            if (err == error.ImportFailed) return c.failed(sk.lastError());
-            return err;
-        };
-        const status = Value.intOf(ans.get("status")) orelse 0;
-        const rbody = Value.bytesOf(ans.get("body")) orelse "";
-        if (status != 200) return c.failed(try std.fmt.allocPrint(a, "{s}Message Box send failed with HTTP {d}: {s}", .{ if (transientStatus(status)) "transient: " else "", status, describe(a, rbody) }));
-        if (cbor.decode(a, rbody)) |v| {
-            if (Value.str(v.get("id")) orelse Value.str(v.get("messageId"))) |theirs| {
-                const tc = cid.parse(a, theirs) catch null;
-                if (tc) |x| if (!eql(u8, x, c.mc)) return sk.report(try std.fmt.allocPrint(a, "the recipient keeps the message as {s}, not {s}", .{ theirs, try cid.format(a, c.mc) }));
-            }
-        } else |_| {}
-        var out = cbor.MapBuilder.init(a);
-        try out.put("delivered", cbor.cidv(c.mc));
-        try out.put("url", cbor.string(c.url));
-        try out.put("attempt", cbor.int(c.attempt));
-        try sk.answer(a, out.value());
-    }
-
-    /// This attempt failed: a transient failure is tried again at the retry's
-    /// deadline, up to the attempts allowed; else the thread ends errored
-    /// (the kernel tells the thread awaiting the message: `undelivered`).
-    fn failed(c: *Ctx, why: []const u8) !void {
-        const a = c.a;
-        const attempts = setting(c.in, "sendAttempts", SEND_ATTEMPTS);
-        if (!sk.transient(why) or c.attempt >= attempts) {
-            if (c.attempt > 1) return sk.report(try std.fmt.allocPrint(a, "{s} ({d} attempts)", .{ why, c.attempt }));
-            return sk.report(why);
-        }
-        const wait = setting(c.in, "sendRetryMs", SEND_RETRY_MS);
-        try sk.deadline(@intCast(c.at + wait));
-        try std.Io.File.stderr().writeStreamingAll(sk.io(), try std.fmt.allocPrint(a, "delivery: attempt {d} failed ({s}); again in {d} ms\n", .{ c.attempt, why, wait }));
-        var m = cbor.MapBuilder.init(a);
-        try m.put("stage", cbor.string("retry"));
-        try m.put("error", cbor.string(why));
-        try m.put("attempt", cbor.int(c.attempt));
-        try sk.answer(a, m.value());
-    }
-};
 
 /// The resolve program's record of `key` (#87: head `resolve/peers`, {kind:
 /// "resolutions", peers: [{key, peer: <cid>}]}, each {kind: "resolution",
@@ -149,33 +61,50 @@ fn resolutionOf(a: Allocator, key: []const u8) !?Value {
     return null;
 }
 
-/// A step of a message's delivery thread (#70): the first attempt, or the next at the retry's deadline.
+/// A step of a message's delivery thread: the first emits the `deliver` intention and awaits it;
+/// the next is stepped by its answer (an event about the intention, #157).
 pub fn step(a: Allocator, in: Value) !void {
     const args = in.get("args") orelse return sk.report("no args");
     const mc = Value.cidOf(args.get("message")) orelse return sk.report("delivery: no message");
+    if (in.get("event")) |ev| return answered(a, mc, ev);
     const msg = try sk.get(a, mc);
     const to = Value.bytesOf(msg.get("recipient")) orelse return sk.report("delivery: not a message record");
-    const body = try sk.getBytes(a, Value.cidOf(msg.get("body")) orelse return sk.report("delivery: the message has no body"));
     const p = (try sk.peerOf(a, to)) orelse (try resolutionOf(a, to)) orelse return sk.report(try std.fmt.allocPrint(a, "no route to {s}: not in the address book, and not resolved", .{try sk.hex(a, to)}));
     if (!eql(u8, Value.str(p.get("transport")) orelse "", "mailbox")) return sk.report("delivery: the recipient is not reached by mailbox any more");
     const url = Value.str(p.get("address")) orelse return sk.report("delivery: the address book names no URL");
-    const st = try saved(a, in);
-    var c = Ctx{
-        .a = a,
-        .in = in,
-        .mc = mc,
-        .msg = msg,
-        .body = body,
-        .url = url,
-        .to = to,
-        .at = Value.intOf(in.get("at")) orelse 0,
-        .attempt = if (st) |s| @intCast(Value.intOf(s.get("attempt")) orelse 1) else 1,
-    };
-    if (st != null) {
-        // The retry's deadline: the next attempt.
-        const w = in.get("woke") orelse return sk.report("delivery: stepped with nothing to go on with");
-        if (w != .bool or !w.bool) return sk.report("delivery: stepped with nothing to go on with");
-        c.attempt += 1;
-    }
-    return c.send();
+    var q = cbor.MapBuilder.init(a);
+    try q.put("event", cbor.string("deliver"));
+    try q.put("transport", cbor.string("mailbox"));
+    try q.put("url", cbor.string(trimSlash(url)));
+    try q.put("message", cbor.cidv(mc));
+    const bytes = try cbor.encode(a, q.value());
+    const id = try sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) });
+    try sk.awaitRecord(id);
+    var m = cbor.MapBuilder.init(a);
+    try m.put("stage", cbor.string("sent"));
+    try m.put("deliver", cbor.cidv(id));
+    try m.put("url", cbor.string(url));
+    try sk.answer(a, m.value());
+}
+
+/// The answer to the intention (door-checked: the server's signature over it): {kind: "delivery",
+/// replyTo, peer, nonce, yourNonce, signature, status, headers?, body}.
+fn answered(a: Allocator, mc: []const u8, ev: Value) !void {
+    const rc = Value.cidOf(ev.get("event")) orelse return sk.report("delivery: stepped with nothing to go on with");
+    const r = try sk.get(a, rc);
+    if (!eql(u8, Value.str(r.get("kind")) orelse "", "delivery")) return sk.report("delivery: stepped with nothing to go on with");
+    const status = Value.intOf(r.get("status")) orelse 0;
+    const rbody = Value.bytesOf(r.get("body")) orelse "";
+    if (status != 200) return sk.report(try std.fmt.allocPrint(a, "Message Box send failed with HTTP {d}: {s}", .{ status, describe(a, rbody) }));
+    if (cbor.decode(a, rbody)) |v| {
+        if (Value.str(v.get("id")) orelse Value.str(v.get("messageId"))) |theirs| {
+            const tc = cid.parse(a, theirs) catch null;
+            if (tc) |x| if (!eql(u8, x, mc)) return sk.report(try std.fmt.allocPrint(a, "the recipient keeps the message as {s}, not {s}", .{ theirs, try cid.format(a, mc) }));
+        }
+    } else |_| {}
+    var out = cbor.MapBuilder.init(a);
+    try out.put("delivered", cbor.cidv(mc));
+    const d = try sk.get(a, Value.cidOf(r.get("replyTo")) orelse return sk.report("delivery: the answer names no intention"));
+    try out.put("url", d.get("url"));
+    try sk.answer(a, out.value());
 }
