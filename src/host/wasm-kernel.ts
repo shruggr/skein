@@ -145,7 +145,12 @@ export class WasmHost {
     if (!p) throw new Error(`kernel ${o.handle}: ${o.db} is not a SQLite set`);
     if (p.set !== o.handle) throw new Error(`kernel ${o.handle}: its SQLite set is its handle, not ${p.set}`);
     if (resolvePath(p.db) !== this.db) throw new Error(`kernel ${o.handle}: its database is ${p.db}, this host's ${this.db}`);
-    if (this.views.get(o.handle)?.gone === false) throw new Error(`kernel ${o.handle}: open already`);
+    // A machine being stopped (an idle stop, a restart): its next open waits for its worker to end (KernelHost's `closing`).
+    const had = this.views.get(o.handle);
+    if (had && !had.gone) {
+      if (!had.stopping) throw new Error(`kernel ${o.handle}: open already`);
+      await had.machine.done;
+    }
     const k = new WasmKernel(this, o, await WasmHost.module());
     this.views.set(o.handle, k);
     try { await k.machine.ready; } catch (e) { this.views.delete(o.handle); throw e; }
@@ -208,6 +213,8 @@ export class WasmKernel extends KernelSurface {
   readonly host: WasmHost;
   readonly machine: Machine;
   private wire?: WalletWireProcessor;
+  /** Its stop has begun (the next open of the handle waits for the worker to end). */
+  stopping = false;
 
   constructor(host: WasmHost, o: KernelOptions, module: WebAssembly.Module) {
     super();
@@ -254,6 +261,7 @@ export class WasmKernel extends KernelSurface {
   /** Stop the machine: what its worker runs finishes, its store is closed, the worker ends. */
   async stop(): Promise<void> {
     if (this.gone || this.machine.gone) return;
+    this.stopping = true;
     try { await this.machine.call("stop"); } catch { /* it exited */ }
     await this.machine.done;
   }
