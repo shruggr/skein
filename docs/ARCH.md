@@ -307,6 +307,18 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   A header comes as hex or as chaintracks' JSON (Arcade's
   `/chaintracks/v2/tip/stream`: the 80 bytes are serialized from its
   fields, and one whose `hash` is not theirs is dropped).
+- **The Teranode tracker** (`src/host/teranode.ts`, #156): the host's second
+  source of headers, its own libp2p node on the network's Teranode mesh
+  (TCP, noise, yamux, kad-DHT client, GossipSub StrictSign; key
+  `$SKEIN_HOME/teranode.key`). Each block announcement's header goes into
+  the same intake as the feed's (the image chain, then every host chain
+  synced from it, then the subscribers); a header whose parent is not held
+  near the tip is crawled back from the announcer's data hub
+  (`headers/<hash>?n=`, links and work checked, capped, no redirects). An
+  empty image chain is first synced whole from the network's default hub;
+  an empty host chain is filled from the image chain at start (the wasm
+  kernel's database: `chain-import`; RocksDB: `headers` runs), so a host
+  whose instances were made before it had any chain gets one.
 - **The image's chain part** (`src/host/image-chain.ts`, #132): the host
   listens to its own feed too, and appends every header it brings to the
   default image (`chain/headers/<first>`, 2016 raw headers a block, and

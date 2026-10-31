@@ -203,6 +203,10 @@ echo "== the image carries the header chain (#132, #156): a fake chaintracks' hi
 "${node[@]}" "$kz/equiv/image-chain.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/image-chain.ts" || status=1
 
+echo "== headers from the Teranode P2P network (#156, teranode.ts): a host with no headers source makes alice and installs the chain app (no chain anywhere); restarted with the tracker (a fake Teranode mesh and data hub), it syncs the whole chain from the hub at start, fills the empty host chain from the image chain (chain-import on the wasm kernel's SQLite database, headers runs on RocksDB) before alice is hydrated; her chain state holds it, a proof against it verifies, the next announced block moves her on; replayed — on the wasm kernel and on RocksDB"
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/teranode.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/teranode.ts" || status=1
+
 echo "== the host chain (#156, #133): two instances on one RocksDB host take three header runs; their chain/state headers and heights roots are the host chain record's, the tip read off them the host's; a proof on A verifies; a heavier branch replacing two headers reverts it (unproven, broadcast again) and leaves B on the new record; the gate (a host chain block through every set, A's record not through B's); a serve (SQLite) instance's chain/state for the same runs is the RocksDB host's; replayed after the processes stopped; timings: a block's frame and its event to 8 instances, chain-import of an image (HOSTCHAIN_IMPORT headers)"
 "${node[@]}" "$kz/equiv/hostchain.ts" || status=1
 

@@ -26,8 +26,13 @@ import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
 import { CHAIN_SET, parseSqliteSpec } from "../runtime/index-store.ts";
 import { Rejected } from "../runtime/store.ts";
+import { hashTree } from "../runtime/tree.ts";
 import { KernelSurface, type HostChainTip, type KernelOptions } from "./kernel.ts";
+import { openHostDb, SqliteSetStore } from "./store-sqlite.ts";
 import type { Outgoing } from "./providers.ts";
+
+/** The set an image's chain part is put in for a host chain's import (#156), emptied after it. */
+export const IMAGE_SET = "host/image";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolvePath(HERE, "../..");
@@ -189,6 +194,37 @@ export class WasmHost {
   }
   /** #156: an image's chain/headers (the tree `root`, whose blocks the set `set` holds) into the empty host chain. */
   async chainImport(set: string, root: CID): Promise<HostChainTip> { return tipOf(await (await this.holder()).call("chain-import", { set, root })); }
+  /**
+   * #156: an image's chain part (the `chain` tree and every object under it) into the EMPTY host
+   * chain, as an instance born with it would bring it (`chain-import`): its objects put in a set of
+   * their own (IMAGE_SET), a tree naming them `chain` as the root, the import, then that set's
+   * members and the blocks no other set holds removed.
+   */
+  async importChain(chain: CID, objects: Array<[CID, Uint8Array]>): Promise<HostChainTip> {
+    const db = openHostDb(this.db);
+    try {
+      const s = new SqliteSetStore(db, IMAGE_SET);
+      const root = hashTree([{ mode: "40000", name: "chain", cid: chain }]);
+      s.begin();
+      for (const [cid, bytes] of objects) s.putBlock(cid.bytes, bytes);
+      s.putBlock(root.cid.bytes, root.object);
+      s.commit();
+      try {
+        return await this.chainImport(IMAGE_SET, root.cid);
+      } finally {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          // members has no index by cid: each object looked up in every other set by its key.
+          const sets = (db.prepare(`SELECT DISTINCT "set" FROM members`).all() as Array<{ set: string }>).map((r) => r.set).filter((x) => x !== IMAGE_SET);
+          const held = db.prepare(`SELECT 1 FROM members WHERE "set" = ? AND cid = ?`);
+          const drop = db.prepare("DELETE FROM blocks WHERE cid = ?");
+          for (const cid of [...objects.map(([c]) => c), root.cid]) if (!sets.some((x) => held.get(x, cid.bytes))) drop.run(cid.bytes);
+          db.prepare(`DELETE FROM members WHERE "set" = ?`).run(IMAGE_SET);
+          db.exec("COMMIT");
+        } catch (e) { db.exec("ROLLBACK"); throw e; }
+      }
+    } finally { db.close(); }
+  }
   /** #156: the host chain as it stands, or undefined (empty). */
   async chainTip(): Promise<HostChainTip | undefined> { const v = await (await this.holder()).call("chain"); return v == null ? undefined : tipOf(v); }
 

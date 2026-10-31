@@ -113,7 +113,7 @@ try {
   check(r.out.some((l) => /^host@localhost\thost\tenabled\t/.test(l)), "skein-host list names it: kind host, enabled");
   stores.push(storeSpec(db.get("host")!));
 
-  host = await runHost(db, { vars, out, err: out });
+  host = await runHost(db, { vars: { ...vars, SKEIN_TERANODE: "off" }, out, err: out });
   const router = host.router;
   const k = async (handle: string) => (await router.hydrate(handle)).kernel;
   const genesisBook = async (handle: string) => (((await (await k(handle)).genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);

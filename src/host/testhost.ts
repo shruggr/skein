@@ -65,17 +65,18 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean } = {}) {
-  const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+  // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
+  const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   // #96: o.lmdb — every instance a set of one LMDB environment, <home>/store (host.db `lmdb:<dir>`), else a file each.
   // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
   // The settled split: o.sqlite (or SKEIN_TEST_STORE=sqlite) — every instance a set of one SQLite database, <home>/store.sqlite, on the wasm kernel.
   const sqlite = o.sqlite ?? process.env.SKEIN_TEST_STORE === "sqlite";
   const storeOf = (handle: string) => (sqlite ? `sqlite:${join(home, "store.sqlite")}` : o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : o.lmdb ? `lmdb:${join(home, "store")}` : join(home, "instances", handle, "runtime.db"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  if (!o.reuse) t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
-  const keyOf = (h: string) => { let k = keys.get(h); if (!k) { k = PrivateKey.fromRandom(); keys.set(h, k); } return k; };
+  const keyOf = (h: string) => { if (o.reuse) return o.reuse.keyOf(h); let k = keys.get(h); if (!k) { k = PrivateKey.fromRandom(); keys.set(h, k); } return k; };
   const ownerKey = o.ownerKey ?? PrivateKey.fromRandom();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
@@ -87,6 +88,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // The host's headers feed (#102).
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
+    // #156: the Teranode headers tracker (a fake mesh and hub in the tests).
+    ...(o.teranode ? { teranode: o.teranode } : {}),
     // #130: what the host bills (billing.ts); none: it bills no one.
     ...(o.billing ? { billing: o.billing } : {}),
     ...(o.lmdb ? { lmdbStore: join(home, "store") } : {}),

@@ -61,7 +61,7 @@ test("skein-host event over the control socket while the router runs; a router o
 
   // The host up: the socket is there, the owner's only.
   const db = new HostDb(join(home, "host.db"));
-  const host = await runHost(db, env);
+  const host = await runHost(db, { ...env, vars: { ...env.vars, SKEIN_TERANODE: "off" } });
   let stopped = false;
   t.after(async () => { if (!stopped) await host.stop(); db.close(); });
   assert.ok(existsSync(sock), "the running router listens on $SKEIN_HOME/host.sock");

@@ -159,6 +159,52 @@ export class ImageChain {
     return h < 0 ? undefined : { height: h, hash: display(sha256d(this.last.subarray(this.last.length - SIZE))) };
   }
 
+  /**
+   * The height of a header held within `depth` of the tip (default two blocks' worth), by its hash
+   * (display hex); undefined when none there is it. An index over that window, rebuilt when the tip moves.
+   */
+  find(hash: string, depth = 2 * PER_BLOCK): number | undefined {
+    const t = this.tip();
+    if (!t) return undefined;
+    if (this.window?.tip !== t.hash || this.window.depth !== depth) {
+      const map = new Map<string, number>();
+      for (let h = t.height; h >= Math.max(0, t.height - depth); h--) map.set(display(sha256d(this.at(h))), h);
+      this.window = { tip: t.hash, depth, map };
+    }
+    return this.window.map.get(hash);
+  }
+  private window?: { tip: string; depth: number; map: Map<string, number> };
+
+  /**
+   * The chain part as objects (#156: what an empty host chain imports): the `chain` tree's CID and
+   * every object under it (the tree, `headers` and its blocks, `tip`), as host.db holds them.
+   */
+  chainPart(): { chain: CID; objects: Array<[CID, Uint8Array]> } | undefined {
+    const c = this.o.db.setting("image_chain");
+    if (!c) return undefined;
+    const chain = Cid.parse(c);
+    const objects: Array<[CID, Uint8Array]> = [[chain, this.object(chain)]];
+    for (const e of parseTree(this.object(chain))) {
+      objects.push([e.cid, this.object(e.cid)]);
+      if (e.name === "headers") for (const b of parseTree(this.object(e.cid))) objects.push([b.cid, this.object(b.cid)]);
+    }
+    return { chain, objects };
+  }
+
+  /** The header held at a height (raw, a copy), or undefined. */
+  headerAt(height: number): Uint8Array | undefined {
+    return height >= 0 && height <= this.height() ? new Uint8Array(this.at(height)) : undefined;
+  }
+
+  /** The headers held from `from` to the tip, `run` at a time (copies; the chain read as it stands at each run). */
+  *runs(from: number, run: number): Generator<Uint8Array[]> {
+    for (let h = Math.max(0, from); h <= this.height(); h += run) {
+      const out: Uint8Array[] = [];
+      for (let i = h; i < h + run && i <= this.height(); i++) out.push(new Uint8Array(this.at(i)));
+      yield out;
+    }
+  }
+
   /** The header at a height (raw), from its block. */
   private at(height: number): Buffer {
     const b = Math.floor(height / PER_BLOCK);

@@ -260,7 +260,7 @@ export class SseStream {
 
 // ---------------------------------------------------------------- the header feeds
 
-interface Sse { stream: SseStream; subscribers: Map<string, string> }
+interface Sse { stream?: SseStream; subscribers: Map<string, string> }
 interface Queue { items: Array<{ box: string; raws: Uint8Array[] }>; running: boolean; dropped: number; /** #141: a backfill is being read: items queue, none is admitted. */ held?: boolean }
 
 /** Headers per backfill run (#141): one `headers` frame each, parents first (#156). */
@@ -271,7 +271,7 @@ export class Feeds {
   private sse = new Map<string, Sse>();
   private declared = new Map<string, FeedSpec[]>();
   private hosted = new Map<string, FeedSpec>();
-  private listeners = new Map<string, (raws: Uint8Array[]) => void>();
+  private listeners = new Map<string, (raws: Uint8Array[], at?: number) => Promise<void> | void>();
   private queues = new Map<string, Queue>();
   private stopped = false;
 
@@ -324,7 +324,7 @@ export class Feeds {
    * chain part grows by it): every header the stream brings, as well as the
    * subscribers'. The connection stays open while a listener is on it.
    */
-  listen(url: string, fn: (raws: Uint8Array[]) => void): void {
+  listen(url: string, fn: (raws: Uint8Array[], at?: number) => Promise<void> | void): void {
     if (this.stopped) return;
     this.listeners.set(url, fn);
     this.connect(url);
@@ -339,7 +339,7 @@ export class Feeds {
     const specs = [...(this.declared.get(handle) ?? []), ...(h ? [h] : [])];
     for (const [url, s] of this.sse) {
       if (s.subscribers.has(handle) && !specs.some((f) => f.kind === "headers" && f.url === url)) s.subscribers.delete(handle);
-      if (!s.subscribers.size && !this.listeners.has(url)) { void s.stream.stop(); this.sse.delete(url); }
+      if (!s.subscribers.size && !this.listeners.has(url)) { void s.stream?.stop(); this.sse.delete(url); }
     }
     for (const f of specs) {
       if (f.kind !== "headers") continue;
@@ -350,6 +350,11 @@ export class Feeds {
   /** The one connection to `url`, opened if it is not. */
   private connect(url: string): Sse {
     let s = this.sse.get(url);
+    if (!s && !/^https?:/i.test(url)) {
+      // #156: a source the host feeds itself (the Teranode tracker, `inject`): subscribers, no connection.
+      s = { subscribers: new Map() };
+      this.sse.set(url, s);
+    }
     if (!s) {
       const subscribers = new Map<string, string>();
       const stream = new SseStream(url, (ev) => this.dispatch(url, subscribers, ev.data), {
@@ -368,7 +373,7 @@ export class Feeds {
   /** Close every connection (no reconnect); resolves once their loops have ended. */
   async stop(): Promise<void> {
     this.stopped = true;
-    const streams = [...this.sse.values()].map((s) => s.stream.stop());
+    const streams = [...this.sse.values()].map((s) => s.stream?.stop());
     this.sse.clear();
     await Promise.all(streams);
   }
@@ -400,11 +405,26 @@ export class Feeds {
     } finally { q.running = false; }
   }
 
-  private dispatch(url: string, subscribers: Map<string, string>, data: string): void {
+  private async dispatch(url: string, subscribers: Map<string, string>, data: string): Promise<void> {
     let dropped = false;
     const hs = headersOf(data, (why) => { dropped = true; this.say("router", `feed ${url}: ${why}`); });
     if (!hs.length) { if (!dropped) this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
-    this.listeners.get(url)?.(hs);
-    for (const [handle, box] of subscribers) this.push(handle, box, hs);
+    await this.deliver(url, subscribers, hs);
+  }
+
+  /**
+   * #156: headers the host brings itself (the Teranode tracker) as if `url`'s stream had: to its
+   * listener (the image chain, the host chain), then to its subscribers in runs of BACKFILL_RUN.
+   * `at`: the height of the first (a run that may replace from there).
+   */
+  async inject(url: string, raws: Uint8Array[], at?: number): Promise<void> {
+    if (this.stopped || !raws.length) return;
+    await this.deliver(url, this.connect(url).subscribers, raws, at);
+  }
+
+  /** The listener first (awaited: the host chain holds the run before an instance is told), then every subscriber. */
+  private async deliver(url: string, subscribers: Map<string, string>, hs: Uint8Array[], at?: number): Promise<void> {
+    try { await this.listeners.get(url)?.(hs, at); } catch (e) { this.say("router", `feed ${url}: ${hs.length} header${hs.length === 1 ? "" : "s"} not taken: ${(e as Error).message}`); }
+    for (const [handle, box] of subscribers) for (let i = 0; i < hs.length; i += BACKFILL_RUN) this.push(handle, box, hs.slice(i, i + BACKFILL_RUN));
   }
 }

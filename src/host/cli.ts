@@ -144,6 +144,17 @@
 //                         and the default image's chain part (#132, image-chain.ts): every header it brings is
 //                         appended to the image, which a chaintracks URL's history (`…/tip/stream` → `…/headers`)
 //                         fills from genesis at start
+//   SKEIN_TERANODE        #156: `off` turns the host's headers tracker over the Teranode P2P network off (teranode.ts;
+//                         `skein-host run` only). On by default where the network has bootstrap peers (main, test):
+//                         it joins the network's block topic (`teranode/bitcoin/1.0.0/<network>-block`), takes each
+//                         announced header into the same intake as SKEIN_HEADERS_URL's, crawls a gap back from the
+//                         announcer's data hub, and, with an empty image chain, syncs the whole chain first from the
+//                         network's default hub (gorillanode). Its key: $SKEIN_HOME/teranode.key (made at first run)
+//   SKEIN_TERANODE_BOOTSTRAP  the tracker's bootstrap peers (multiaddrs, comma separated) over the network's
+//                         (/dnsaddr/<mainnet|testnet>.bootstrap.teranode.bsvb.tech); regtest has none: set it to run one
+//   SKEIN_HEADERS_HUB     the data hub the tracker's first sync reads (a Teranode asset API: `bestblockheader`,
+//                         `headers/<hash>?n=`) over the network's default (https://<mainnet|testnet>.gorillanode.io/api/v1);
+//                         regtest has none: without one the first sync waits for the first announcement's hub
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -166,6 +177,7 @@ import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { homeOf as homeOfVars, identityOf, operatorKey, withHostEnv } from "./hostenv.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
+import { DEFAULT_HUBS, TERANODE_BOOTSTRAP } from "./teranode.ts";
 import { addressBook } from "./deploy.ts";
 import { fetchHttp, hostDomain, Router, type RouterOptions } from "./router.ts";
 import { billingConfig, DEV_BILLING, NSAT } from "./billing.ts";
@@ -753,6 +765,20 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
   };
 }
 
+/**
+ * #156: the host's Teranode headers tracker (`skein-host run`): on unless SKEIN_TERANODE=off, where the
+ * network has bootstrap peers or SKEIN_TERANODE_BOOTSTRAP names some, or a hub is known for the first sync.
+ */
+export function teranodeOptions(v: Record<string, string | undefined>, home: string): Pick<RouterOptions, "teranode"> {
+  if ((v.SKEIN_TERANODE ?? "").toLowerCase() === "off") return {};
+  const net = hostNetwork(v);
+  const named = (v.SKEIN_TERANODE_BOOTSTRAP ?? "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+  const bootstrap = named.length ? named : TERANODE_BOOTSTRAP[net] ?? [];
+  const hub = (v.SKEIN_HEADERS_HUB || DEFAULT_HUBS[net])?.replace(/\/+$/, "");
+  if (!bootstrap.length && !hub) return {};
+  return { teranode: { bootstrap, ...(hub ? { hub } : {}), keyFile: join(home, "teranode.key"), peersFile: join(home, "teranode-peers.json") } };
+}
+
 /** `skein-host billing [handle]` (#130): what host.db holds of billing — the instances, their ticks, their payments. */
 function billingCmd(db: HostDb, rest: string[], env: Env): number {
   const [handle] = rest;
@@ -978,7 +1004,7 @@ async function migrateStoreCmd(db: HostDb, rest: string[], env: Env): Promise<nu
 export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise<Host> {
   const v = env.vars;
   const home = homeOf(v);
-  const router = new Router({ ...routerOptions(db, env), ...o.router });
+  const router = new Router({ ...routerOptions(db, env), ...teranodeOptions(v, home), ...o.router });
   const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
   const binds = (v.SKEIN_ROUTER_BIND ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   const mserver = await router.listen(mport, binds.length ? binds : undefined).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });

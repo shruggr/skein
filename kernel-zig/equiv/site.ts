@@ -258,7 +258,7 @@ try {
   let r = await cli(["init"]);
   check(r.code === 0 && r.out.some((l) => l.includes(`owned by the operator's key ${you}`)), `skein-host init: the host skein, owned by your key at birth: exit ${r.code} ${r.err.join(" ")}`);
   stores.push(db.get("host")!.store);
-  host = await runHost(db, { vars, out, err: out });
+  host = await runHost(db, { vars: { ...vars, SKEIN_TERANODE: "off" }, out, err: out });
   const router = host.router;
   /** A skein's root holders (hex), the head `grants` (#143). */
   const rootsOf = async (handle: string) => {

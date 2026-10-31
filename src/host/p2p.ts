@@ -1059,7 +1059,7 @@ export class P2PHost {
 }
 
 /** A multiaddr on a loopback or private network (dev: the DHT keeps such addresses). */
-function isPrivateAddr(ma: Multiaddr): boolean {
+export function isPrivateAddr(ma: Multiaddr): boolean {
   const c = ma.getComponents().find((x) => x.name.startsWith("dns"));
   if (c?.value) return c.value === "localhost" || c.value.endsWith(".localhost");
   try { return isPrivate(ma); } catch { return true; } // an address isPrivate cannot classify (no IP component) counts as private, as a dev address

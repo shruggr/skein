@@ -120,7 +120,8 @@ import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
-import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { BACKFILL_RUN, DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { hashOf, TeranodeTracker } from "./teranode.ts";
 import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
 import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
@@ -168,6 +169,13 @@ export interface RouterOptions {
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
   headersFeed?: string;
+  /**
+   * #156: the host's headers tracker over the Teranode P2P network (teranode.ts): its bootstrap
+   * peers (the network's, SKEIN_TERANODE_BOOTSTRAP), its first-sync hub (the network's default,
+   * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key). Beside the headers feed or alone:
+   * both feed the same intake. Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
+   */
+  teranode?: { bootstrap: string[]; hub?: string; keyFile?: string; peersFile?: string; listen?: string[]; dht?: boolean; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
   /** Tests: how the broadcaster reaches Arcade. */
@@ -429,6 +437,10 @@ export class Router {
 
   /** The default image (#89), with its chain part (#132): what createInstance boots a new skein from. */
   readonly image: ImageChain;
+  /** #156: the headers tracker over the Teranode mesh (teranode.ts), when the host runs one. */
+  tracker?: TeranodeTracker;
+  /** #156: the header intake, one run at a time (the image chain, then the host chains). */
+  private intake: Promise<unknown> = Promise.resolve();
   /** #130: each billed instance as last read (its host row's terms, the kernel's billing state), and what this host metered since its last tick. */
   private views = new Map<string, BillingView>();
   private periods = new Map<string, Period>();
@@ -627,11 +639,22 @@ export class Router {
 
   /** Hydrate every enabled row once (recovery at hydrate time: what a waiting thread awaits is handed to the providers again), then let them idle out. */
   async start(): Promise<void> {
+    // #132, #156: the host's headers — the feed's and the Teranode tracker's — into one intake: the image's chain part, then the host chains.
+    const key = this.headersKey();
+    if (key) this.feeds.listen(key, (raws, at) => this.takeHeaders(raws, at));
     // #132: the image's chain part, filled from the feed's history (from genesis once; then from near its tip), then grown by the feed.
     if (this.o.headersFeed) {
-      void this.image.start();
-      this.feeds.listen(this.o.headersFeed, (raws) => { void this.image.headers(raws); });
+      const started = this.image.start();
+      void started.then(() => this.syncHolders()).catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
+      // With a feed, its history makes the first sync; the tracker follows the mesh once that is done.
+      if (this.o.teranode) void started.then(() => this.startTracker()).catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
+    } else if (this.o.teranode) {
+      // #156: the tracker is the source: its first sync (a hub's, when the network has one) before any instance steps.
+      await this.startTracker().catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
+      if (this.tracker?.o.hub) await this.tracker.ready;
     }
+    // #156: a host chain that is empty (or behind) filled from the image chain, before any instance is hydrated.
+    await this.syncHolders().catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
     for (const row of this.o.db.list("enabled")) {
       try { await this.hydrate(row.handle); } catch (e) { this.say(row.handle, `not started: ${(e as Error).message}`); }
     }
@@ -691,7 +714,7 @@ export class Router {
     this.control = undefined;
     this.providers.stop();
     this.events.stop();
-    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
+    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop(), this.tracker?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
@@ -901,6 +924,113 @@ export class Router {
 
   // ---------------------------------------------------------------- the host chain (#156)
 
+  /** #156: the key the host's headers arrive under (feeds.ts): the feed's URL, else the tracker's own. */
+  headersKey(): string | undefined {
+    return this.o.headersFeed ?? (this.o.teranode ? `teranode:${this.chainNetwork() ?? "main"}` : undefined);
+  }
+
+  /** #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). */
+  private async startTracker(): Promise<void> {
+    const t = this.o.teranode;
+    if (!t || this.tracker || this.stopped) return;
+    const key = this.headersKey()!;
+    this.tracker = new TeranodeTracker({
+      network: this.chainNetwork() ?? "main", ...t,
+      chain: {
+        tip: () => this.image.tip(),
+        find: (hash) => this.image.find(hash),
+        // A long run (a first sync, a deep catch-up): into the image and the host chains, then each running instance its chain event; a short one as the feed's headers go.
+        take: async (at, raws) => {
+          if (raws.length <= 4 * BACKFILL_RUN) return await this.feeds.inject(key, raws, at);
+          await this.takeHeaders(raws, at);
+          for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
+        },
+      },
+      log: (l) => this.say("router", l),
+    });
+    this.image.ready = this.tracker.ready;
+    await this.tracker.start();
+    this.image.ready = this.tracker.ready;
+  }
+
+  /**
+   * #156: a run of headers from either source (the feed's, `at` undefined: image-chain.ts places
+   * each; the tracker's, at height `at`): into the image's chain part, then every host chain synced
+   * from it. One run at a time.
+   */
+  takeHeaders(raws: Uint8Array[], at?: number): Promise<void> {
+    const p = this.intake.then(async () => {
+      if (at === undefined) await this.image.headers(raws);
+      else await this.image.put(at, raws);
+      await this.syncHolders(at);
+    });
+    this.intake = p.catch(() => {});
+    return p;
+  }
+
+  /** #156: the host chains this host keeps once per database (its SQLite one, its RocksDB one, and those its rows name). */
+  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }> {
+    const sq = new Set<string>(), rocks = new Set<string>();
+    if (this.o.sqliteStore) sq.add(this.o.sqliteStore);
+    if (this.o.rocksStore) rocks.add(this.o.rocksStore);
+    for (const row of this.o.db.list("enabled")) {
+      const spec = storeSpec(row);
+      const r = parseRocksSpec(spec), q = parseSqliteSpec(spec);
+      if (r) rocks.add(r.dir);
+      if (q) sq.add(q.db);
+    }
+    return [
+      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws), importChain: w.importChain.bind(w) }; }),
+      ...[...rocks].map((dir) => { const k = this.kernelHost(dir); return { name: dir, tip: () => k.chainTip(), headers: (raws: Uint8Array[]) => k.chainHeaders(raws) }; }),
+    ];
+  }
+
+  /** #156: each host chain this host keeps (by database) and its tip (undefined: empty). */
+  async hostChainTips(): Promise<Array<{ name: string; tip: HostChainTip | undefined }>> {
+    return await Promise.all(this.hostHolders().map(async (h) => ({ name: h.name, tip: await h.tip() })));
+  }
+
+  /** #156: every host chain brought to the image chain's tip (from `from` when a run replaced from there). */
+  private async syncHolders(from?: number): Promise<void> {
+    for (const h of this.hostHolders()) await this.syncHolder(h.name, h, from).catch((e) => this.say("router", `host chain ${h.name}: not synced from the image chain: ${(e as Error).message}`));
+  }
+
+  /**
+   * #156: a host chain brought to the image chain: an EMPTY one imports the image's chain part
+   * (`chain-import`, as an instance born with it would bring it: one frame) where its kernel can
+   * read it (the wasm kernel's SQLite database), else takes the image's headers from genesis in
+   * `headers` runs; one behind takes the headers it lacks; one the image does not hold at its
+   * height (a fork) from a little below it, or from `from`.
+   */
+  private async syncHolder(name: string, h: { tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }, from?: number): Promise<void> {
+    const top = this.image.height();
+    if (top < 0) return;
+    const tip = await h.tip();
+    const t0 = Date.now();
+    if (!tip && h.importChain) {
+      const part = this.image.chainPart();
+      if (part) {
+        const got = await h.importChain(part.chain, part.objects);
+        this.say("router", `host chain: ${got.added ?? 0} headers imported from the image chain (tip ${got.height}, ${Date.now() - t0} ms)`);
+        return;
+      }
+    }
+    let start = 0;
+    if (tip) {
+      const held = this.image.headerAt(tip.height);
+      start = held && hashOf(held) === tip.hash ? tip.height + 1 : Math.max(0, tip.height - 6);
+      if (from !== undefined) start = Math.min(start, from);
+    }
+    if (start > top) return;
+    let n = 0;
+    for (const run of this.image.runs(start, BACKFILL_RUN)) {
+      await h.headers(run);
+      n += run.length;
+      if (top - start > 10 * BACKFILL_RUN && n % (50 * BACKFILL_RUN) < BACKFILL_RUN) this.say("router", `host chain: ${start + n}/${top + 1} from the image chain`);
+    }
+    if (n > BACKFILL_RUN) this.say("router", `host chain: ${n} headers from the image chain (to ${top}, ${Date.now() - t0} ms)`);
+  }
+
   /**
    * The network the host chain is on: SKEIN_NETWORK (`network`), else the genesis defaults'
    * `walletNetwork` (a test host's), else the kernel's default (main).
@@ -1028,6 +1158,8 @@ export class Router {
       await kernel.start();
       // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
       await this.chainBootstrap(handle, kernel);
+      // #156: a serve kernel's own host chain still empty (born before the image held a chain): from the image chain now.
+      if (kernel instanceof Kernel) await this.syncHolder(handle, { tip: () => kernel.chainTip(), headers: (raws) => kernel.chainHeaders(raws) }).catch((e) => this.say(handle, `host chain: not synced from the image chain: ${(e as Error).message}`));
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
@@ -1413,7 +1545,7 @@ export class Router {
    * handled and unhandled) or stopped. A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
-    if ((!this.p2p && !this.o.headersFeed && !this.events.open(l.row.handle)) || l.kernel.gone) return;
+    if ((!this.p2p && !this.headersKey() && !this.events.open(l.row.handle)) || l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
@@ -1666,7 +1798,7 @@ export class Router {
    * else not. One line when that changes.
    */
   private followHeaders(handle: string, rows: DispatchRow[]): void {
-    const url = this.o.headersFeed;
+    const url = this.headersKey();
     if (!url) return;
     const want = this.o.db.get(handle)?.status === "enabled" && rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX));
     if (want === this.feeds.hosts(handle)) return;
@@ -1687,7 +1819,7 @@ export class Router {
 
   /** Follow the host's headers feed for an instance whose status changed (#102): its table read again. */
   private async refollowHeaders(handle: string): Promise<void> {
-    if (!this.o.headersFeed) return;
+    if (!this.headersKey()) return;
     const l = this.loaded.get(handle);
     const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch((e) => { this.say(handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; }) : undefined;
     this.followHeaders(handle, d?.rows ?? []);

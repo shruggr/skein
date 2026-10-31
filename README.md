@@ -314,6 +314,15 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   default image with the whole header chain from that chaintracks' history
   at start and appends every header the feed brings, so a new skein is born
   with the chain (#132, docs/BOOTSTRAP.md, "The image's chain part").
+  With no setting at all (#156, `src/host/teranode.ts`), `skein-host run`
+  follows the network's Teranode P2P mesh for block announcements (the
+  block topic `teranode/bitcoin/1.0.0/<network>-block`, bootstrap
+  `/dnsaddr/<network>.bootstrap.teranode.bsvb.tech`), crawls a gap back from
+  the announcer's data hub, and on an empty image chain syncs the whole
+  chain first from the network's default hub (gorillanode;
+  `SKEIN_HEADERS_HUB`); an empty host chain is then filled from the image
+  chain. Beside `SKEIN_HEADERS_URL` both feed the same intake;
+  `SKEIN_TERANODE=off` turns it off.
 
 ## Talk to it
 
