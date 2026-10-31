@@ -1972,6 +1972,14 @@ export class Router {
     if (t) return await serve(t);
     const path = url.pathname;
     if (req.method === "GET" && path === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
+    if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
+    // SKEIN_ROOT_INSTANCE: a hostname that is no instance's serves the root instance (the standalone's one app at
+    // localhost:<port>/) — every path but the router's own three above (.well-known/skein-host, /skeins, the ARC
+    // callback). The BRC-169 set below is the host skein's only when no root instance takes the hostname: with one,
+    // POST /.well-known/auth must shake hands with the root instance (its sessions are its own, #68) and
+    // GET /manifest.json is the app's (its grouped permissions), as at an instance's own hostname.
+    const root = this.o.rootInstance;
+    if (root && this.o.db.get(root)?.status === "enabled") return await serve({ handle: root, route: path });
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
     const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
     if (route) {
@@ -1981,11 +1989,6 @@ export class Router {
       if (f) return f;
       return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
     }
-    if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
-    // SKEIN_ROOT_INSTANCE: a hostname that is no instance's serves the root instance (the standalone's one app at localhost:<port>/),
-    // after the host's own paths above.
-    const root = this.o.rootInstance;
-    if (root && this.o.db.get(root)?.status === "enabled") return await serve({ handle: root, route: path });
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 

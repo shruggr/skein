@@ -1,6 +1,6 @@
 {
   "name": "@dcasegr/skein",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A deterministic WASI machine over a content-addressed graph: the node host (it loads the wasm kernel, kernel-zig built for the web target), the client, its peers, and dev tools.",
   "type": "module",
   "bin": {

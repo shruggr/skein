@@ -79,6 +79,19 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/skeins?key=zz", headers: {}, body: new Uint8Array() })).status, 400, "the host's own /skeins");
   db.add("swap", { status: "disabled" });
   assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/", headers: {}, body: new Uint8Array() })).status, 404, "a disabled root instance serves nothing");
+  // An enabled root instance takes every other path at that hostname — the BRC-103 handshake and the app's
+  // manifest included (they were the host skein's BRC-169 set before: the handshake's session then lived in the
+  // wrong instance and every signed request to the root instance came back unsigned).
+  db.setStatus("swap", "enabled");
+  const went: Array<{ handle: string; route: string }> = [];
+  (rooted as unknown as { forward: (h: string, route: string) => Promise<unknown> }).forward = async (handle, route) => { went.push({ handle, route }); return { status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({ handle, route })) }; };
+  for (const [method, path] of [["POST", "/.well-known/auth"], ["GET", "/manifest.json"], ["POST", "/sendMessage"], ["GET", "/amm/tokens"]] as const) {
+    const r = await rooted.dispatch({ method, url: `http://127.0.0.1:1${path}`, headers: {}, body: new Uint8Array() });
+    assert.equal(r.status, 200, `${method} ${path} → the root instance`);
+  }
+  assert.deepEqual(went, [{ handle: "swap", route: "/.well-known/auth" }, { handle: "swap", route: "/manifest.json" }, { handle: "swap", route: "/sendMessage" }, { handle: "swap", route: "/amm/tokens" }]);
+  assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/.well-known/skein-host", headers: {}, body: new Uint8Array() })).status, 200, "the router's own .well-known stays its own");
+  assert.equal((await rooted.dispatch({ method: "GET", url: "http://127.0.0.1:1/skeins?key=zz", headers: {}, body: new Uint8Array() })).status, 400, "the router's own /skeins stays its own");
 });
 
 test("the host's domain (H4): from its origin when no onboarding app names one", async (t) => {
