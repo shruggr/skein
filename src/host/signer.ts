@@ -142,6 +142,15 @@ export class Signer {
     return new KeyDeriver(this.instanceKey(id)).derivePrivateKey(INSTANCE_PROTOCOL, `libp2p:${id}`, "self");
   }
 
+  /**
+   * The host node's peer key (#156): the key's child [2, "skein instance"], key ID `libp2p`, self —
+   * in one-key mode every instance's peer key (peerKey), so they share the host node; in master-key
+   * mode the same rule over the master (its own node beside the instances').
+   */
+  hostPeerKey(): PrivateKey {
+    return this.deriver.derivePrivateKey(INSTANCE_PROTOCOL, "libp2p", "self");
+  }
+
   /** The instance's identity key (hex): what `skein-host add` records. */
   identity(id: string): string {
     return this.instanceKey(id).toPublicKey().toString();

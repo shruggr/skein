@@ -149,8 +149,10 @@
 //                         it joins the network's block topic (`teranode/bitcoin/1.0.0/<network>-block`), takes each
 //                         announced header into the same intake as SKEIN_HEADERS_URL's, crawls a gap back from the
 //                         announcer's data hub, and, with an empty image chain, syncs the whole chain first from the
-//                         network's default hub (gorillanode). Its key: $SKEIN_HOME/teranode.key (made at first run)
-//   SKEIN_TERANODE_BOOTSTRAP  the tracker's bootstrap peers (multiaddrs, comma separated) over the network's
+//                         network's default hub (gorillanode). It rides the host node (the host key's, one per host:
+//                         the instances' overlay on the same node), the block topic's providers looked up on its Teranode
+//                         DHT (/ipfs/kad/1.0.0; the overlay's on its skein DHT, /skein/kad/<network>/1.0.0)
+//   SKEIN_TERANODE_BOOTSTRAP  more Teranode bootstrap peers (multiaddrs, comma separated) beside the network's
 //                         (/dnsaddr/<mainnet|testnet>.bootstrap.teranode.bsvb.tech); regtest has none: set it to run one
 //   SKEIN_HEADERS_HUB     the data hub the tracker's first sync reads (a Teranode asset API: `bestblockheader`,
 //                         `headers/<hash>?n=`) over the network's default (https://<mainnet|testnet>.gorillanode.io/api/v1);
@@ -726,10 +728,11 @@ export interface Host {
  * keys (#70: the HTTP proxy, the waker, the cron provider, the libp2p node, the status provider,
  * the instance manager, and the certifier, #113: its key the certifier key, BRC-169's trust anchor).
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor" | "claimer"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor" | "claimer" | "hostPeerKey"> {
   const signer = signerOf(v, home); // #160: one-key mode (SKEIN_KEY_FILE / SKEIN_KEY), else the master key's
   return {
     walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (handle) => signer.peerKey(handle), providerKeyFor: (name) => signer.providerKey(name),
+    hostPeerKey: signer.hostPeerKey(), // #156: the host node's (the tracker rides it; a one-key host's instances share it)
     // #162: a one-key host claims the instances it creates with its own key.
     ...(signer.shared ? { claimer: signer.wallet("") } : {}),
   };
@@ -773,10 +776,10 @@ export function teranodeOptions(v: Record<string, string | undefined>, home: str
   if ((v.SKEIN_TERANODE ?? "").toLowerCase() === "off") return {};
   const net = hostNetwork(v);
   const named = (v.SKEIN_TERANODE_BOOTSTRAP ?? "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
-  const bootstrap = named.length ? named : TERANODE_BOOTSTRAP[net] ?? [];
+  const bootstrap = [...new Set([...(TERANODE_BOOTSTRAP[net] ?? []), ...named])]; // #156: the network's and the named ones
   const hub = (v.SKEIN_HEADERS_HUB || DEFAULT_HUBS[net])?.replace(/\/+$/, "");
   if (!bootstrap.length && !hub) return {};
-  return { teranode: { bootstrap, ...(hub ? { hub } : {}), keyFile: join(home, "teranode.key"), peersFile: join(home, "teranode-peers.json") } };
+  return { teranode: { bootstrap, ...(hub ? { hub } : {}), peersFile: join(home, "teranode-peers.json") } };
 }
 
 /** `skein-host billing [handle]` (#130): what host.db holds of billing — the instances, their ticks, their payments. */

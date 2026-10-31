@@ -53,8 +53,17 @@
 //              read from a dialled stream handed back (`frames`) to become a
 //              message to the instance — the next frame arrives as an entry.
 //
+// The host node (#156, one node, two DHTs): the node of the HOST key (hostKey: on a one-key host
+// the key every instance's node uses, so the instances join it) runs whether or not an instance
+// declares libp2p — the Teranode headers tracker rides it (teranode.ts: the block topic subscribed
+// as a host topic, hostTopic, judged by the tracker, never the front door). Every node carries TWO
+// Kademlia DHTs, kept apart (their own protocol, datastore, log and metrics prefixes):
+// `teranodeDht` on `/ipfs/kad/1.0.0` (go-libp2p's default, the Teranode message bus's) for the
+// block topic's providers, and `skeinDht` on `/skein/kad/<network>/1.0.0` for the overlay's topics
+// (discover() provides and finds on it only; never `node.contentRouting`, which asks both).
+//
 // Host-wide settings (hostP2PConfig): SKEIN_LIBP2P_LISTEN, _BOOTSTRAP, _RELAYS
-// (comma-separated multiaddrs), _DHT (off | client | server), _MDNS (on | off),
+// (comma-separated multiaddrs), _DHT (off | client | server, default client: both DHTs), _MDNS (on | off),
 // _TLS_CERT / _TLS_KEY (PEM files: the WebSocket listener serves TLS, so
 // browsers can dial /tls/ws); from the environment, else $SKEIN_HOME/host.env.
 
@@ -67,7 +76,7 @@ import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { gossipsub, TopicValidatorResult } from "@libp2p/gossipsub";
 import { identify } from "@libp2p/identify";
 import type { Libp2p, PeerId, Stream } from "@libp2p/interface";
-import { kadDHT, passthroughMapper, removePrivateAddressesMapper } from "@libp2p/kad-dht";
+import { kadDHT, passthroughMapper, removePrivateAddressesMapper, type KadDHT } from "@libp2p/kad-dht";
 import { mdns } from "@libp2p/mdns";
 import { peerIdFromPrivateKey, peerIdFromString } from "@libp2p/peer-id";
 import { ping } from "@libp2p/ping";
@@ -75,7 +84,7 @@ import { tcp } from "@libp2p/tcp";
 import { isPrivate, lpStream, type LengthPrefixedStream } from "@libp2p/utils";
 import { webSockets } from "@libp2p/websockets";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";
-import type { PrivateKey } from "@bsv/sdk";
+import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { createLibp2p } from "libp2p";
 import type { Store } from "../runtime/store.ts";
@@ -96,7 +105,23 @@ export interface P2PHostConfig {
   mdns: boolean;
   /** PEM certificate and key for the WebSocket listener (WSS). */
   tls?: { cert: string; key: string };
+  /** The network (SKEIN_NETWORK's names): the skein DHT's protocol names it (skeinDhtProtocol); default main. */
+  network?: string;
+  /** The Teranode bootstrap peers (the tracker's): only whether they are all private matters here (the Teranode DHT's address mapper). */
+  teranodeBootstrap?: string[];
 }
+
+/** SKEIN_NETWORK's names as the networks' own (the Teranode block topic's, the skein DHT's). */
+export const NETWORK_NAMES: Record<string, string> = { main: "mainnet", test: "testnet", regtest: "regtest" };
+
+/** The Teranode DHT's protocol: go-libp2p's default kad protocol, the one the Teranode message bus runs. */
+export const TERANODE_DHT_PROTOCOL = "/ipfs/kad/1.0.0";
+
+/** The skein DHT's protocol for a network: the overlay's provider records, never merged with another network's. */
+export const skeinDhtProtocol = (network = "main") => `/skein/kad/${NETWORK_NAMES[network] ?? network}/1.0.0`;
+
+/** The two DHT services a node carries (the names in `node.services`). */
+export type DhtName = "teranodeDht" | "skeinDht";
 
 /** One instance's libp2p config (the genesis's `libp2p`): what the router subscribes and serves for it. */
 export interface P2PInstanceConfig {
@@ -171,7 +196,15 @@ export interface P2POptions {
   hostProtocols?: Record<string, (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>>;
   /** Each beat the liveness tool newly keeps from another peer (shruggr/skein#150). */
   beat?(handle: string, topic: string, beat: LiveBeat): void;
+  /**
+   * The host node's peer key (#156): on a one-key host the key every instance's node uses (keyOf's
+   * answer for every handle), so the instances join the host node. Absent: a fresh key (a test's).
+   */
+  hostKey?: PrivateKey;
 }
+
+/** A host topic's judge (hostTopic): each message's data and publisher → GossipSub's verdict. */
+export type HostTopicHandler = (data: Uint8Array, from: PeerId) => "accept" | "reject" | "ignore";
 
 // ---------------------------------------------------------------- keys and IDs
 
@@ -213,7 +246,7 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
     }
   }
   const get = (k: string) => vars[k] ?? file[k];
-  const dht = (get("SKEIN_LIBP2P_DHT") || "off").toLowerCase();
+  const dht = (get("SKEIN_LIBP2P_DHT") || "client").toLowerCase(); // #156: client by default (both DHTs)
   if (dht !== "off" && dht !== "client" && dht !== "server") throw new Error(`SKEIN_LIBP2P_DHT: off | client | server, not ${dht}`);
   const cert = get("SKEIN_LIBP2P_TLS_CERT"), key = get("SKEIN_LIBP2P_TLS_KEY");
   const listen = list(get("SKEIN_LIBP2P_LISTEN"));
@@ -508,6 +541,10 @@ interface Node {
   /** The protocols handled for the handles (the host's own aside). */
   handled: Set<string>;
   timer?: ReturnType<typeof setInterval>;
+  /** The host node (#156): it runs with no handles, and does not stop with its last one. */
+  host?: boolean;
+  /** The host's own topics on it (#156: the Teranode block topic): subscribed beside the handles', judged by their handler, never the front door, never advertised on the skein DHT. */
+  hostTopics: Map<string, HostTopicHandler>;
 }
 
 /** Stream IDs unique across restarts (a thread's recorded stream never names a later stream). */
@@ -531,16 +568,72 @@ export class P2PHost {
   /** Each key's declares, in order (one at a time). */
   private starting = new Map<string, Promise<unknown>>();
   private stopped = false;
+  /** The host node's key (hostKey, else a fresh one) and its peer ID. */
+  private readonly hostKey: PrivateKey;
+  readonly hostId: string;
 
   constructor(o: P2POptions) {
     this.o = o;
+    this.hostKey = o.hostKey ?? PrivateKey.fromRandom();
+    this.hostId = peerIdOf(this.hostKey).toString();
     if (o.beat) this.live.kept = (h, topic, b) => { if (b.from !== this.peerId(h)) o.beat!(h, topic, b); };
   }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
 
-  /** A node's name in a log line: its one handle (as before #160), else its first. */
-  private nameOf(n: Node): string { return n.handles.keys().next().value ?? n.id; }
+  /** A node's name in a log line: its one handle (as before #160), else its first; the host node with none: the router. */
+  private nameOf(n: Node): string { return n.handles.keys().next().value ?? (n.host ? "router" : n.id); }
+
+  // ---------------------------------------------------------------- the host node (#156)
+
+  /**
+   * The host node: the node of the host key, started (once) with no handles when no instance has
+   * started it yet; an instance on that key that starts later joins it (#160), one that started
+   * earlier made it.
+   */
+  async hostNode(): Promise<Libp2p> {
+    if (this.stopped) throw new Error("libp2p: stopped");
+    const key = this.hostId;
+    const prev = this.starting.get(key) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(async () => {
+      if (this.stopped) throw new Error("libp2p: stopped");
+      const n = this.nodes.get(key);
+      if (n) { n.host = true; return n; }
+      const made = await this.start(key, this.hostKey, undefined, undefined);
+      if (!made) throw new Error("libp2p: stopped");
+      return made;
+    });
+    this.starting.set(key, next);
+    void next.catch(() => {}).finally(() => { if (this.starting.get(key) === next) this.starting.delete(key); });
+    return (await next).node;
+  }
+
+  /** The host node's record, once it runs. */
+  private hostOf(): Node | undefined { const n = this.nodes.get(this.hostId); return n?.host ? n : undefined; }
+
+  /**
+   * A host topic on the host node (#156: the Teranode block topic): subscribed, each message judged
+   * by `take` alone (its verdict GossipSub's), never the front door, never advertised on the skein
+   * DHT. Undefined `take`: the topic left.
+   */
+  async hostTopic(topic: string, take: HostTopicHandler | undefined): Promise<void> {
+    await this.hostNode();
+    const n = this.hostOf()!;
+    if (take) n.hostTopics.set(topic, take); else n.hostTopics.delete(topic);
+    this.resubscribe(n);
+  }
+
+  /** The peers the host node knows subscribe `topic` (GossipSub's view). */
+  hostSubscribers(topic: string): string[] {
+    const n = this.hostOf();
+    return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
+  }
+
+  /** One of the host node's DHT services (undefined: SKEIN_LIBP2P_DHT=off, or no host node yet). */
+  hostDht(name: DhtName): KadDHT | undefined {
+    const n = this.hostOf();
+    return n ? dhtOf(n.node, name) : undefined;
+  }
 
   /** The node of an instance, if it has one. */
   node(handle: string): Libp2p | undefined { return this.byHandle.get(handle)?.node; }
@@ -576,7 +669,7 @@ export class P2PHost {
       if (!config) return this.drop(handle);
       const n = this.byHandle.get(handle) ?? this.nodes.get(key);
       if (n) return this.reconfigure(n, handle, config);
-      await this.start(key, handle, config);
+      await this.start(key, this.o.keyOf(handle), handle, config);
     });
     this.starting.set(key, next);
     // Only clears the slot: the error reaches this call's caller through `await next` below.
@@ -624,9 +717,9 @@ export class P2PHost {
   /** The topics `handle` takes: its config's and its apps' liveness topics (#138). */
   private takes(handle: string, h: Handle): string[] { return [...h.config.topics, ...this.live.topics(handle)]; }
 
-  /** Subscribe what the handles' configs and liveness tools (#138) take, unsubscribe the rest: the topics added and removed. */
+  /** Subscribe what the handles' configs and liveness tools (#138) take, and the host's own topics (#156), unsubscribe the rest: the topics added and removed. */
   private resubscribe(n: Node): { added: string[]; removed: string[] } {
-    const want = new Set([...n.handles].flatMap(([handle, h]) => this.takes(handle, h)));
+    const want = new Set([...[...n.handles].flatMap(([handle, h]) => this.takes(handle, h)), ...n.hostTopics.keys()]);
     const ps = this.pubsub(n);
     const removed = [...n.subscribed].filter((t) => !want.has(t));
     const added = [...want].filter((t) => !n.subscribed.has(t));
@@ -692,15 +785,22 @@ export class P2PHost {
     await n.node.handle(protocol, (stream, connection) => { void this.serve(n, protocol, stream, connection.remotePeer); }, { runOnLimitedConnection: true });
   }
 
-  private async start(key: string, handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
+  /** A node for `key` (its private key `pk`): with `handle` and its config, or the host node with none (#156). */
+  private async start(key: string, pk: PrivateKey, handle: string | undefined, config: P2PInstanceConfig | undefined): Promise<Node | undefined> {
     const h = this.o.host;
-    const n: Node = { id: key, node: undefined as never, handles: new Map([[handle, { config, streams: new Map(), beats: new Map() }]]), seqnos: new Map(), subscribed: new Set(), handled: new Set() };
-    const listen = [...(config.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
+    const n: Node = {
+      id: key, node: undefined as never, handles: new Map(handle && config ? [[handle, { config, streams: new Map(), beats: new Map() }]] : []),
+      seqnos: new Map(), subscribed: new Set(), handled: new Set(), hostTopics: new Map(), ...(key === this.hostId ? { host: true } : {}),
+    };
+    const listen = [...(config?.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
     // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
-    const privateDev = [...h.bootstrap, ...listen].every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
+    const allPrivate = (xs: string[]) => xs.every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
+    const privateDev = allPrivate([...h.bootstrap, ...listen]);
+    const privateTeranode = allPrivate([...(h.teranodeBootstrap ?? []), ...listen]);
     const services: Record<string, unknown> = {
       identify: identify(),
-      ping: ping(),
+      // #156: both DHTs ping a new peer at once (before it enters their tables): one outbound ping stream each.
+      ping: ping({ maxOutboundStreams: 4 }),
       pubsub: gossipsub({
         globalSignaturePolicy: "StrictSign",
         allowPublishToZeroTopicPeers: true,
@@ -719,9 +819,19 @@ export class P2PHost {
         },
       }),
     };
-    if (h.dht !== "off") services.dht = kadDHT({ clientMode: h.dht === "client", peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper });
+    // #156: two DHTs, kept apart — Teranode's (the block topic's providers) and ours (the overlay topics'), one mode for both.
+    if (h.dht !== "off") {
+      services.teranodeDht = kadDHT({
+        protocol: TERANODE_DHT_PROTOCOL, clientMode: h.dht === "client", peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
+        logPrefix: "libp2p:dht-teranode", datastorePrefix: "/dht-teranode", metricsPrefix: "libp2p_dht_teranode",
+      });
+      services.skeinDht = kadDHT({
+        protocol: skeinDhtProtocol(h.network), clientMode: h.dht === "client", peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
+        logPrefix: "libp2p:dht-skein", datastorePrefix: "/dht-skein", metricsPrefix: "libp2p_dht_skein",
+      });
+    }
     const node = await createLibp2p({
-      privateKey: libp2pKey(this.o.keyOf(handle)),
+      privateKey: libp2pKey(pk),
       addresses: { listen },
       transports: [tcp(), webSockets(h.tls ? { https: { cert: h.tls.cert, key: h.tls.key } } : {}), ...(h.relays.length ? [circuitRelayTransport()] : [])],
       connectionEncrypters: [noise()],
@@ -732,14 +842,16 @@ export class P2PHost {
     n.node = node;
     if (this.stopped) { await node.stop(); return undefined; }
     this.nodes.set(key, n);
-    this.byHandle.set(handle, n);
+    if (handle) this.byHandle.set(handle, n);
     if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(this.nameOf(n), `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
     this.resubscribe(n);
     const host = this.o.hostProtocols ?? {};
-    for (const protocol of config.protocols.filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
+    for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
-    this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
+    const dhts = h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${TERANODE_DHT_PROTOCOL}, ${skeinDhtProtocol(h.network)})`;
+    if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
+    else this.say("router", `libp2p: the host node, peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; ${dhts}`);
     const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
     setTimeout(discover, 200);
     n.timer = setInterval(discover, this.o.discoveryMs ?? 30_000);
@@ -760,12 +872,14 @@ export class P2PHost {
       if (id === node.peerId.toString() || (id && connected.has(id))) continue;
       await node.dial(ma).catch((e) => this.say(name, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
     }
-    if (this.o.host.dht === "off" || !(node.services as Record<string, unknown>).dht) return;
-    for (const topic of [...n.subscribed]) {
+    // #156: the skein DHT only (node.contentRouting would provide into Teranode's too); the host's own topics are the tracker's.
+    const dht = dhtOf(node, "skeinDht");
+    if (!dht) return;
+    for (const topic of [...n.subscribed].filter((t) => !n.hostTopics.has(t))) {
       const cid = await topicCid(topic);
-      await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch((e) => { if (!timedOut(e)) this.say(name, `libp2p: provide ${topic}: ${(e as Error).message}`); });
+      await drain(dht.provide(cid, { signal: AbortSignal.timeout(20_000) })).catch((e) => { if (!timedOut(e)) this.say(name, `libp2p: provide ${topic}: ${(e as Error).message}`); });
       try {
-        for await (const p of node.contentRouting.findProviders(cid, { signal: AbortSignal.timeout(20_000) })) {
+        for await (const p of providersOf(dht, cid, { signal: AbortSignal.timeout(20_000) })) {
           if (p.id.equals(node.peerId) || node.getConnections(p.id).length) continue;
           await node.dial(p.multiaddrs.length ? p.multiaddrs : p.id).catch((e) => this.say(name, `libp2p: ${topic} provider ${p.id}: ${(e as Error).message}`));
         }
@@ -787,6 +901,13 @@ export class P2PHost {
    */
   private async validate(n: Node, topic: string, _source: PeerId, msg: { type: string; from: PeerId; data: Uint8Array; sequenceNumber: bigint; signature: Uint8Array }): Promise<TopicValidatorResult> {
     if (msg.type !== "signed") return TopicValidatorResult.Reject;
+    // #156: a host topic is judged by its handler alone (the tracker's), never the front door.
+    const own = n.hostTopics.get(topic);
+    if (own) {
+      let v: "accept" | "reject" | "ignore";
+      try { v = own(msg.data, msg.from); } catch (e) { this.say(this.nameOf(n), `libp2p: ${topic}: ${(e as Error).message}`); v = "ignore"; } // the host failing is not the message's fault
+      return v === "accept" ? TopicValidatorResult.Accept : v === "reject" ? TopicValidatorResult.Reject : TopicValidatorResult.Ignore;
+    }
     const takers = [...n.handles].filter(([handle, h]) => h.config.topics.includes(topic) || this.live.takes(handle, topic));
     if (!takers.length) return TopicValidatorResult.Ignore;
     const verdicts = await Promise.all(takers.map(([handle, h]) => this.validateFor(handle, h, topic, msg)));
@@ -1029,7 +1150,7 @@ export class P2PHost {
     for (const b of hs?.beats.values() ?? []) clearInterval(b.timer);
     hs?.beats.clear();
     this.live.drop(handle);
-    if (n.handles.size) {
+    if (n.handles.size || n.host) {
       this.resubscribe(n);
       await this.rehandle(n).catch((e) => this.say(handle, `libp2p: leaving its key's node: ${(e as Error).message}`));
       this.say(handle, `libp2p: left the node of its key ${n.id} (${n.handles.size} instances on it)`);
@@ -1067,3 +1188,21 @@ export function isPrivateAddr(ma: Multiaddr): boolean {
 
 /** An AbortSignal.timeout's abort: the DHT's 20-second rounds end this way, and the next round tries again. */
 const timedOut = (e: unknown): boolean => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+
+/** A node's DHT service by name (#156), or undefined (SKEIN_LIBP2P_DHT=off). */
+export function dhtOf(node: Libp2p, name: DhtName): KadDHT | undefined {
+  return (node.services as Record<string, unknown>)[name] as KadDHT | undefined;
+}
+
+/** The providers a DHT finds for `cid` (its PROVIDER events' peers), on that DHT alone. */
+export async function* providersOf(dht: KadDHT, cid: CID, options: { signal?: AbortSignal } = {}): AsyncIterable<{ id: PeerId; multiaddrs: Multiaddr[] }> {
+  for await (const e of dht.findProviders(cid, options)) if (e.name === "PROVIDER") yield* e.providers;
+}
+
+/** Run a DHT operation's events to the end. */
+export async function drain(events: AsyncIterable<unknown>): Promise<void> { for await (const _ of events) { /* the events: not needed */ } }
+
+/** A DHT's routing table size (undefined: no such DHT). */
+export function tableSize(dht: KadDHT | undefined): number | undefined {
+  return (dht as unknown as { routingTable?: { size: number } } | undefined)?.routingTable?.size;
+}

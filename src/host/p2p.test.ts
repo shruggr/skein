@@ -50,7 +50,7 @@ test("p2p: host-wide settings from the environment, else host.env; an instance's
   const home = await fs.mkdtemp(join(tmpdir(), "skein-p2p-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const d = hostP2PConfig({}, home);
-  assert.deepEqual(d, { listen: ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"], bootstrap: [], dht: "off", relays: [], mdns: false });
+  assert.deepEqual(d, { listen: ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"], bootstrap: [], dht: "client", relays: [], mdns: false });
   await fs.writeFile(join(home, "host.env"), "OTHER=x\nSKEIN_LIBP2P_LISTEN=/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/tcp/4002/ws\nexport SKEIN_LIBP2P_DHT=server\nSKEIN_LIBP2P_MDNS=on\nSKEIN_LIBP2P_BOOTSTRAP=\"/ip4/1.2.3.4/tcp/4001/p2p/x\"\n");
   const c = hostP2PConfig({ SKEIN_LIBP2P_DHT: "client" }, home);
   assert.deepEqual(c, { listen: ["/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/tcp/4002/ws"], bootstrap: ["/ip4/1.2.3.4/tcp/4001/p2p/x"], dht: "client", relays: [], mdns: true });

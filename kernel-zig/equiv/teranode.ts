@@ -63,7 +63,7 @@ try {
 
   // ------------------------------------------------ the next start, with the tracker
   const t0 = Date.now();
-  const h2 = await testHost({ after: (x) => afters.push(x) }, { ownerKey, ...regtest, ...store, reuse: { home: h1.home, keyOf: h1.keyOf }, teranode: { bootstrap: [f.addr()], hub: f.hub, dht: false, discoveryMs: 300 } });
+  const h2 = await testHost({ after: (x) => afters.push(x) }, { ownerKey, ...regtest, ...store, reuse: { home: h1.home, keyOf: h1.keyOf }, teranode: { bootstrap: [f.addr()], hub: f.hub, discoveryMs: 300 } });
   await h2.router.start();
   const tips = await h2.router.hostChainTips();
   check(h2.router.image.tip()?.height === N && tips[0]?.tip?.height === N && tips[0]?.tip?.hash === display(sha256d(f.chain[N]!)), `at start: the first sync from the hub (${N + 1} headers) and the host chain filled: tip ${tips[0]?.tip?.height} in ${Date.now() - t0} ms`);

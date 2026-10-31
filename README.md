@@ -322,7 +322,19 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   chain first from the network's default hub (gorillanode;
   `SKEIN_HEADERS_HUB`); an empty host chain is then filled from the image
   chain. Beside `SKEIN_HEADERS_URL` both feed the same intake;
-  `SKEIN_TERANODE=off` turns it off.
+  `SKEIN_TERANODE=off` turns it off. The tracker rides the host's ONE
+  libp2p node (the host key's; a one-key host's instances are on it too),
+  which carries two Kademlia DHTs: Teranode's (`/ipfs/kad/1.0.0`, the
+  block topic's providers) and the skein DHT
+  (`/skein/kad/<network>/1.0.0`, the overlay's topics). An install dials
+  out only (loopback listeners, both DHTs in client mode);
+  `SKEIN_TERANODE_BOOTSTRAP` adds Teranode peers beside the network's,
+  `SKEIN_LIBP2P_BOOTSTRAP` names skein peers — one address serves both
+  when that peer is in both DHTs.
+- A hosted node that installs bootstrap from (it sits in both DHTs and
+  answers their queries) sets two things in `host.env` beside the usual:
+  `SKEIN_LIBP2P_LISTEN` = its public address(es) (e.g.
+  `/ip4/0.0.0.0/tcp/4001`), and `SKEIN_LIBP2P_DHT=server`. Nothing else.
 
 ## Talk to it
 

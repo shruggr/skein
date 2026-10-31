@@ -34,26 +34,20 @@
 // (regtest) and none named: it waits for the first announcement and syncs from
 // ITS hub. Same crawl both ways.
 //
-// The node is the host's own (one per host), separate from the overlay's
-// libp2p nodes (p2p.ts): another mesh, another key ($SKEIN_HOME/teranode.key,
-// an Ed25519 key made at first run, mode 0600, as go-teranode-p2p-client keeps
-// its p2p_key.hex).
+// The node is the HOST node (p2p.ts P2PHost.hostNode, #156 one node, two
+// DHTs): the node of the host key, which on a one-key host carries the
+// instances' overlay too. The block topic is a host topic on it (judged here:
+// Accept when the message reads as an announcement, else Reject; never the
+// front door); the block topic's providers are looked up on its Teranode DHT
+// (`/ipfs/kad/1.0.0`), never its skein DHT. The peers met are kept in
+// teranode-peers.json between runs.
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { noise } from "@chainsafe/libp2p-noise";
-import { yamux } from "@chainsafe/libp2p-yamux";
-import { generateKeyPair, privateKeyFromProtobuf, privateKeyToProtobuf } from "@libp2p/crypto/keys";
-import { gossipsub } from "@libp2p/gossipsub";
-import { identify } from "@libp2p/identify";
-import type { Libp2p, PrivateKey } from "@libp2p/interface";
-import { kadDHT, passthroughMapper, removePrivateAddressesMapper } from "@libp2p/kad-dht";
-import { ping } from "@libp2p/ping";
-import { tcp } from "@libp2p/tcp";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { Libp2p } from "@libp2p/interface";
 import { multiaddr } from "@multiformats/multiaddr";
-import { createLibp2p } from "libp2p";
 import { headerProblem } from "./image-chain.ts";
-import { isPrivateAddr, topicCid } from "./p2p.ts";
+import { NETWORK_NAMES, providersOf, tableSize, topicCid, type P2PHost } from "./p2p.ts";
 
 /** The network's bootstrap peers (go-teranode-p2p-client config.go); regtest has none. */
 export const TERANODE_BOOTSTRAP: Record<string, string[]> = {
@@ -67,11 +61,9 @@ export const DEFAULT_HUBS: Record<string, string> = {
   test: "https://testnet.gorillanode.io/api/v1",
 };
 
-const TOPIC_NETWORK: Record<string, string> = { main: "mainnet", test: "testnet", regtest: "regtest" };
-
 /** The block topic of a network (SKEIN_NETWORK's names, or the topic's own). */
 export function blockTopic(network: string): string {
-  return `teranode/bitcoin/1.0.0/${TOPIC_NETWORK[network] ?? network}-block`;
+  return `teranode/bitcoin/1.0.0/${NETWORK_NAMES[network] ?? network}-block`;
 }
 
 const SIZE = 80;
@@ -169,20 +161,18 @@ export interface TrackerChain {
 
 export interface TrackerOptions {
   network: string;
-  /** Bootstrap multiaddrs (dnsaddr resolved by libp2p); none: no mesh (a hub-only first sync). */
+  /** Bootstrap multiaddrs (dnsaddr resolved by libp2p): the network's and SKEIN_TERANODE_BOOTSTRAP's; dialled while the host node has few peers. */
   bootstrap: string[];
+  /** The host's libp2p (#156): the tracker rides its host node. None: no mesh (a hub-only first sync). */
+  p2p?: P2PHost;
   /** The hub for the first sync (DEFAULT_HUBS, SKEIN_HEADERS_HUB); none: the first announcement's. */
   hub?: string;
-  /** The node's key file (created if absent, 0600); none: a fresh key each start. */
-  keyFile?: string;
   /**
    * Where the peers met are kept between runs (go-p2p-message-bus's peer cache): dialled at start
    * beside the bootstrap peers, so a restart does not hang on the bootstrap; none: not kept.
    */
   peersFile?: string;
   chain: TrackerChain;
-  /** Listen addresses (default: none — the tracker dials out only). */
-  listen?: string[];
   /** Headers per hub request: a gap's crawl (default 2 000) and the first sync's (default 10 000; a hub may answer fewer). */
   page?: number;
   bulkPage?: number;
@@ -190,8 +180,6 @@ export interface TrackerOptions {
   maxCrawl?: number;
   /** Peer upkeep: bootstrap redialled, block-topic providers looked up in the DHT (ms, default 30 000). */
   discoveryMs?: number;
-  /** The kad-DHT (client mode) on, the default; off for a closed test mesh. */
-  dht?: boolean;
   hub_?: HubOptions;
   log?(line: string): void;
 }
@@ -208,7 +196,7 @@ export class TeranodeTracker {
   private syncing = false;
   /** The newest announcement seen while the first sync ran (caught up from after it). */
   private pending?: Announcement;
-  private peers = -1;
+  private peers = "";
   private lastBootErr = "";
   /** Counts for the logs and tests. */
   readonly stats = { announcements: 0, dropped: 0, taken: 0, crawled: 0, known: 0 };
@@ -220,9 +208,9 @@ export class TeranodeTracker {
 
   private say(line: string): void { this.o.log?.(line); }
 
-  /** Join the mesh (when there are bootstrap peers) and start the first sync when the image chain is empty. */
+  /** Join the mesh (on the host node) and start the first sync when the image chain is empty. */
   async start(): Promise<void> {
-    if (this.o.bootstrap.length) await this.join();
+    if (this.o.p2p) await this.join(this.o.p2p);
     // In turn with the announcements (one change to the chain at a time).
     const p = this.queue.then(() => this.initial()).catch((e) => this.say(`headers: initial sync failed: ${(e as Error).message}; the next announcement syncs from its hub`));
     this.queue = p;
@@ -232,46 +220,23 @@ export class TeranodeTracker {
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
-    try { await this.node?.stop(); } catch { /* stopping: nothing to keep */ }
+    // The node is the host's: it stops with the host's libp2p (P2PHost.stop), the block topic left first.
+    await this.o.p2p?.hostTopic(this.topic, undefined).catch(() => {});
   }
 
-  private async key(): Promise<PrivateKey> {
-    const f = this.o.keyFile;
-    if (f && existsSync(f)) return privateKeyFromProtobuf(Uint8Array.from(Buffer.from(readFileSync(f, "utf8").trim(), "hex")));
-    const k = await generateKeyPair("Ed25519");
-    if (f) { writeFileSync(f, `${Buffer.from(privateKeyToProtobuf(k)).toString("hex")}\n`, { mode: 0o600 }); chmodSync(f, 0o600); }
-    return k;
-  }
-
-  private async join(): Promise<void> {
+  /** The block topic on the host node: each message judged here (an announcement Accept and followed, anything else Reject); upkeep every round. */
+  private async join(p2p: P2PHost): Promise<void> {
     const t0 = Date.now();
-    const privateDev = this.o.bootstrap.every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return false; } });
-    const services: Record<string, unknown> = {
-      identify: identify(),
-      ping: ping(),
-      pubsub: gossipsub({ globalSignaturePolicy: "StrictSign", allowPublishToZeroTopicPeers: true, emitSelf: false }),
-    };
-    if (this.o.dht !== false) services.dht = kadDHT({ clientMode: true, peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper });
-    const node = await createLibp2p({
-      privateKey: await this.key(),
-      addresses: { listen: this.o.listen ?? [] },
-      transports: [tcp()],
-      connectionEncrypters: [noise()],
-      streamMuxers: [yamux()],
-      services: services as never,
-    });
+    const node = await p2p.hostNode();
     this.node = node;
-    if (this.stopped) { await node.stop(); return; }
-    const ps = (node.services as { pubsub: ReturnType<ReturnType<typeof gossipsub>> }).pubsub;
-    ps.subscribe(this.topic);
-    ps.addEventListener("message", (e) => {
-      const m = e.detail as { topic: string; data: Uint8Array };
-      if (m.topic !== this.topic) return;
-      const a = parseAnnouncement(m.data);
-      if (!a) { this.stats.dropped++; return; }
+    if (this.stopped) return;
+    await p2p.hostTopic(this.topic, (data) => {
+      const a = parseAnnouncement(data);
+      if (!a) { this.stats.dropped++; return "reject"; }
       this.announce(a);
+      return "accept";
     });
-    this.say(`headers: Teranode ${this.o.network} mesh as ${node.peerId} on ${this.topic}; bootstrap ${this.o.bootstrap.join(" ")}`);
+    this.say(`headers: Teranode ${this.o.network} mesh on the host node ${node.peerId}, ${this.topic}; bootstrap ${this.o.bootstrap.join(" ") || "none"}`);
     const upkeep = () => void this.upkeep(t0).catch((e) => this.say(`headers: Teranode peers: ${(e as Error).message}`));
     upkeep();
     this.timer = setInterval(upkeep, this.o.discoveryMs ?? 30_000);
@@ -282,7 +247,8 @@ export class TeranodeTracker {
   private async upkeep(t0: number): Promise<void> {
     const node = this.node;
     if (!node || this.stopped) return;
-    if (node.getConnections().length < 4) {
+    // One node carries the overlay too (#156): its Teranode side counts the peers on the block topic.
+    if (this.o.p2p!.hostSubscribers(this.topic).length < 4) {
       const errs: string[] = [];
       await Promise.all([...this.o.bootstrap, ...this.cached()].map(async (a, i) => {
         try { await node.dial(multiaddr(a), { signal: AbortSignal.timeout(20_000) }); } catch (e) { if (i < this.o.bootstrap.length) errs.push(`${a}: ${(e as Error).message}`); }
@@ -291,24 +257,37 @@ export class TeranodeTracker {
       const err = errs.join("; ");
       if (err !== this.lastBootErr) { this.lastBootErr = err; this.say(err ? `headers: Teranode bootstrap ${err}` : "headers: Teranode bootstrap reached"); }
     }
-    if ((node.services as Record<string, unknown>).dht && node.getConnections().length) {
+    const p2p = this.o.p2p!;
+    const dht = p2p.hostDht("teranodeDht");
+    if (dht && node.getConnections().length) {
       try {
         let dialled = 0;
-        for await (const p of node.contentRouting.findProviders(await topicCid(this.topic), { signal: AbortSignal.timeout(20_000) })) {
+        // The Teranode DHT alone (the bus's RoutingDiscovery: the topic name's CID, topicCid).
+        for await (const p of providersOf(dht, await topicCid(this.topic), { signal: AbortSignal.timeout(20_000) })) {
           if (p.id.equals(node.peerId) || node.getConnections(p.id).length) continue;
           if (++dialled > 8) break;
           void node.dial(p.multiaddrs.length ? p.multiaddrs : p.id, { signal: AbortSignal.timeout(15_000) }).catch(() => {}); // a provider that does not answer: the next round's
         }
       } catch { /* timed out: the next round */ }
     }
-    const ps = (node.services as { pubsub: ReturnType<ReturnType<typeof gossipsub>> }).pubsub;
-    const n = node.getConnections().length, onTopic = ps.getSubscribers(this.topic).length;
-    this.keep(node, ps.getSubscribers(this.topic).map(String));
-    if (n * 1000 + onTopic !== this.peers) {
-      this.peers = n * 1000 + onTopic;
-      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    const subs = p2p.hostSubscribers(this.topic);
+    const n = node.getConnections().length, onTopic = subs.length;
+    this.keep(node, subs);
+    const t = this.tables();
+    const now = `${n} ${onTopic} ${t.teranode} ${t.skein}`;
+    if (now !== this.peers) {
+      this.peers = now;
+      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic; DHT tables: Teranode ${t.teranode ?? "off"}, skein ${t.skein ?? "off"}) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     }
   }
+
+  /** The host node's two DHT routing tables' sizes (undefined: the DHTs off). */
+  tables(): { teranode?: number; skein?: number } {
+    return { teranode: tableSize(this.o.p2p?.hostDht("teranodeDht")), skein: tableSize(this.o.p2p?.hostDht("skeinDht")) };
+  }
+
+  /** The peers on the block topic the host node knows (GossipSub's view). */
+  onTopic(): number { return this.o.p2p?.hostSubscribers(this.topic).length ?? 0; }
 
   /** The peers kept from earlier runs (their dialable addresses). */
   private cached(): string[] {

@@ -175,7 +175,7 @@ export interface RouterOptions {
    * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key). Beside the headers feed or alone:
    * both feed the same intake. Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
    */
-  teranode?: { bootstrap: string[]; hub?: string; keyFile?: string; peersFile?: string; listen?: string[]; dht?: boolean; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
+  teranode?: { bootstrap: string[]; hub?: string; peersFile?: string; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
   /** Tests: how the broadcaster reaches Arcade. */
@@ -228,6 +228,11 @@ export interface RouterOptions {
   libp2p?: P2PHostConfig;
   /** An instance's libp2p peer key (signer.ts peerKey). Absent: no libp2p host; the kernels' `libp2p` is refused. */
   peerKeyFor?(handle: string): PrivateKey;
+  /**
+   * #156: the host node's peer key (P2PHost.hostNode: the Teranode tracker rides it; on a one-key
+   * host every instance's peer key, so they share it). Absent: a fresh key per start.
+   */
+  hostPeerKey?: PrivateKey;
   /**
    * A provider's key (#70, signer.ts providerKey: the HTTP proxy `fetch`, the
    * `waker`, `cron`, `libp2p`, `status`), which each new genesis's address
@@ -439,6 +444,9 @@ export class Router {
   readonly image: ImageChain;
   /** #156: the headers tracker over the Teranode mesh (teranode.ts), when the host runs one. */
   tracker?: TeranodeTracker;
+  /** #156: the libp2p the host node runs on: the instances' (`p2p`), else one for the tracker alone. */
+  hostP2p?: P2PHost;
+  private readonly p2pConfig: P2PHostConfig;
   /** #156: the header intake, one run at a time (the image chain, then the host chains). */
   private intake: Promise<unknown> = Promise.resolve();
   /** #130: each billed instance as last read (its host row's terms, the kernel's billing state), and what this host metered since its last tick. */
@@ -512,9 +520,12 @@ export class Router {
         holds: async (h, txid) => await (await this.hydrate(h)).kernel.hasBlock(txCid(txid)),
       });
     }
+    // #156: the host's libp2p (one node per key; the host node among them) — for the instances, and for the tracker on its own.
+    const hostConfig = { ...(o.libp2p ?? { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false }), network: this.chainNetwork() ?? "main", ...(o.teranode ? { teranodeBootstrap: o.teranode.bootstrap } : {}) };
+    this.p2pConfig = hostConfig;
     if (o.peerKeyFor) {
       this.p2p = new P2PHost({
-        host: o.libp2p ?? { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off", relays: [], mdns: false },
+        host: hostConfig, ...(o.hostPeerKey ? { hostKey: o.hostPeerKey } : {}),
         keyOf: o.peerKeyFor, discoveryMs: o.libp2pDiscoveryMs,
         inbound: (h, c) => this.p2pInbound(h, c),
         log: (s, l) => this.say(s, l),
@@ -524,6 +535,7 @@ export class Router {
         beat: (h, topic, b) => { this.sync?.beat(h, topic, b); void this.rememberPeer(h, topic, b.from); },
       });
       const p2pHost = this.p2p;
+      this.hostP2p = p2pHost;
       this.sync = new OverlaySync({
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
         local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
@@ -714,7 +726,8 @@ export class Router {
     this.control = undefined;
     this.providers.stop();
     this.events.stop();
-    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop(), this.tracker?.stop()]);
+    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.tracker?.stop()]);
+    await Promise.all([this.p2p?.stop(), this.hostP2p !== this.p2p ? this.hostP2p?.stop() : undefined]); // #156: the host node with them
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
@@ -934,8 +947,15 @@ export class Router {
     const t = this.o.teranode;
     if (!t || this.tracker || this.stopped) return;
     const key = this.headersKey()!;
+    // #156: no instance libp2p (no peer keys: a test's host): the host's libp2p for the tracker alone.
+    this.hostP2p ??= new P2PHost({
+      host: this.p2pConfig, ...(this.o.hostPeerKey ? { hostKey: this.o.hostPeerKey } : {}), discoveryMs: this.o.libp2pDiscoveryMs,
+      keyOf: () => { throw new Error("no instance libp2p on this host"); },
+      inbound: async () => ({ verdict: "ignore" }),
+      log: (s, l) => this.say(s, l),
+    });
     this.tracker = new TeranodeTracker({
-      network: this.chainNetwork() ?? "main", ...t,
+      network: this.chainNetwork() ?? "main", ...t, p2p: this.hostP2p,
       chain: {
         tip: () => this.image.tip(),
         find: (hash) => this.image.find(hash),

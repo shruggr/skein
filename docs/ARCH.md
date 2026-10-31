@@ -308,9 +308,12 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   `/chaintracks/v2/tip/stream`: the 80 bytes are serialized from its
   fields, and one whose `hash` is not theirs is dropped).
 - **The Teranode tracker** (`src/host/teranode.ts`, #156): the host's second
-  source of headers, its own libp2p node on the network's Teranode mesh
-  (TCP, noise, yamux, kad-DHT client, GossipSub StrictSign; key
-  `$SKEIN_HOME/teranode.key`). Each block announcement's header goes into
+  source of headers, on the host's one libp2p node (the host key's; the
+  instances' overlay on the same node) joined to the network's Teranode
+  mesh: the block topic a host topic judged by the tracker (never the front
+  door), its providers looked up on the node's Teranode DHT
+  (`/ipfs/kad/1.0.0`), kept apart from the node's skein DHT
+  (`/skein/kad/<network>/1.0.0`, the overlay's topics). Each block announcement's header goes into
   the same intake as the feed's (the image chain, then every host chain
   synced from it, then the subscribers); a header whose parent is not held
   near the tip is crawled back from the announcer's data hub
