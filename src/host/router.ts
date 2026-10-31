@@ -27,6 +27,8 @@
 //   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
 //   GET  /skeins?key=<hex>                at the host's own origin: the skeins here whose head `grants` names the key
 //                                         among root's holders, [{handle, identity, url}] (no wallet token tracks them)
+//   GET  /.well-known/skein               at an instance's origin (its hostname, /@<handle>/, the root instance's): {handle,
+//                                         identity, origin, claimed} — claimed: its head `grants` names a root holder
 //   GET  /.well-known/skein-host          at every host name, an instance's too (#103): {origin, domain} — this
 //                                         router's origin and the handle domain (the onboarding app's
 //                                         config.onboard.domain), for a page an instance serves (the management
@@ -1958,6 +1960,8 @@ export class Router {
       if (o.handle) return await this.held(this.forward(o.handle, url.pathname, url, req));
     }
     const serve = async (x: { handle: string; route: string }): Promise<RouterResponse> => {
+      // The instance's own card, the host's read (no program): whether anyone holds root yet.
+      if (req.method === "GET" && x.route === "/.well-known/skein") return await this.instanceCard(x.handle);
       // #138: the liveness tool's read, the host's own (no program).
       const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(x.route) : null;
       if (live) return await this.held(this.liveRead(x.handle, x.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
@@ -2047,13 +2051,30 @@ export class Router {
     if (!/^0[23][0-9a-f]{64}$/.test(key)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "key: an identity key (33 bytes, hex)" });
     const out: Array<{ handle: string; identity: string; url: string }> = [];
     for (const row of this.o.db.list("enabled")) {
-      if (row.kind === "mailbox" || !row.identity || !storeExists(storeSpec(row))) continue;
-      let roots: string[];
-      const s = openStoreFile(storeSpec(row), { readOnly: true });
-      try { roots = await rootOf(s); } catch { roots = []; } finally { s.close(); }
-      if (roots.includes(key)) out.push({ handle: row.handle, identity: row.identity, url: this.originOf(row.handle) });
+      if (row.kind === "mailbox" || !row.identity) continue;
+      if ((await this.rootsOf(row)).includes(key)) out.push({ handle: row.handle, identity: row.identity, url: this.originOf(row.handle) });
     }
     return json(200, out);
+  }
+
+  /**
+   * GET /.well-known/skein at an instance's origin (its hostname, `/@<handle>/`, or the root instance's
+   * hostname): `{handle, identity, origin, claimed}` — `claimed` whether its head `grants` names a root
+   * holder (an image instance nobody has claimed: false). Read from its store read-only, no kernel, as
+   * /skeins does. Unsigned, anyone; 404 for no instance. "Am I root" is /skeins?key=<identity>.
+   */
+  private async instanceCard(handle: string): Promise<RouterResponse> {
+    const row = this.o.db.get(handle);
+    if (!row?.identity) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no instance ${handle} here` });
+    return json(200, { handle, identity: row.identity, origin: this.originOf(handle), claimed: (await this.rootsOf(row)).length > 0 });
+  }
+
+  /** The keys an instance's head `grants` names root (#143), its store read read-only; none when it has no store yet. */
+  private async rootsOf(row: { handle: string; store: string }): Promise<string[]> {
+    const spec = storeSpec(row);
+    if (!storeExists(spec)) return [];
+    const s = openStoreFile(spec, { readOnly: true });
+    try { return await rootOf(s); } catch { return []; } finally { s.close(); }
   }
 
   /** A forwarded request, held among the in-flight ones (shutdown answers them 503). */

@@ -22,7 +22,7 @@ import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
-import { signClaim, signMessage } from "../client/raw.ts";
+import { RawBox, signClaim, signMessage } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { storeSpec } from "../runtime/index-store.ts";
 import { openStoreFile } from "./stores.ts";
@@ -197,4 +197,29 @@ test("#164: an owned create — an image instance born owned: root its owner's f
   };
   assert.equal(await send(PrivateKey.fromRandom()), true, "another key's dispatch message: refused by the gate (root's), the route stands");
   assert.equal(await send(ownerKey), false, "the owner's: it runs, the route removed");
+});
+
+test("GET /.well-known/skein: an unclaimed image instance answers claimed:false; the first wallet's claim (its own message, box `claim`) makes it root — claimed:true, /skeins?key= lists it; a second claim is refused", { skip, timeout: 120_000 }, async (t) => {
+  const h = await testHost(t);
+  const creator = PrivateKey.fromRandom().toPublicKey().toString();
+  const c = await h.router.createInstance("ex", creator, {});
+  const card = async (path = `${h.base}/@ex/.well-known/skein`) => { const r = await fetch(path); return { status: r.status, body: await r.json() as Record<string, unknown> }; };
+  assert.deepEqual(await card(), { status: 200, body: { handle: "ex", identity: c.identity, origin: h.origin("ex"), claimed: false } }, "unclaimed: nobody holds root (the creator's key is only the row's)");
+  assert.equal((await card(`${h.base}/@nobody/.well-known/skein`)).status, 404, "no instance: 404");
+  const held = async (key: string) => (await (await fetch(`${h.base}/skeins?key=${key}`)).json()) as Array<{ handle: string }>;
+  assert.deepEqual(await held(creator), [], "the creator holds nothing");
+
+  const firstKey = PrivateKey.fromRandom(), first = firstKey.toPublicKey().toString();
+  await new RawBox(ephemeralWallet(firstKey), `${h.base}/@ex`).send(c.identity, "claim", {});
+  await h.router.settled();
+  await (await h.router.hydrate("ex")).kernel.idle();
+  assert.equal((await card()).body.claimed, true, "claimed after the first wallet's claim");
+  assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"], "/skeins?key=<the claimant> lists it");
+
+  const secondKey = PrivateKey.fromRandom(), second = secondKey.toPublicKey().toString();
+  await new RawBox(ephemeralWallet(secondKey), `${h.base}/@ex`).send(c.identity, "claim", {}).catch(() => undefined);
+  await h.router.settled();
+  await (await h.router.hydrate("ex")).kernel.idle();
+  assert.deepEqual(await held(second), [], "a second claim is refused: root unchanged");
+  assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"]);
 });

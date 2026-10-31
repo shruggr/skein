@@ -82,7 +82,10 @@ every user skein: the front door, the messagebox, the wallet, and one row
 to the kernel, `claim`, from anyone: the first claim's sender owns it
 (#127), so claim it first thing. The host signs no user's claim; `skein
 claim --messagebox <url>` names where the instance reaches its owner. A
-second claim is refused. It has no apps (#152). After the claim, install
+second claim is refused. `GET <its origin>/.well-known/skein` answers
+`{handle, identity, origin, claimed}` (the host's read: whether anyone
+holds root yet); `GET /skeins?key=<key>` lists the instances a key is root
+on. It has no apps (#152). After the claim, install
 the chain, git and site apps by message, and root's route `/` to the site:
 
 ```
