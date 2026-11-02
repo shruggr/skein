@@ -259,13 +259,44 @@ export async function topicCid(topic: string): Promise<CID> {
 
 const list = (s: string | undefined) => (s ?? "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
 
-/** The host-wide settings: the environment's SKEIN_LIBP2P_*, else $SKEIN_HOME/host.env's. */
+/**
+ * The network's overlay bootstrap peers (SKEIN_NETWORK's names): the hosted Open Exchange node per network,
+ * dialled beside SKEIN_LIBP2P_BOOTSTRAP's (unioned, as TERANODE_BOOTSTRAP is with SKEIN_TERANODE_BOOTSTRAP).
+ * A node whose own peer id is one of them skips it (discover()). Mainnet and regtest have none yet.
+ */
+export const OVERLAY_BOOTSTRAP: Record<string, string[]> = {
+  test: ["/dns4/p2p.testnet.openex.dev/tcp/7534/p2p/16Uiu2HAmVN7Cc7TrFGVrbdoV1mMGBF8LQBvPZ5trzgPArfagBRSB"],
+};
+
+/** SKEIN_LIBP2P_BOOTSTRAP over the network's defaults: unset, the network's; a list, unioned with them; `off`, none at all. */
+export function overlayBootstrap(network: string, named: string | undefined): string[] {
+  if ((named ?? "").trim().toLowerCase() === "off") return [];
+  return [...new Set([...(OVERLAY_BOOTSTRAP[network] ?? []), ...list(named)])];
+}
+
+/**
+ * The bootstrap addresses a node dials now: not its own peer id (the hosted node is its network's default
+ * bootstrap), not a peer already connected; an address that does not parse is reported and skipped.
+ */
+export function bootstrapDials(bootstrap: string[], self: string, connected: Set<string>, bad: (a: string) => void = () => {}): string[] {
+  const out: string[] = [];
+  for (const a of bootstrap) {
+    let ma: Multiaddr;
+    try { ma = multiaddr(a); } catch { bad(a); continue; }
+    const id = ma.getComponents().find((c) => c.name === "p2p")?.value;
+    if (id === self || (id && connected.has(id))) continue;
+    out.push(a);
+  }
+  return out;
+}
+
+/** The host-wide settings: the environment's SKEIN_LIBP2P_* (and SKEIN_NETWORK), else $SKEIN_HOME/host.env's. */
 export function hostP2PConfig(vars: Record<string, string | undefined>, home?: string): P2PHostConfig {
   const file: Record<string, string> = {};
   const envFile = home ? join(home, "host.env") : undefined;
   if (envFile && existsSync(envFile)) {
     for (const line of readFileSync(envFile, "utf8").split("\n")) {
-      const m = /^\s*(?:export\s+)?(SKEIN_LIBP2P_[A-Z_]+)=(.*)$/.exec(line);
+      const m = /^\s*(?:export\s+)?(SKEIN_LIBP2P_[A-Z_]+|SKEIN_NETWORK)=(.*)$/.exec(line);
       if (m) file[m[1]!] = m[2]!.trim().replace(/^(["'])(.*)\1$/, "$2");
     }
   }
@@ -278,7 +309,7 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
   const listen = list(get("SKEIN_LIBP2P_LISTEN"));
   return {
     listen: listen.length ? listen : DEFAULT_LISTEN,
-    bootstrap: list(get("SKEIN_LIBP2P_BOOTSTRAP")),
+    bootstrap: overlayBootstrap(get("SKEIN_NETWORK") || "main", get("SKEIN_LIBP2P_BOOTSTRAP")),
     dht,
     relays: list(get("SKEIN_LIBP2P_RELAYS")),
     mdns: /^(on|1|true|yes)$/i.test(get("SKEIN_LIBP2P_MDNS") ?? ""),
@@ -900,7 +931,7 @@ export class P2PHost {
     for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
-    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
+    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}; bootstrap ${h.bootstrap.join(", ") || "none"}`;
     if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
     else this.say("router", `libp2p: the host node, peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; ${dhts}`);
     const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
@@ -916,12 +947,8 @@ export class P2PHost {
     const node = n.node;
     const name = this.nameOf(n);
     const connected = new Set(node.getConnections().map((c) => c.remotePeer.toString()));
-    for (const a of this.o.host.bootstrap) {
-      let ma: Multiaddr;
-      try { ma = multiaddr(a); } catch { this.say(name, `libp2p: bad bootstrap address ${a}`); continue; }
-      const id = ma.getComponents().find((c) => c.name === "p2p")?.value;
-      if (id === node.peerId.toString() || (id && connected.has(id))) continue;
-      await node.dial(ma).catch((e) => this.say(name, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
+    for (const a of bootstrapDials(this.o.host.bootstrap, node.peerId.toString(), connected, (b) => this.say(name, `libp2p: bad bootstrap address ${b}`))) {
+      await node.dial(multiaddr(a)).catch((e) => this.say(name, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
     }
     // #156: the skein DHT (the node's one DHT); the host's own topics are the tracker's.
     const dht = dhtOf(node);

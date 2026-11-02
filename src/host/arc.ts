@@ -53,7 +53,8 @@
 // webhook and SSE): it would then be the status provider an instance
 // subscribes to, and nothing on the instance's side changes.
 
-import { existsSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Transaction } from "@bsv/sdk";
 import { DEFAULT_BOX, SseStream, statusOf, txCid } from "./feeds.ts";
@@ -74,21 +75,47 @@ export interface ArcConfig {
 /** The webhook's path on the router. */
 export const ARC_ROUTE = "/arc";
 
-/** The host's Arcade from SKEIN_ARC_URL, SKEIN_ARC_TOKEN, SKEIN_ARC_EVENTS_URL, SKEIN_ARC_CALLBACK_URL (the environment, else $SKEIN_HOME/host.env); none without a URL. */
-export function hostArcConfig(vars: Record<string, string | undefined>, home?: string): ArcConfig | undefined {
-  const file: Record<string, string> = {};
+/** The network's Arcade (SKEIN_NETWORK's names) when SKEIN_ARC_URL is unset; regtest has none. */
+export const DEFAULT_ARC: Record<string, string> = {
+  main: "https://arcade.1sat.app",
+  test: "https://testnet.arcade.1sat.app",
+};
+
+/**
+ * The host's Arcade from SKEIN_ARC_URL, SKEIN_ARC_TOKEN, SKEIN_ARC_EVENTS_URL, SKEIN_ARC_CALLBACK_URL (the
+ * environment, else $SKEIN_HOME/host.env). SKEIN_ARC_URL unset: the network's (DEFAULT_ARC, by SKEIN_NETWORK,
+ * default main); `off`: none, as on regtest. With an Arcade and no SKEIN_ARC_TOKEN, the host's token is made
+ * (32 random bytes, hex) and appended to $SKEIN_HOME/host.env (the file made if absent), then read from it after —
+ * as the key file is; `made` reports it. Without a home there is nowhere to keep one: an error.
+ */
+export function hostArcConfig(vars: Record<string, string | undefined>, home?: string, o: { made?: (file: string) => void } = {}): ArcConfig | undefined {
   const envFile = home ? join(home, "host.env") : undefined;
-  if (envFile && existsSync(envFile)) {
-    for (const line of readFileSync(envFile, "utf8").split("\n")) {
-      const m = /^\s*(?:export\s+)?(SKEIN_ARC_[A-Z_]+)=(.*)$/.exec(line);
-      if (m) file[m[1]!] = m[2]!.trim().replace(/^(["'])(.*)\1$/, "$2");
+  const readFile = () => {
+    const file: Record<string, string> = {};
+    if (envFile && existsSync(envFile)) {
+      for (const line of readFileSync(envFile, "utf8").split("\n")) {
+        const m = /^\s*(?:export\s+)?(SKEIN_ARC_[A-Z_]+|SKEIN_NETWORK)=(.*)$/.exec(line);
+        if (m) file[m[1]!] = m[2]!.trim().replace(/^(["'])(.*)\1$/, "$2");
+      }
     }
-  }
+    return file;
+  };
+  const file = readFile();
   const get = (k: string) => vars[k] || file[k] || undefined;
-  const url = get("SKEIN_ARC_URL");
+  const set = get("SKEIN_ARC_URL");
+  if (set?.toLowerCase() === "off") return undefined;
+  const url = set ?? DEFAULT_ARC[get("SKEIN_NETWORK") || "main"];
   if (!url) return undefined;
-  const token = get("SKEIN_ARC_TOKEN");
-  if (!token) throw new Error("SKEIN_ARC_URL is set but SKEIN_ARC_TOKEN is not: the host's callback token scopes its status stream");
+  let token = get("SKEIN_ARC_TOKEN");
+  if (!token && set) throw new Error("SKEIN_ARC_URL is set but SKEIN_ARC_TOKEN is not: the host's callback token scopes its status stream");
+  if (!token) {
+    if (!envFile) throw new Error(`the network's Arcade (${url}) needs the host's callback token (SKEIN_ARC_TOKEN), and there is no SKEIN_HOME to keep a new one in`);
+    token = randomBytes(32).toString("hex");
+    mkdirSync(home!, { recursive: true });
+    const before = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+    appendFileSync(envFile, `${before && !before.endsWith("\n") ? "\n" : ""}# The host's Arcade callback token (made on first run; it ties this host's transactions together at the Arcade).\nSKEIN_ARC_TOKEN=${token}\n`, { mode: 0o600 });
+    o.made?.(envFile);
+  }
   const events = get("SKEIN_ARC_EVENTS_URL"), callbackUrl = get("SKEIN_ARC_CALLBACK_URL");
   return { url: url.replace(/\/+$/, ""), token, ...(events ? { events } : {}), ...(callbackUrl ? { callbackUrl } : {}) };
 }

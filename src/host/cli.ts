@@ -130,7 +130,10 @@
 //                         SKEIN_STORE_ROCKSDB and SKEIN_STORE. Unset, and no native kernel binary here (the npm package
 //                         ships none): $SKEIN_HOME/store.sqlite
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
-//                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
+//                         queue), one status subscription, the instances' status provider. Unset: the network's (arc.ts DEFAULT_ARC:
+//                         test https://testnet.arcade.1sat.app, main https://arcade.1sat.app, regtest none); `off`: none.
+//                         SKEIN_ARC_TOKEN its one callback token (required with a named URL; with the network's and none set,
+//                         made once and appended to $SKEIN_HOME/host.env, read from there after);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only)
 //   SKEIN_BILLING         `off`: this host bills no one (#130, billing.ts); else it bills a skein whose host row names its
@@ -762,7 +765,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
-    arc: hostArcConfig(v, home),
+    arc: hostArcConfig(v, home, { made: (f) => env.out(`skein-host: the host's Arcade callback token made and kept in ${f} (SKEIN_ARC_TOKEN)`) }),
     billing: billingConfig(v),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };
@@ -1021,7 +1024,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
   else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
   if (router.arc) env.out(`skein-host: broadcaster: broadcast events → Arcade ${router.o.arc!.url}; proofs and statuses (the status provider) from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
-  else env.out("skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider");
+  else env.out(`skein-host: no Arcade (SKEIN_ARC_URL ${(v.SKEIN_ARC_URL ?? "").toLowerCase() === "off" ? "off" : `unset, and network ${hostNetwork(v)} has none`}): a broadcast event is dropped; a new genesis names no status provider`);
   await router.start();
   // #142: the first run makes the host skein (owned by the operator's key); later runs start what exists.
   if (!db.hostSkein() && o.firstRun !== false) {

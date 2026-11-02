@@ -332,7 +332,15 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   `SKEIN_TERANODE_BOOTSTRAP` adds peers beside the network's defaults
   (gorillanode in DHT-server mode, the bsvb seeds, a hosted skein node are
   all fine entries; any one that accepts is enough), redialled while fewer
-  than 4 are on the block topic. `SKEIN_LIBP2P_BOOTSTRAP` names skein peers.
+  than 4 are on the block topic.
+- **Per-network defaults** (`SKEIN_NETWORK`, default `main`): a host needs
+  no setting to find the overlay or broadcast. Unset means the network's;
+  `off` turns the default off.
+
+  | setting | unset = the network's | |
+  |---|---|---|
+  | `SKEIN_LIBP2P_BOOTSTRAP` | test: `/dns4/p2p.testnet.openex.dev/tcp/7534/p2p/16Uiu2HAmVN7Cc7TrFGVrbdoV1mMGBF8LQBvPZ5trzgPArfagBRSB` (the hosted Open Exchange node); main, regtest: none yet | skein peers named here are dialled beside the network's (unioned); `off`: none at all. A node whose own peer id is a default skips it |
+  | `SKEIN_ARC_URL` | test: `https://testnet.arcade.1sat.app`; main: `https://arcade.1sat.app`; regtest: none | `off`: no Arcade (a broadcast event is dropped). With the network's Arcade and no `SKEIN_ARC_TOKEN`, the host makes its callback token once (32 random bytes, hex) and appends `SKEIN_ARC_TOKEN=…` to `$SKEIN_HOME/host.env`, read from there after, as the key file is. A URL named here needs its token named too |
 - The defaults are tuned for discovery: the node listens on TCP port
   **7534** on every interface (IPv4 and IPv6; another port if 7534 is
   taken), asks the router to open it by UPnP/NAT-PMP where allowed

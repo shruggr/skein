@@ -377,7 +377,13 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   crawls it and fills a js-libp2p node's connection cap, which then refuses
   every newcomer. Teranode peers come from `SKEIN_TERANODE_BOOTSTRAP` (the
   network's defaults unioned; any one entry that accepts is enough) and
-  GossipSub.
+  GossipSub. The overlay's bootstrap peers are per network the same way
+  (src/host/p2p.ts `OVERLAY_BOOTSTRAP`): testnet's is the hosted Open
+  Exchange node (`/dns4/p2p.testnet.openex.dev/tcp/7534/p2p/16Uiu2HAm…RSB`),
+  mainnet and regtest have none yet; `SKEIN_LIBP2P_BOOTSTRAP` adds peers
+  beside them (`off`: none at all), and a node skips its own peer id. So a
+  testnet install with nothing set finds the overlay through that one node
+  and, through its skein DHT, everyone else.
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's front door when the tree brings none. There is no shell

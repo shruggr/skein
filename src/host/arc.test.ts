@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
@@ -58,8 +58,10 @@ function home(t: { after(f: () => void): void }): string {
 
 test("arc: the host config (SKEIN_ARC_*, from the environment or host.env); a BEEF to Extended Format", async (t) => {
   const h = home(t);
-  assert.equal(hostArcConfig({}, h), undefined);
-  assert.throws(() => hostArcConfig({ SKEIN_ARC_URL: "http://a" }, h), /SKEIN_ARC_TOKEN/);
+  assert.equal(hostArcConfig({ SKEIN_ARC_URL: "off" }, h), undefined, "off: none");
+  assert.equal(hostArcConfig({ SKEIN_NETWORK: "regtest" }, h), undefined, "regtest: no default");
+  assert.equal(existsSync(join(h, "host.env")), false, "nothing written without an Arcade");
+  assert.throws(() => hostArcConfig({ SKEIN_ARC_URL: "http://a" }, h), /SKEIN_ARC_TOKEN/, "a named Arcade needs its named token");
   writeFileSync(join(h, "host.env"), "SKEIN_ARC_URL=https://arcade.test/\nexport SKEIN_ARC_TOKEN='tok'\nSKEIN_ARC_EVENTS_URL=https://arcade.test:8082/events\nOTHER=1\n");
   assert.deepEqual(hostArcConfig({}, h), { url: "https://arcade.test", token: "tok", events: "https://arcade.test:8082/events" });
   assert.deepEqual(hostArcConfig({ SKEIN_ARC_TOKEN: "env", SKEIN_ARC_CALLBACK_URL: "https://me/arc/callback" }, h), { url: "https://arcade.test", token: "env", events: "https://arcade.test:8082/events", callbackUrl: "https://me/arc/callback" });
@@ -70,6 +72,31 @@ test("arc: the host config (SKEIN_ARC_*, from the environment or host.env); a BE
   assert.deepEqual([...b.bytes], tx.toEF(), "the Atomic BEEF's subject, in Extended Format");
   const raw = Uint8Array.from(tx.toBinary());
   assert.deepEqual(arcadeBody(raw), { txid: tx.id("hex"), bytes: raw }, "a raw transaction goes as it came");
+});
+
+test("arc: unset, the network's Arcade (DEFAULT_ARC); its token made once into host.env (made if absent) and read after", (t) => {
+  const h = home(t);
+  const made: string[] = [];
+  const a = hostArcConfig({ SKEIN_NETWORK: "test" }, h, { made: (f) => made.push(f) })!;
+  assert.equal(a.url, "https://testnet.arcade.1sat.app");
+  assert.match(a.token, /^[0-9a-f]{64}$/);
+  assert.equal(a.events, undefined, "events: <url>/events (the broadcaster's default)");
+  assert.equal(a.callbackUrl, undefined, "SSE only");
+  assert.deepEqual(made, [join(h, "host.env")]);
+  assert.equal(readFileSync(join(h, "host.env"), "utf8").match(/^SKEIN_ARC_TOKEN=(.*)$/m)?.[1], a.token);
+  assert.equal((statSync(join(h, "host.env")).mode & 0o777), 0o600, "a new host.env is the operator's only");
+  const b = hostArcConfig({ SKEIN_NETWORK: "test" }, h, { made: (f) => made.push(f) })!;
+  assert.equal(b.token, a.token, "read back, not made again");
+  assert.equal(made.length, 1);
+  assert.equal(hostArcConfig({}, h)!.url, "https://arcade.1sat.app", "mainnet (the default network): its Arcade, the same token");
+  // An existing host.env: the token appended, its lines kept; a network named in it is read.
+  const g = home(t);
+  writeFileSync(join(g, "host.env"), "SKEIN_NETWORK=test\nSKEIN_KEY_FILE=/k");
+  const c = hostArcConfig({}, g)!;
+  assert.equal(c.url, "https://testnet.arcade.1sat.app", "host.env's network");
+  assert.match(readFileSync(join(g, "host.env"), "utf8"), new RegExp(`^SKEIN_NETWORK=test\nSKEIN_KEY_FILE=/k\n# .*\nSKEIN_ARC_TOKEN=${c.token}\n$`));
+  assert.equal(hostArcConfig({ SKEIN_ARC_TOKEN: "env" }, g)!.token, "env", "the environment's token wins");
+  assert.throws(() => hostArcConfig({ SKEIN_NETWORK: "test" }), /no SKEIN_HOME/);
 });
 
 /** A broadcaster over a fake Arcade with instances a..d: `holding` is who holds what, `running` who runs. */

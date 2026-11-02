@@ -15,7 +15,7 @@ import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } f
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { anyPort, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { anyPort, bootstrapDials, OVERLAY_BOOTSTRAP, overlayBootstrap, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -60,6 +60,25 @@ test("p2p: host-wide settings from the environment, else host.env; an instance's
   assert.equal(hostP2PConfig({ SKEIN_LIBP2P_UPNP: "off" }, home).upnp, false);
   assert.equal(hostP2PConfig({ SKEIN_LIBP2P_UPNP: "on" }, home).upnp, true);
   assert.throws(() => hostP2PConfig({ SKEIN_LIBP2P_UPNP: "maybe" }, home), /SKEIN_LIBP2P_UPNP: on \| off/);
+  // The network's overlay bootstrap peers (OVERLAY_BOOTSTRAP): unset, the network's; named, unioned; `off`, none.
+  const ovh = OVERLAY_BOOTSTRAP.test![0]!;
+  assert.deepEqual(OVERLAY_BOOTSTRAP.main ?? [], [], "mainnet: none yet");
+  assert.deepEqual(hostP2PConfig({ SKEIN_NETWORK: "test" }, home).bootstrap, [ovh, "/ip4/1.2.3.4/tcp/4001/p2p/x"], "testnet: the network's and host.env's");
+  assert.deepEqual(hostP2PConfig({ SKEIN_NETWORK: "test", SKEIN_LIBP2P_BOOTSTRAP: ovh }, home).bootstrap, [ovh], "a default named again: once");
+  assert.deepEqual(hostP2PConfig({ SKEIN_NETWORK: "test", SKEIN_LIBP2P_BOOTSTRAP: "off" }, home).bootstrap, [], "off: none");
+  assert.deepEqual(hostP2PConfig({ SKEIN_NETWORK: "regtest" }, home).bootstrap, ["/ip4/1.2.3.4/tcp/4001/p2p/x"], "regtest: none of its own");
+  assert.deepEqual(overlayBootstrap("test", undefined), [ovh]);
+  const netHome = await fs.mkdtemp(join(tmpdir(), "skein-p2p-net-"));
+  t.after(() => fs.rm(netHome, { recursive: true, force: true }));
+  await fs.writeFile(join(netHome, "host.env"), "SKEIN_NETWORK=test\n");
+  assert.deepEqual(hostP2PConfig({}, netHome).bootstrap, [ovh], "the network from host.env");
+  // A node whose own peer id is a default bootstrap (the hosted node) skips itself; a connected peer is not redialled.
+  const ovhId = "16Uiu2HAmVN7Cc7TrFGVrbdoV1mMGBF8LQBvPZ5trzgPArfagBRSB";
+  const other = "/ip4/1.2.3.4/tcp/4001/p2p/16Uiu2HAmVaxF2a3HnwRUHyEL8XCg92E5Hx9voSjb13tABcpdg1bo";
+  const bad: string[] = [];
+  assert.deepEqual(bootstrapDials([ovh, other, "nope"], ovhId, new Set(), (a) => bad.push(a)), [other], "itself skipped");
+  assert.deepEqual(bad, ["nope"]);
+  assert.deepEqual(bootstrapDials([ovh, other], "someone", new Set(["16Uiu2HAmVaxF2a3HnwRUHyEL8XCg92E5Hx9voSjb13tABcpdg1bo"])), [ovh], "connected skipped");
   // kad-DHT's clientMode per mode: auto leaves it unset (the DHT's own switch), client true, server false.
   assert.deepEqual(dhtClientMode("auto"), {});
   assert.deepEqual(dhtClientMode("client"), { clientMode: true });
