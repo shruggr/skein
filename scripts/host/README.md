@@ -329,10 +329,11 @@ The host-wide settings, from the environment or `~/.skein/host.env`:
 
 | variable | default | |
 |---|---|---|
-| `SKEIN_LIBP2P_LISTEN` | `/ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/tcp/0/ws` | multiaddrs every node listens on (comma-separated). A fixed port can serve one node only: give per-instance ports in its config's `libp2p.listen`. Plain WS on loopback is for dev; browsers need WSS (below) |
+| `SKEIN_LIBP2P_LISTEN` | `/ip4/0.0.0.0/tcp/7534,/ip6/::/tcp/7534,/ip4/127.0.0.1/tcp/0/ws` | multiaddrs every node listens on (comma-separated). The default: TCP on every interface on the one fixed port 7534 (the same on every install; taken at start: one line and an OS-chosen port on the same interfaces), WebSocket on loopback. An address set here is listened on as named (taken: the node does not start). A fixed port can serve one node only: give per-instance ports in its config's `libp2p.listen`. Plain WS on loopback is for dev; browsers need WSS (below) |
+| `SKEIN_LIBP2P_UPNP` | `on` | `off`: no UPnP/NAT-PMP port mapping (@libp2p/upnp-nat). On, the node asks the router to map its TCP port where it allows it; the mapped address is announced once AutoNAT confirms it. A router that refuses, or none found: one line |
 | `SKEIN_LIBP2P_TLS_CERT`, `SKEIN_LIBP2P_TLS_KEY` | unset | PEM files: the WebSocket listener serves TLS (listen on `/ip4/0.0.0.0/tcp/<port>/tls/ws`), so browsers can dial it |
 | `SKEIN_LIBP2P_BOOTSTRAP` | none | multiaddrs with `/p2p/<peer ID>`: dialled at start and redialled every 30 s while not connected |
-| `SKEIN_LIBP2P_DHT` | `client` | `off`, `client` or `server` for BOTH of every node's Kademlia DHTs (#156): Teranode's (`/ipfs/kad/1.0.0`, the block topic's providers, the headers tracker's) and the skein DHT (`/skein/kad/<mainnet\|testnet\|regtest>/1.0.0`, the overlay's topics). On: each overlay topic name is a rendezvous on the skein DHT — the node provides the CID v1 raw sha2-256 of the name and dials the providers it finds, every 30 s (go-p2p-message-bus's scheme). Private and loopback addresses are kept in the DHT only when every listen and bootstrap address is private (dev) |
+| `SKEIN_LIBP2P_DHT` | `auto` | `off`, `auto`, `client` or `server` for BOTH of every node's Kademlia DHTs (#156): Teranode's (`/ipfs/kad/1.0.0`, the block topic's providers, the headers tracker's) and the skein DHT (`/skein/kad/<mainnet\|testnet\|regtest>/1.0.0`, the overlay's topics). On: each overlay topic name is a rendezvous on the skein DHT — the node provides the CID v1 raw sha2-256 of the name and dials the providers it finds, every 30 s (go-p2p-message-bus's scheme). Private and loopback addresses are kept in the DHT only when every listen and bootstrap address is private (dev). `auto`: a client until AutoNAT confirms a public address, then a server (and back); `client`: only ever a client; `server`: a server from the start. AutoNAT runs with `auto`, `server` or UPnP on |
 | `SKEIN_LIBP2P_RELAYS` | none | circuit relays (multiaddrs with `/p2p/<id>`): each node also listens at `<relay>/p2p-circuit` |
 | `SKEIN_LIBP2P_MDNS` | `off` | `on`: mDNS discovery on the LAN; discovered peers are dialled |
 
@@ -725,7 +726,7 @@ where they use one. Unset means the default.
 | `SKEIN_BILLING` | `off`: the host bills no one (#130, "Billing" above); else it bills a skein whose host row names its billing key |
 | `SKEIN_BILLING_X`, `SKEIN_BILLING_RATES`, `SKEIN_BILLING_ALLOWANCE` | what it supports: X (sats a skein prepays at a time), the rates (JSON `{fuel, storage, served, fetch, authfetch, publish}`, whole sats), the free allowance per skein (sats); dev defaults in `src/host/billing.ts` |
 | `SKEIN_BILLING_TICK_MS`, `SKEIN_BILLING_GRACE_MS` | how often it ticks a billed skein; how long after one went asleep `skein-host reclaim` lists it |
-| `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |
+| `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_UPNP`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |
 | `SKEIN_LIBP2P_VERBOSE` | set: log every libp2p verdict, accepted ones too (default: only reject and ignore) |
 | `SKEIN_SHELL_APP`, `SKEIN_CHAT_APP`, `SKEIN_ONBOARD_APP` | up.sh: the shell, chat and onboarding apps it installs (repo URL with a tag) |
 

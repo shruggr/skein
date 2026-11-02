@@ -142,7 +142,7 @@ import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
-import { beaconEvent, beaconsOf, DEFAULT_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
+import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
@@ -521,7 +521,7 @@ export class Router {
       });
     }
     // #156: the host's libp2p (one node per key; the host node among them) — for the instances, and for the tracker on its own.
-    const hostConfig = { ...(o.libp2p ?? { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false }), network: this.chainNetwork() ?? "main", ...(o.teranode ? { teranodeBootstrap: o.teranode.bootstrap } : {}) };
+    const hostConfig = { ...(o.libp2p ?? { listen: LOOPBACK_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false }), network: this.chainNetwork() ?? "main", ...(o.teranode ? { teranodeBootstrap: o.teranode.bootstrap } : {}) };
     this.p2pConfig = hostConfig;
     if (o.peerKeyFor) {
       this.p2p = new P2PHost({

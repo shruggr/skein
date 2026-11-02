@@ -15,7 +15,7 @@ import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } f
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { beaconBeat, beaconFrame, foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { anyPort, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -50,11 +50,20 @@ test("p2p: host-wide settings from the environment, else host.env; an instance's
   const home = await fs.mkdtemp(join(tmpdir(), "skein-p2p-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const d = hostP2PConfig({}, home);
-  assert.deepEqual(d, { listen: ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"], bootstrap: [], dht: "client", relays: [], mdns: false });
+  assert.deepEqual(d, { listen: DEFAULT_LISTEN, bootstrap: [], dht: "auto", relays: [], mdns: false, upnp: true });
   await fs.writeFile(join(home, "host.env"), "OTHER=x\nSKEIN_LIBP2P_LISTEN=/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/tcp/4002/ws\nexport SKEIN_LIBP2P_DHT=server\nSKEIN_LIBP2P_MDNS=on\nSKEIN_LIBP2P_BOOTSTRAP=\"/ip4/1.2.3.4/tcp/4001/p2p/x\"\n");
   const c = hostP2PConfig({ SKEIN_LIBP2P_DHT: "client" }, home);
-  assert.deepEqual(c, { listen: ["/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/tcp/4002/ws"], bootstrap: ["/ip4/1.2.3.4/tcp/4001/p2p/x"], dht: "client", relays: [], mdns: true });
-  assert.throws(() => hostP2PConfig({ SKEIN_LIBP2P_DHT: "maybe" }, home), /off \| client \| server/);
+  assert.deepEqual(c, { listen: ["/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/tcp/4002/ws"], bootstrap: ["/ip4/1.2.3.4/tcp/4001/p2p/x"], dht: "client", relays: [], mdns: true, upnp: true });
+  assert.throws(() => hostP2PConfig({ SKEIN_LIBP2P_DHT: "maybe" }, home), /off \| auto \| client \| server/);
+  for (const m of ["off", "auto", "client", "server", "AUTO"] as const) assert.equal(hostP2PConfig({ SKEIN_LIBP2P_DHT: m }, home).dht, m.toLowerCase());
+  assert.equal(hostP2PConfig({}, home).dht, "server", "host.env's");
+  assert.equal(hostP2PConfig({ SKEIN_LIBP2P_UPNP: "off" }, home).upnp, false);
+  assert.equal(hostP2PConfig({ SKEIN_LIBP2P_UPNP: "on" }, home).upnp, true);
+  assert.throws(() => hostP2PConfig({ SKEIN_LIBP2P_UPNP: "maybe" }, home), /SKEIN_LIBP2P_UPNP: on \| off/);
+  // kad-DHT's clientMode per mode: auto leaves it unset (the DHT's own switch), client true, server false.
+  assert.deepEqual(dhtClientMode("auto"), {});
+  assert.deepEqual(dhtClientMode("client"), { clientMode: true });
+  assert.deepEqual(dhtClientMode("server"), { clientMode: false });
   assert.equal(libp2pOf({}), undefined, "no libp2p in the genesis: no node");
   assert.deepEqual(libp2pOf({ libp2p: { topics: ["a", 3], protocols: ["/p/1"] } }), { topics: ["a"], protocols: ["/p/1"] });
   // go-libp2p's nsToCid: CID v1, raw, sha2-256 of the name.
@@ -271,4 +280,63 @@ test("p2p: the overlay's receive row /skein/overlay/beef/1.0.0 is never handled 
   await until(() => a.node("alpha")!.getConnections().length > 0, "beta connects to alpha");
   await assert.rejects(a.dial("alpha", b.peerId("beta"), RECEIVE_PROTOCOL, () => {}), "a peer cannot open it");
   assert.equal(calls.length, 0);
+});
+
+test("p2p: the default listeners — TCP on every interface, IPv4 and IPv6, on the one fixed port; WebSocket on loopback", () => {
+  assert.deepEqual(DEFAULT_LISTEN, [`/ip4/0.0.0.0/tcp/${DEFAULT_PORT}`, `/ip6/::/tcp/${DEFAULT_PORT}`, "/ip4/127.0.0.1/tcp/0/ws"]);
+  assert.deepEqual(anyPort(DEFAULT_LISTEN), ["/ip4/0.0.0.0/tcp/0", "/ip6/::/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"], "the fallback: the same interfaces, OS-chosen ports");
+});
+
+test("p2p: the DHT modes on a started host node — server is a server in both DHTs at once, client and auto clients (no public address on loopback), auto runs AutoNAT", async (t) => {
+  const inbound = async (): Promise<InboundAnswer> => ({ verdict: "accept" });
+  const none = () => { throw new Error("no instance here"); };
+  const want: Record<Exclude<DhtMode, "off">, "client" | "server"> = { server: "server", client: "client", auto: "client" };
+  for (const dht of ["server", "client", "auto"] as const) {
+    const h = new P2PHost({ host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap: [], dht, relays: [], mdns: false, network: "regtest" }, keyOf: none, inbound });
+    t.after(() => h.stop());
+    const node = await h.hostNode();
+    assert.deepEqual(h.hostDhtModes(), { teranode: want[dht], skein: want[dht] }, dht);
+    assert.equal("autoNAT" in node.services, dht !== "client", `${dht}: AutoNAT`);
+    assert.deepEqual(h.hostPublicAddrs(), [], `${dht}: no public address confirmed on loopback`);
+  }
+  const off = new P2PHost({ host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap: [], dht: "off", relays: [], mdns: false }, keyOf: none, inbound });
+  t.after(() => off.stop());
+  await off.hostNode();
+  assert.deepEqual(off.hostDhtModes(), { teranode: undefined, skein: undefined });
+});
+
+test("p2p: the default port — the first node listens on it in both families; a second finds it taken, says so in one line and listens on an OS-chosen port", async (t) => {
+  const inbound = async (): Promise<InboundAnswer> => ({ verdict: "accept" });
+  const none = () => { throw new Error("no instance here"); };
+  const lines: string[] = [];
+  const host = { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false };
+  const A = new P2PHost({ host, keyOf: none, inbound });
+  t.after(() => A.stop());
+  const a = (await A.hostNode()).getMultiaddrs().map(String);
+  assert.ok(a.some((m) => m.startsWith("/ip4/") && m.includes(`/tcp/${DEFAULT_PORT}/p2p/`)), `IPv4 on ${DEFAULT_PORT}: ${a.join(" ")}`);
+  assert.ok(a.some((m) => m.startsWith("/ip6/") && m.includes(`/tcp/${DEFAULT_PORT}/p2p/`)), `IPv6 on ${DEFAULT_PORT}: ${a.join(" ")}`);
+  assert.ok(a.some((m) => m.startsWith("/ip4/127.0.0.1/") && m.includes("/ws/")), "WebSocket on loopback");
+  assert.ok(!a.some((m) => m.includes("/ws/") && !m.startsWith("/ip4/127.0.0.1/")), "WebSocket nowhere else");
+  const B = new P2PHost({ host, keyOf: none, inbound, log: (_s, l) => lines.push(l) });
+  t.after(() => B.stop());
+  const b = (await B.hostNode()).getMultiaddrs().map(String);
+  assert.deepEqual(lines.filter((l) => l.includes("taken")), [`libp2p: port ${DEFAULT_PORT} is taken: listening on an OS-chosen port instead`]);
+  assert.ok(b.length && !b.some((m) => m.includes(`/tcp/${DEFAULT_PORT}/`)), `B elsewhere: ${b.join(" ")}`);
+  assert.ok(b.some((m) => m.startsWith("/ip4/") && !m.startsWith("/ip4/127.0.0.1/")) || b.some((m) => m.startsWith("/ip6/")), "B still on every interface");
+  // A listen SKEIN_LIBP2P_LISTEN names is honoured as named: taken, the node does not start.
+  const C = new P2PHost({ host: { ...host, listen: [`/ip4/0.0.0.0/tcp/${DEFAULT_PORT}`] }, keyOf: none, inbound });
+  t.after(() => C.stop());
+  await assert.rejects(C.hostNode(), /EADDRINUSE/);
+});
+
+test("p2p: the UPnP service's outcome told once per distinct line; other components' logs untouched", () => {
+  const told: string[] = [];
+  const l = upnpTold((x) => told.push(x));
+  const u = l.forComponent("libp2p:upnp-nat");
+  u("begin gateway search, sending M-SEARCH every %dms", 1000);
+  u("gateway search finished, found %d gateways", 0);
+  u("gateway search finished, found %d gateways", 0);
+  l.forComponent("libp2p:upnp-nat:gateway:x").error("failed to create mapping for %s:%d for protocol - %e", "192.168.1.2", 7534, new Error("refused"));
+  l.forComponent("libp2p:dht")("gateway search finished, found %d gateways", 9);
+  assert.deepEqual(told, ["libp2p: UPnP gateway search finished, found 0 gateways", "libp2p: UPnP failed to create mapping for 192.168.1.2:7534 for protocol - refused"]);
 });

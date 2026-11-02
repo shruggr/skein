@@ -326,15 +326,19 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   libp2p node (the host key's; a one-key host's instances are on it too),
   which carries two Kademlia DHTs: Teranode's (`/ipfs/kad/1.0.0`, the
   block topic's providers) and the skein DHT
-  (`/skein/kad/<network>/1.0.0`, the overlay's topics). An install dials
-  out only (loopback listeners, both DHTs in client mode);
+  (`/skein/kad/<network>/1.0.0`, the overlay's topics).
   `SKEIN_TERANODE_BOOTSTRAP` adds Teranode peers beside the network's,
   `SKEIN_LIBP2P_BOOTSTRAP` names skein peers — one address serves both
   when that peer is in both DHTs.
-- A hosted node that installs bootstrap from (it sits in both DHTs and
-  answers their queries) sets two things in `host.env` beside the usual:
-  `SKEIN_LIBP2P_LISTEN` = its public address(es) (e.g.
-  `/ip4/0.0.0.0/tcp/4001`), and `SKEIN_LIBP2P_DHT=server`. Nothing else.
+- The defaults are tuned for discovery: the node listens on TCP port
+  **7534** on every interface (IPv4 and IPv6; another port if 7534 is
+  taken), asks the router to open it by UPnP/NAT-PMP where allowed
+  (`SKEIN_LIBP2P_UPNP=off` stops that), and runs both DHTs in `auto` mode
+  — a client until AutoNAT confirms a public address, then a server.
+  Nobody has to open a firewall; to be a bootstrap for others, open
+  TCP 7534 (or forward it on the router) and the node becomes a DHT
+  server by itself. A hosted node needs nothing set; `SKEIN_LIBP2P_DHT=server`
+  makes it a server from the start instead of waiting for AutoNAT.
 
 ## Talk to it
 

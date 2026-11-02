@@ -16,8 +16,9 @@
 //              compressed key), so the key reads straight out of the peer ID.
 //   node       GossipSub (StrictSign: every message is signed by its publisher's
 //              peer key), noise + yamux, TCP and WebSocket listeners (WSS with a
-//              certificate), Kademlia DHT off | client | server, mDNS on/off,
-//              bootstrap peers kept connected, circuit relays.
+//              certificate), Kademlia DHT off | auto | client | server, AutoNAT,
+//              UPnP/NAT-PMP port mapping, mDNS on/off, bootstrap peers kept
+//              connected, circuit relays.
 //   topics     the instance's `libp2p.topics`, its dispatch table's libp2p
 //              rows' topics (libp2pConfig) and the topics its apps subscribed
 //              (#119: `subscribe {topic, program, fn}` / `unsubscribe {topic}`,
@@ -63,9 +64,20 @@
 // (discover() provides and finds on it only; never `node.contentRouting`, which asks both).
 //
 // Host-wide settings (hostP2PConfig): SKEIN_LIBP2P_LISTEN, _BOOTSTRAP, _RELAYS
-// (comma-separated multiaddrs), _DHT (off | client | server, default client: both DHTs), _MDNS (on | off),
-// _TLS_CERT / _TLS_KEY (PEM files: the WebSocket listener serves TLS, so
-// browsers can dial /tls/ws); from the environment, else $SKEIN_HOME/host.env.
+// (comma-separated multiaddrs), _DHT (off | auto | client | server, default auto: both DHTs), _UPNP
+// (on | off, default on), _MDNS (on | off), _TLS_CERT / _TLS_KEY (PEM files: the WebSocket listener
+// serves TLS, so browsers can dial /tls/ws); from the environment, else $SKEIN_HOME/host.env.
+//
+// The defaults are tuned for discovery (2026-11-01, plans/open-defaults-2026-11-01.md): TCP on every
+// interface, IPv4 and IPv6, on ONE fixed port (DEFAULT_PORT, the same on every install, so a user who
+// opens one port knows which; taken at start: one line, and an OS-chosen port on the same interfaces);
+// the WebSocket listener stays on loopback (plain WS off loopback is dev only). DHT `auto` = kad-DHT's
+// own switch (clientMode left unset: a client until the node has a confirmed public address, then a
+// server, and back) with AutoNAT confirming addresses; `client` = only ever a client; `server` = a
+// server from the start (a hosted node behind a known-open port need not wait for AutoNAT). UPnP asks
+// the router to map the port where it allows it (a router that refuses or none found: a line, nothing
+// else); its mapped address is confirmed by AutoNAT before it is announced, so AutoNAT runs whenever
+// UPnP is on or the DHT is auto or server.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -76,11 +88,15 @@ import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { gossipsub, TopicValidatorResult } from "@libp2p/gossipsub";
 import { identify } from "@libp2p/identify";
 import type { Libp2p, PeerId, Stream } from "@libp2p/interface";
+import { autoNAT } from "@libp2p/autonat";
+import type { ComponentLogger, Logger } from "@libp2p/interface";
 import { kadDHT, passthroughMapper, removePrivateAddressesMapper, type KadDHT } from "@libp2p/kad-dht";
+import { defaultLogger } from "@libp2p/logger";
 import { mdns } from "@libp2p/mdns";
 import { peerIdFromPrivateKey, peerIdFromString } from "@libp2p/peer-id";
 import { ping } from "@libp2p/ping";
 import { tcp } from "@libp2p/tcp";
+import { uPnPNAT } from "@libp2p/upnp-nat";
 import { isPrivate, lpStream, type LengthPrefixedStream } from "@libp2p/utils";
 import { webSockets } from "@libp2p/websockets";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";
@@ -94,7 +110,7 @@ import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.t
 import { verifyAnyone } from "../runtime/identity.ts";
 import { Liveness, type Live, type LiveBeat } from "./liveness.ts";
 
-export type DhtMode = "off" | "client" | "server";
+export type DhtMode = "off" | "auto" | "client" | "server";
 
 /** The host-wide settings: every node gets these. */
 export interface P2PHostConfig {
@@ -103,6 +119,8 @@ export interface P2PHostConfig {
   dht: DhtMode;
   relays: string[];
   mdns: boolean;
+  /** UPnP/NAT-PMP port mapping (@libp2p/upnp-nat): SKEIN_LIBP2P_UPNP, on by default in hostP2PConfig; absent: off. */
+  upnp?: boolean;
   /** PEM certificate and key for the WebSocket listener (WSS). */
   tls?: { cert: string; key: string };
   /** The network (SKEIN_NETWORK's names): the skein DHT's protocol names it (skeinDhtProtocol); default main. */
@@ -131,8 +149,21 @@ export interface P2PInstanceConfig {
   listen?: string[];
 }
 
-/** The default listeners: loopback TCP and WebSocket, ports chosen by the OS (plain WS on loopback: dev only). */
-export const DEFAULT_LISTEN = ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"];
+/**
+ * The default TCP port (2026-11-01): one fixed port on every install, so a user who opens one port knows
+ * which. 7534 is "SKEI" on a phone keypad; unassigned in the IANA registry (not IPFS's 4001, not
+ * Teranode's 9905/9915).
+ */
+export const DEFAULT_PORT = 7534;
+
+/** The default listeners: TCP on every interface, IPv4 and IPv6, on DEFAULT_PORT; WebSocket on loopback, its port the OS's (plain WS off loopback: dev only). */
+export const DEFAULT_LISTEN = [`/ip4/0.0.0.0/tcp/${DEFAULT_PORT}`, `/ip6/::/tcp/${DEFAULT_PORT}`, "/ip4/127.0.0.1/tcp/0/ws"];
+
+/** Loopback only, ports chosen by the OS: the router's listeners when it is given no host settings (tests, an embedded router). */
+export const LOOPBACK_LISTEN = ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"];
+
+/** `listen` with DEFAULT_PORT made an OS-chosen port (the fallback when the default port is taken). */
+export const anyPort = (listen: string[]) => listen.map((a) => a.replace(new RegExp(`/tcp/${DEFAULT_PORT}(?=/|$)`), "/tcp/0"));
 
 /** What the front door is called with for an inbound message or stream frame (#51). */
 export interface InboundCall {
@@ -246,8 +277,10 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
     }
   }
   const get = (k: string) => vars[k] ?? file[k];
-  const dht = (get("SKEIN_LIBP2P_DHT") || "client").toLowerCase(); // #156: client by default (both DHTs)
-  if (dht !== "off" && dht !== "client" && dht !== "server") throw new Error(`SKEIN_LIBP2P_DHT: off | client | server, not ${dht}`);
+  const dht = (get("SKEIN_LIBP2P_DHT") || "auto").toLowerCase(); // 2026-11-01: auto by default (both DHTs)
+  if (dht !== "off" && dht !== "auto" && dht !== "client" && dht !== "server") throw new Error(`SKEIN_LIBP2P_DHT: off | auto | client | server, not ${dht}`);
+  const upnp = (get("SKEIN_LIBP2P_UPNP") || "on").toLowerCase();
+  if (!/^(on|off|1|0|true|false|yes|no)$/.test(upnp)) throw new Error(`SKEIN_LIBP2P_UPNP: on | off, not ${upnp}`);
   const cert = get("SKEIN_LIBP2P_TLS_CERT"), key = get("SKEIN_LIBP2P_TLS_KEY");
   const listen = list(get("SKEIN_LIBP2P_LISTEN"));
   return {
@@ -256,6 +289,7 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
     dht,
     relays: list(get("SKEIN_LIBP2P_RELAYS")),
     mdns: /^(on|1|true|yes)$/i.test(get("SKEIN_LIBP2P_MDNS") ?? ""),
+    upnp: /^(on|1|true|yes)$/.test(upnp),
     ...(cert && key ? { tls: { cert: readFileSync(cert, "utf8"), key: readFileSync(key, "utf8") } } : {}),
   };
 }
@@ -629,6 +663,17 @@ export class P2PHost {
     return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
   }
 
+  /** The host node's two DHTs' modes now (client | server; undefined: off or no host node yet). */
+  hostDhtModes(): { teranode?: "client" | "server"; skein?: "client" | "server" } {
+    return { teranode: this.hostDht("teranodeDht")?.getMode(), skein: this.hostDht("skeinDht")?.getMode() };
+  }
+
+  /** The host node's confirmed public addresses (AutoNAT's, or UPnP's once AutoNAT confirmed them): libp2p announces only confirmed ones; relay addresses aside. */
+  hostPublicAddrs(): string[] {
+    const n = this.hostOf();
+    return n ? n.node.getMultiaddrs().filter((m) => !isPrivateAddr(m) && !m.toString().includes("/p2p-circuit")).map(String) : [];
+  }
+
   /** One of the host node's DHT services (undefined: SKEIN_LIBP2P_DHT=off, or no host node yet). */
   hostDht(name: DhtName): KadDHT | undefined {
     const n = this.hostOf();
@@ -821,24 +866,43 @@ export class P2PHost {
     };
     // #156: two DHTs, kept apart — Teranode's (the block topic's providers) and ours (the overlay topics'), one mode for both.
     if (h.dht !== "off") {
+      const mode = dhtClientMode(h.dht);
       services.teranodeDht = kadDHT({
-        protocol: TERANODE_DHT_PROTOCOL, clientMode: h.dht === "client", peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
+        protocol: TERANODE_DHT_PROTOCOL, ...mode, peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
         logPrefix: "libp2p:dht-teranode", datastorePrefix: "/dht-teranode", metricsPrefix: "libp2p_dht_teranode",
       });
       services.skeinDht = kadDHT({
-        protocol: skeinDhtProtocol(h.network), clientMode: h.dht === "client", peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
+        protocol: skeinDhtProtocol(h.network), ...mode, peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
         logPrefix: "libp2p:dht-skein", datastorePrefix: "/dht-skein", metricsPrefix: "libp2p_dht_skein",
       });
     }
-    const node = await createLibp2p({
+    // 2026-11-01: AutoNAT confirms the node's public addresses (DHT auto flips to server on one; UPnP's mapped address needs it).
+    if (h.upnp || h.dht === "auto" || h.dht === "server") services.autoNAT = autoNAT();
+    if (h.upnp) services.upnpNAT = uPnPNAT();
+    const name = handle ?? "router";
+    const create = (addrs: string[]) => createLibp2p({
       privateKey: libp2pKey(pk),
-      addresses: { listen },
+      addresses: { listen: addrs },
       transports: [tcp(), webSockets(h.tls ? { https: { cert: h.tls.cert, key: h.tls.key } } : {}), ...(h.relays.length ? [circuitRelayTransport()] : [])],
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       peerDiscovery: h.mdns ? [mdns()] : [],
       services: services as never,
+      ...(h.upnp ? { logger: upnpTold((line) => this.say(name, line)) } : {}),
+      start: false,
     });
+    let node = await create(listen);
+    try { await node.start(); } catch (e) {
+      try { await node.stop(); } catch { /* the failed start's listeners closed as far as they go */ }
+      // 2026-11-01: the default port taken (another host, another node of this one): an OS-chosen port on the same interfaces.
+      // An address SKEIN_LIBP2P_LISTEN (or the instance) names is honoured as named: its failure stops the node, as before.
+      const defaulted = !config?.listen && h.listen.join(" ") === DEFAULT_LISTEN.join(" ");
+      if (!defaulted || !/EADDRINUSE/.test((e as Error).message)) throw e;
+      const fallback = anyPort(listen);
+      this.say(name, `libp2p: port ${DEFAULT_PORT} is taken: listening on an OS-chosen port instead`);
+      node = await create(fallback);
+      await node.start();
+    }
     n.node = node;
     if (this.stopped) { await node.stop(); return undefined; }
     this.nodes.set(key, n);
@@ -849,7 +913,7 @@ export class P2PHost {
     for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
-    const dhts = h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${TERANODE_DHT_PROTOCOL}, ${skeinDhtProtocol(h.network)})`;
+    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${TERANODE_DHT_PROTOCOL}, ${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
     if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
     else this.say("router", `libp2p: the host node, peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; ${dhts}`);
     const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
@@ -1188,6 +1252,36 @@ export function isPrivateAddr(ma: Multiaddr): boolean {
 
 /** An AbortSignal.timeout's abort: the DHT's 20-second rounds end this way, and the next round tries again. */
 const timedOut = (e: unknown): boolean => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+
+/**
+ * kad-DHT's clientMode for a mode (2026-11-01; @libp2p/kad-dht 16.4.5 kad-dht.js): `auto` leaves it
+ * unset — the DHT's own switch (a client, a server while the node has a confirmed public address);
+ * `client` true — only ever a client; `server` false — a server from its start (its start sets the mode),
+ * never switched back. An explicit false is NOT auto in this version: the switch listens only when unset.
+ */
+export function dhtClientMode(mode: Exclude<DhtMode, "off">): { clientMode?: boolean } {
+  return mode === "auto" ? {} : { clientMode: mode === "client" };
+}
+
+/**
+ * The libp2p logger, with the UPnP service's outcome told once per distinct line (2026-11-01): the gateway
+ * search's result, the public IP found, each mapping made or refused, an error. The service reports its
+ * outcome nowhere else (its log only); every other component's log is the default, untouched.
+ */
+export function upnpTold(tell: (line: string) => void): ComponentLogger {
+  const base = defaultLogger();
+  const said = new Set<string>();
+  const fmt = (f: unknown, args: unknown[]) => { let i = 0; return String(f).replace(/%[sdioOjaepcbt]/g, () => { const a = args[i++]; return a instanceof Error ? a.message : String(a); }); };
+  const once = (line: string) => { if (!said.has(line)) { said.add(line); tell(line); } };
+  const outcome = /^(gateway search finished|discovered public IP|created mapping)/;
+  const wrap = (log: Logger): Logger => Object.assign((f: unknown, ...args: unknown[]) => { log(f, ...args); if (outcome.test(String(f))) once(`libp2p: UPnP ${fmt(f, args)}`); }, {
+    error: (f: unknown, ...args: unknown[]) => { log.error(f, ...args); once(`libp2p: UPnP ${fmt(f, args)}`); },
+    trace: log.trace.bind(log),
+    enabled: log.enabled,
+    newScope: (s: string) => wrap(log.newScope(s)),
+  }) as Logger;
+  return { forComponent: (c: string) => c.startsWith("libp2p:upnp-nat") ? wrap(base.forComponent(c)) : base.forComponent(c) };
+}
 
 /** A node's DHT service by name (#156), or undefined (SKEIN_LIBP2P_DHT=off). */
 export function dhtOf(node: Libp2p, name: DhtName): KadDHT | undefined {

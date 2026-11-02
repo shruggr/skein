@@ -365,8 +365,13 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   which becomes its row unless the tree has one. `listen` is this node's
   addresses over the host's `SKEIN_LIBP2P_LISTEN` (a fixed port belongs to
   one node). No `libp2p` and no libp2p row: no node. The host-wide settings
-  (listen, bootstrap, DHT, relays, mDNS) are the host's, not the tree's
-  (scripts/host/README.md).
+  (listen, bootstrap, DHT, UPnP, relays, mDNS) are the host's, not the tree's
+  (scripts/host/README.md). By default a node listens on TCP 7534 on every
+  interface (IPv4 and IPv6; an OS-chosen port if 7534 is taken), asks the
+  router to map it by UPnP/NAT-PMP (`SKEIN_LIBP2P_UPNP=off` stops that),
+  and runs its DHTs in `auto` (a server once AutoNAT confirms a public
+  address). Opening TCP 7534 makes a node a bootstrap others can use;
+  `SKEIN_LIBP2P_DHT=server` makes a hosted node a DHT server from its start.
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's front door when the tree brings none. There is no shell

@@ -274,10 +274,12 @@ export class TeranodeTracker {
     const n = node.getConnections().length, onTopic = subs.length;
     this.keep(node, subs);
     const t = this.tables();
-    const now = `${n} ${onTopic} ${t.teranode} ${t.skein}`;
+    // 2026-11-01: each DHT's mode (auto flips to server on a confirmed public address) and those addresses.
+    const m = p2p.hostDhtModes(), pub = p2p.hostPublicAddrs();
+    const now = `${n} ${onTopic} ${t.teranode} ${t.skein} ${m.teranode} ${m.skein} ${pub.join(" ")}`;
     if (now !== this.peers) {
       this.peers = now;
-      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic; DHT tables: Teranode ${t.teranode ?? "off"}, skein ${t.skein ?? "off"}) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic; DHT tables: Teranode ${t.teranode ?? "off"}, skein ${t.skein ?? "off"}; DHT modes: Teranode ${m.teranode ?? "off"}, skein ${m.skein ?? "off"}; public ${pub.join(" ") || "none confirmed"}) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     }
   }
 
