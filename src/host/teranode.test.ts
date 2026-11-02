@@ -144,30 +144,34 @@ test("teranode: no hub for the network: the first sync waits for the first annou
   assert.equal(h.router.image.tip()?.height, 100);
 });
 
-test("teranode: one node, two DHTs — B dials only A (a server in both) and finds through it a block-topic provider C on the Teranode DHT, whose block it follows, and an overlay-topic provider D on the skein DHT; a record on the skein DHT is not found through the Teranode DHT", async (t) => {
+test("teranode: one node, two DHTs — B dials only A (the skein DHT's server) and S (a Teranode bootstrap serving the Teranode DHT); through S it finds a block-topic provider C, whose block it follows, and through A an overlay-topic provider D on the skein DHT; a record on the skein DHT is not found through the Teranode DHT", async (t) => {
   const inbound = async (): Promise<InboundAnswer> => ({ verdict: "accept" });
   const cfg = (dht: DhtMode, bootstrap: string[] = []): P2PHostConfig => ({ listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht, relays: [], mdns: false, network: "regtest" });
   const none = () => { throw new Error("no instance here"); };
-  // A: the hosted node — no instance, its host node a server in both DHTs.
+  // A: the hosted node — no instance, its host node the skein DHT's server (its Teranode DHT a client, 2026-11-02).
   const A = new P2PHost({ host: cfg("server"), keyOf: none, inbound, discoveryMs: 300 });
   t.after(() => A.stop());
   const a = (await A.hostNode()).getMultiaddrs()[0]!.toString();
-  // C: a Teranode peer that provides the block topic on the Teranode DHT through A alone.
-  const f = await FakeTeranode.start("regtest", { dht: true });
+  // S: a Teranode bootstrap serving the Teranode DHT (gorillanode in server mode).
+  const s = await FakeTeranode.start("regtest", { dht: "server" });
+  t.after(() => s.stop());
+  const sAddr = s.addr();
+  // C: a Teranode peer that provides the block topic on the Teranode DHT through S alone.
+  const f = await FakeTeranode.start("regtest", { dht: "client" });
   t.after(() => f.stop());
   f.mineTo(5);
-  await f.provideTopic(a);
+  await f.provideTopic(sAddr);
   // D: a skein host whose instance takes tm_demo; its node knows only A.
   const dKey = PrivateKey.fromRandom();
   const D = new P2PHost({ host: cfg("client", [a]), hostKey: dKey, keyOf: () => dKey, inbound, discoveryMs: 300 });
   t.after(() => D.stop());
   await D.declare("dee", { topics: ["tm_demo"], protocols: [] });
-  // B: an install — A its only bootstrap, skein and Teranode both; the tracker on its host node, then an instance on the same key.
+  // B: an install — A its skein bootstrap, S its Teranode bootstrap; the tracker on its host node, then an instance on the same key.
   const bKey = PrivateKey.fromRandom();
-  const B = new P2PHost({ host: { ...cfg("client", [a]), teranodeBootstrap: [a] }, hostKey: bKey, keyOf: () => bKey, inbound, discoveryMs: 300 });
+  const B = new P2PHost({ host: { ...cfg("client", [a]), teranodeBootstrap: [sAddr] }, hostKey: bKey, keyOf: () => bKey, inbound, discoveryMs: 300 });
   const held = f.chain.slice(0, 6).map((h) => display(sha256d(h)));
   const tracker = new TeranodeTracker({
-    network: "regtest", bootstrap: [a], p2p: B, discoveryMs: 300,
+    network: "regtest", bootstrap: [sAddr], p2p: B, discoveryMs: 300,
     chain: {
       tip: () => ({ height: held.length - 1, hash: held.at(-1)! }),
       find: (hash) => { const i = held.indexOf(hash); return i < 0 ? undefined : i; },
@@ -181,8 +185,8 @@ test("teranode: one node, two DHTs — B dials only A (a server in both) and fin
   assert.equal(B.node("bee")!.peerId.toString(), B.hostId);
   const bNode = B.node("bee")!;
   const connected = (id: string) => bNode.getConnections().some((c) => c.remotePeer.toString() === id);
-  // (i) C found on the Teranode DHT through A, dialled; its announced block followed.
-  await until("B connected to C (the block topic's provider, from A's Teranode DHT)", () => connected(f.node.peerId.toString()) || undefined, 20_000);
+  // (i) C found on the Teranode DHT through S, dialled; its announced block followed.
+  await until("B connected to C (the block topic's provider, from S's Teranode DHT)", () => connected(f.node.peerId.toString()) || undefined, 20_000);
   await until("C sees B on the block topic", () => f.subscribers() > 0 || undefined, 15_000);
   await new Promise((r) => setTimeout(r, 1200)); // a heartbeat: B in C's mesh
   f.mineTo(6);
@@ -203,5 +207,5 @@ test("teranode: one node, two DHTs — B dials only A (a server in both) and fin
   assert.ok((await find(tDht, f.topic)).includes(f.node.peerId.toString()), "the block topic's provider C on the Teranode DHT");
   assert.deepEqual(await find(sDht, f.topic), [], "the block topic not found through the skein DHT");
   const tables = tracker.tables();
-  assert.ok(tables.teranode! >= 1 && tables.skein! >= 1, `B's two routing tables both hold peers (A, and the providers its answers named): ${JSON.stringify(tables)}`);
+  assert.ok(tables.teranode! >= 1 && tables.skein! >= 1, `B's two routing tables both hold peers (S and A, and the providers their answers named): ${JSON.stringify(tables)}`);
 });

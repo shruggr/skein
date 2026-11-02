@@ -62,16 +62,20 @@
 // `teranodeDht` on `/ipfs/kad/1.0.0` (go-libp2p's default, the Teranode message bus's) for the
 // block topic's providers, and `skeinDht` on `/skein/kad/<network>/1.0.0` for the overlay's topics
 // (discover() provides and finds on it only; never `node.contentRouting`, which asks both).
+// The Teranode DHT is ALWAYS a client (2026-11-02, plans/teranode-dht-client-2026-11-02.md): it is
+// queried only (the tracker's provider lookups), never served. It is the public IPFS DHT; serving it
+// fills the node's connection cap with IPFS peers, and a full js-libp2p node refuses every newcomer.
 //
 // Host-wide settings (hostP2PConfig): SKEIN_LIBP2P_LISTEN, _BOOTSTRAP, _RELAYS
-// (comma-separated multiaddrs), _DHT (off | auto | client | server, default auto: both DHTs), _UPNP
+// (comma-separated multiaddrs), _DHT (off | auto | client | server, default auto: the skein DHT's mode; the Teranode DHT is
+// a client whatever it says; off = neither DHT), _UPNP
 // (on | off, default on), _MDNS (on | off), _TLS_CERT / _TLS_KEY (PEM files: the WebSocket listener
 // serves TLS, so browsers can dial /tls/ws); from the environment, else $SKEIN_HOME/host.env.
 //
 // The defaults are tuned for discovery (2026-11-01, plans/open-defaults-2026-11-01.md): TCP on every
 // interface, IPv4 and IPv6, on ONE fixed port (DEFAULT_PORT, the same on every install, so a user who
 // opens one port knows which; taken at start: one line, and an OS-chosen port on the same interfaces);
-// the WebSocket listener stays on loopback (plain WS off loopback is dev only). DHT `auto` = kad-DHT's
+// the WebSocket listener stays on loopback (plain WS off loopback is dev only). DHT (the skein DHT) `auto` = kad-DHT's
 // own switch (clientMode left unset: a client until the node has a confirmed public address, then a
 // server, and back) with AutoNAT confirming addresses; `client` = only ever a client; `server` = a
 // server from the start (a hosted node behind a known-open port need not wait for AutoNAT). UPnP asks
@@ -277,7 +281,7 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
     }
   }
   const get = (k: string) => vars[k] ?? file[k];
-  const dht = (get("SKEIN_LIBP2P_DHT") || "auto").toLowerCase(); // 2026-11-01: auto by default (both DHTs)
+  const dht = (get("SKEIN_LIBP2P_DHT") || "auto").toLowerCase(); // 2026-11-01: auto by default; 2026-11-02: the skein DHT's mode only (Teranode's is always a client; off = neither)
   if (dht !== "off" && dht !== "auto" && dht !== "client" && dht !== "server") throw new Error(`SKEIN_LIBP2P_DHT: off | auto | client | server, not ${dht}`);
   const upnp = (get("SKEIN_LIBP2P_UPNP") || "on").toLowerCase();
   if (!/^(on|off|1|0|true|false|yes|no)$/.test(upnp)) throw new Error(`SKEIN_LIBP2P_UPNP: on | off, not ${upnp}`);
@@ -864,15 +868,15 @@ export class P2PHost {
         },
       }),
     };
-    // #156: two DHTs, kept apart — Teranode's (the block topic's providers) and ours (the overlay topics'), one mode for both.
+    // #156: two DHTs, kept apart — Teranode's (the block topic's providers) and ours (the overlay topics').
+    // 2026-11-02: Teranode's is always a client (it is the public IPFS DHT: queried, never served); SKEIN_LIBP2P_DHT sets ours.
     if (h.dht !== "off") {
-      const mode = dhtClientMode(h.dht);
       services.teranodeDht = kadDHT({
-        protocol: TERANODE_DHT_PROTOCOL, ...mode, peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
+        protocol: TERANODE_DHT_PROTOCOL, clientMode: true, peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
         logPrefix: "libp2p:dht-teranode", datastorePrefix: "/dht-teranode", metricsPrefix: "libp2p_dht_teranode",
       });
       services.skeinDht = kadDHT({
-        protocol: skeinDhtProtocol(h.network), ...mode, peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
+        protocol: skeinDhtProtocol(h.network), ...dhtClientMode(h.dht), peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
         logPrefix: "libp2p:dht-skein", datastorePrefix: "/dht-skein", metricsPrefix: "libp2p_dht_skein",
       });
     }
@@ -913,7 +917,7 @@ export class P2PHost {
     for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
-    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${TERANODE_DHT_PROTOCOL}, ${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
+    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)}); Teranode DHT client (${TERANODE_DHT_PROTOCOL})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
     if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
     else this.say("router", `libp2p: the host node, peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; ${dhts}`);
     const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
@@ -1254,7 +1258,7 @@ export function isPrivateAddr(ma: Multiaddr): boolean {
 const timedOut = (e: unknown): boolean => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
 
 /**
- * kad-DHT's clientMode for a mode (2026-11-01; @libp2p/kad-dht 16.4.5 kad-dht.js): `auto` leaves it
+ * kad-DHT's clientMode for a mode of the skein DHT (2026-11-01; @libp2p/kad-dht 16.4.5 kad-dht.js): `auto` leaves it
  * unset — the DHT's own switch (a client, a server while the node has a confirmed public address);
  * `client` true — only ever a client; `server` false — a server from its start (its start sets the mode),
  * never switched back. An explicit false is NOT auto in this version: the switch listens only when unset.

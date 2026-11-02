@@ -39,7 +39,7 @@
 // instances' overlay too. The block topic is a host topic on it (judged here:
 // Accept when the message reads as an announcement, else Reject; never the
 // front door); the block topic's providers are looked up on its Teranode DHT
-// (`/ipfs/kad/1.0.0`), never its skein DHT. The peers met are kept in
+// (`/ipfs/kad/1.0.0`, a client there: queried, never served), never its skein DHT. The peers met are kept in
 // teranode-peers.json between runs.
 
 import { createHash } from "node:crypto";

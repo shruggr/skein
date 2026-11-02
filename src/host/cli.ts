@@ -151,7 +151,7 @@
 //                         announcer's data hub, and, with an empty image chain, syncs the whole chain first from the
 //                         network's default hub (gorillanode). It rides the host node (the host key's, one per host:
 //                         the instances' overlay on the same node), the block topic's providers looked up on its Teranode
-//                         DHT (/ipfs/kad/1.0.0; the overlay's on its skein DHT, /skein/kad/<network>/1.0.0)
+//                         DHT (/ipfs/kad/1.0.0, always a client; the overlay's on its skein DHT, /skein/kad/<network>/1.0.0)
 //   SKEIN_TERANODE_BOOTSTRAP  more Teranode bootstrap peers (multiaddrs, comma separated) beside the network's
 //                         (/dnsaddr/<mainnet|testnet>.bootstrap.teranode.bsvb.tech); regtest has none: set it to run one
 //   SKEIN_HEADERS_HUB     the data hub the tracker's first sync reads (a Teranode asset API: `bestblockheader`,

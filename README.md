@@ -328,13 +328,19 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   block topic's providers) and the skein DHT
   (`/skein/kad/<network>/1.0.0`, the overlay's topics).
   `SKEIN_TERANODE_BOOTSTRAP` adds Teranode peers beside the network's,
-  `SKEIN_LIBP2P_BOOTSTRAP` names skein peers — one address serves both
-  when that peer is in both DHTs.
+  `SKEIN_LIBP2P_BOOTSTRAP` names skein peers. The Teranode DHT is only
+  queried, never served: every skein node is a client in it, whatever
+  `SKEIN_LIBP2P_DHT` says. It is the public IPFS DHT; serving it fills the
+  node's connection cap with IPFS peers, and a full js-libp2p node refuses
+  every newcomer. A skein peer named in `SKEIN_TERANODE_BOOTSTRAP` is still
+  a block-topic peer, but answers no Teranode-DHT query.
 - The defaults are tuned for discovery: the node listens on TCP port
   **7534** on every interface (IPv4 and IPv6; another port if 7534 is
   taken), asks the router to open it by UPnP/NAT-PMP where allowed
-  (`SKEIN_LIBP2P_UPNP=off` stops that), and runs both DHTs in `auto` mode
-  — a client until AutoNAT confirms a public address, then a server.
+  (`SKEIN_LIBP2P_UPNP=off` stops that), and runs the skein DHT in `auto`
+  mode — a client until AutoNAT confirms a public address, then a server
+  (`SKEIN_LIBP2P_DHT` sets the skein DHT's mode; Teranode's is always a
+  client).
   Nobody has to open a firewall; to be a bootstrap for others, open
   TCP 7534 (or forward it on the router) and the node becomes a DHT
   server by itself. A hosted node needs nothing set; `SKEIN_LIBP2P_DHT=server`

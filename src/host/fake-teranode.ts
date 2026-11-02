@@ -5,9 +5,11 @@
 // and a data hub (the Teranode asset API's two reads the tracker uses:
 // `GET /bestblockheader` (+ `/json`) and `GET /headers/<hash>?n=` — child to
 // parent, binary) serving a regtest chain the test mines. With `dht`, the
-// node also runs the Teranode DHT (`/ipfs/kad/1.0.0`, client, as a bus peer in
-// client mode) and can provide the block topic there (provideTopic) — the
-// go-p2p-message-bus's RoutingDiscovery.Advertise.
+// node also runs the Teranode DHT (`/ipfs/kad/1.0.0`): `true` or "client" = a
+// client, as a bus peer in client mode, which can provide the block topic
+// there (provideTopic) — the go-p2p-message-bus's RoutingDiscovery.Advertise;
+// "server" = a server from its start, as a Teranode bootstrap in server mode
+// (gorillanode): the DHT the skein nodes query (they never serve it, 2026-11-02).
 
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -53,14 +55,14 @@ export class FakeTeranode {
 
   constructor(network = "regtest") { this.topic = blockTopic(network); }
 
-  static async start(network = "regtest", o: { dht?: boolean } = {}): Promise<FakeTeranode> {
+  static async start(network = "regtest", o: { dht?: boolean | "server" | "client" } = {}): Promise<FakeTeranode> {
     const f = new FakeTeranode(network);
     f.node = await createLibp2p({
       addresses: { listen: ["/ip4/127.0.0.1/tcp/0"] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
       services: {
         identify: identify(), pubsub: gossipsub({ globalSignaturePolicy: "StrictSign", allowPublishToZeroTopicPeers: true, emitSelf: false }),
-        ...(o.dht ? { ping: ping(), dht: kadDHT({ protocol: TERANODE_DHT_PROTOCOL, clientMode: true, peerInfoMapper: passthroughMapper }) } : {}),
+        ...(o.dht ? { ping: ping(), dht: kadDHT({ protocol: TERANODE_DHT_PROTOCOL, clientMode: o.dht !== "server", peerInfoMapper: passthroughMapper }) } : {}),
       } as never,
     });
     f.pubsub().subscribe(f.topic);
