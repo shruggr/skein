@@ -311,8 +311,10 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   source of headers, on the host's one libp2p node (the host key's; the
   instances' overlay on the same node) joined to the network's Teranode
   mesh: the block topic a host topic judged by the tracker (never the front
-  door), its providers looked up on the node's Teranode DHT
-  (`/ipfs/kad/1.0.0`), kept apart from the node's skein DHT
+  door), its peers from the bootstrap list (`SKEIN_TERANODE_BOOTSTRAP`, the
+  network's defaults unioned) and GossipSub. The node joins no Teranode DHT
+  (the public IPFS DHT: even a kad client crawls it and fills the node's
+  connection cap); its one DHT is the skein DHT
   (`/skein/kad/<network>/1.0.0`, the overlay's topics). Each block announcement's header goes into
   the same intake as the feed's (the image chain, then every host chain
   synced from it, then the subscribers); a header whose parent is not held

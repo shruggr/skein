@@ -372,10 +372,12 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   and runs its skein DHT in `auto` (a server once AutoNAT confirms a public
   address). Opening TCP 7534 makes a node a bootstrap others can use;
   `SKEIN_LIBP2P_DHT=server` makes a hosted node a skein-DHT server from its
-  start. `SKEIN_LIBP2P_DHT` is the skein DHT's setting only: the Teranode DHT
-  (`/ipfs/kad/1.0.0`) is queried, never served — every node is a client in
-  it. It is the public IPFS DHT; serving it fills the node's connection cap
-  with IPFS peers, and a full js-libp2p node refuses every newcomer.
+  start. The skein DHT is the node's only DHT: it does not join Teranode's
+  (`/ipfs/kad/1.0.0`), which is the public IPFS DHT — even a kad client
+  crawls it and fills a js-libp2p node's connection cap, which then refuses
+  every newcomer. Teranode peers come from `SKEIN_TERANODE_BOOTSTRAP` (the
+  network's defaults unioned; any one entry that accepts is enough) and
+  GossipSub.
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's front door when the tree brings none. There is no shell

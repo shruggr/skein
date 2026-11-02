@@ -54,21 +54,18 @@
 //              read from a dialled stream handed back (`frames`) to become a
 //              message to the instance — the next frame arrives as an entry.
 //
-// The host node (#156, one node, two DHTs): the node of the HOST key (hostKey: on a one-key host
-// the key every instance's node uses, so the instances join it) runs whether or not an instance
-// declares libp2p — the Teranode headers tracker rides it (teranode.ts: the block topic subscribed
-// as a host topic, hostTopic, judged by the tracker, never the front door). Every node carries TWO
-// Kademlia DHTs, kept apart (their own protocol, datastore, log and metrics prefixes):
-// `teranodeDht` on `/ipfs/kad/1.0.0` (go-libp2p's default, the Teranode message bus's) for the
-// block topic's providers, and `skeinDht` on `/skein/kad/<network>/1.0.0` for the overlay's topics
-// (discover() provides and finds on it only; never `node.contentRouting`, which asks both).
-// The Teranode DHT is ALWAYS a client (2026-11-02, plans/teranode-dht-client-2026-11-02.md): it is
-// queried only (the tracker's provider lookups), never served. It is the public IPFS DHT; serving it
-// fills the node's connection cap with IPFS peers, and a full js-libp2p node refuses every newcomer.
+// The host node (#156, one node): the node of the HOST key (hostKey: on a one-key host the key
+// every instance's node uses, so the instances join it) runs whether or not an instance declares
+// libp2p — the Teranode headers tracker rides it (teranode.ts: the block topic subscribed as a host
+// topic, hostTopic, judged by the tracker, never the front door). Every node carries ONE Kademlia
+// DHT, ours: `skeinDht` on `/skein/kad/<network>/1.0.0` for the overlay's topics (discover()
+// provides and finds on it). There is no Teranode DHT (2026-11-02, plans/teranode-dht-off-2026-11-02.md):
+// the tracker's block-topic peers come from its bootstrap list (SKEIN_TERANODE_BOOTSTRAP, the
+// network's defaults unioned) and GossipSub. Teranode's DHT is the public IPFS DHT; even a kad client
+// crawls it and fills a js-libp2p node's connection cap, which then refuses every newcomer.
 //
 // Host-wide settings (hostP2PConfig): SKEIN_LIBP2P_LISTEN, _BOOTSTRAP, _RELAYS
-// (comma-separated multiaddrs), _DHT (off | auto | client | server, default auto: the skein DHT's mode; the Teranode DHT is
-// a client whatever it says; off = neither DHT), _UPNP
+// (comma-separated multiaddrs), _DHT (off | auto | client | server, default auto: the skein DHT's mode), _UPNP
 // (on | off, default on), _MDNS (on | off), _TLS_CERT / _TLS_KEY (PEM files: the WebSocket listener
 // serves TLS, so browsers can dial /tls/ws); from the environment, else $SKEIN_HOME/host.env.
 //
@@ -129,21 +126,13 @@ export interface P2PHostConfig {
   tls?: { cert: string; key: string };
   /** The network (SKEIN_NETWORK's names): the skein DHT's protocol names it (skeinDhtProtocol); default main. */
   network?: string;
-  /** The Teranode bootstrap peers (the tracker's): only whether they are all private matters here (the Teranode DHT's address mapper). */
-  teranodeBootstrap?: string[];
 }
 
 /** SKEIN_NETWORK's names as the networks' own (the Teranode block topic's, the skein DHT's). */
 export const NETWORK_NAMES: Record<string, string> = { main: "mainnet", test: "testnet", regtest: "regtest" };
 
-/** The Teranode DHT's protocol: go-libp2p's default kad protocol, the one the Teranode message bus runs. */
-export const TERANODE_DHT_PROTOCOL = "/ipfs/kad/1.0.0";
-
 /** The skein DHT's protocol for a network: the overlay's provider records, never merged with another network's. */
 export const skeinDhtProtocol = (network = "main") => `/skein/kad/${NETWORK_NAMES[network] ?? network}/1.0.0`;
-
-/** The two DHT services a node carries (the names in `node.services`). */
-export type DhtName = "teranodeDht" | "skeinDht";
 
 /** One instance's libp2p config (the genesis's `libp2p`): what the router subscribes and serves for it. */
 export interface P2PInstanceConfig {
@@ -667,9 +656,9 @@ export class P2PHost {
     return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
   }
 
-  /** The host node's two DHTs' modes now (client | server; undefined: off or no host node yet). */
-  hostDhtModes(): { teranode?: "client" | "server"; skein?: "client" | "server" } {
-    return { teranode: this.hostDht("teranodeDht")?.getMode(), skein: this.hostDht("skeinDht")?.getMode() };
+  /** The host node's skein DHT's mode now (client | server; undefined: off or no host node yet). */
+  hostDhtMode(): "client" | "server" | undefined {
+    return this.hostDht()?.getMode();
   }
 
   /** The host node's confirmed public addresses (AutoNAT's, or UPnP's once AutoNAT confirmed them): libp2p announces only confirmed ones; relay addresses aside. */
@@ -678,10 +667,10 @@ export class P2PHost {
     return n ? n.node.getMultiaddrs().filter((m) => !isPrivateAddr(m) && !m.toString().includes("/p2p-circuit")).map(String) : [];
   }
 
-  /** One of the host node's DHT services (undefined: SKEIN_LIBP2P_DHT=off, or no host node yet). */
-  hostDht(name: DhtName): KadDHT | undefined {
+  /** The host node's DHT service, the skein DHT (undefined: SKEIN_LIBP2P_DHT=off, or no host node yet). */
+  hostDht(): KadDHT | undefined {
     const n = this.hostOf();
-    return n ? dhtOf(n.node, name) : undefined;
+    return n ? dhtOf(n.node) : undefined;
   }
 
   /** The node of an instance, if it has one. */
@@ -845,10 +834,9 @@ export class P2PHost {
     // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
     const allPrivate = (xs: string[]) => xs.every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
     const privateDev = allPrivate([...h.bootstrap, ...listen]);
-    const privateTeranode = allPrivate([...(h.teranodeBootstrap ?? []), ...listen]);
     const services: Record<string, unknown> = {
       identify: identify(),
-      // #156: both DHTs ping a new peer at once (before it enters their tables): one outbound ping stream each.
+      // #156: the DHT pings a new peer (before it enters its table) beside the other pings; 4 outbound streams as before.
       ping: ping({ maxOutboundStreams: 4 }),
       pubsub: gossipsub({
         globalSignaturePolicy: "StrictSign",
@@ -868,13 +856,8 @@ export class P2PHost {
         },
       }),
     };
-    // #156: two DHTs, kept apart — Teranode's (the block topic's providers) and ours (the overlay topics').
-    // 2026-11-02: Teranode's is always a client (it is the public IPFS DHT: queried, never served); SKEIN_LIBP2P_DHT sets ours.
+    // #156: one DHT, ours (the overlay topics'); 2026-11-02: no Teranode DHT (the public IPFS DHT: even a client fills the connection cap).
     if (h.dht !== "off") {
-      services.teranodeDht = kadDHT({
-        protocol: TERANODE_DHT_PROTOCOL, clientMode: true, peerInfoMapper: privateTeranode ? passthroughMapper : removePrivateAddressesMapper,
-        logPrefix: "libp2p:dht-teranode", datastorePrefix: "/dht-teranode", metricsPrefix: "libp2p_dht_teranode",
-      });
       services.skeinDht = kadDHT({
         protocol: skeinDhtProtocol(h.network), ...dhtClientMode(h.dht), peerInfoMapper: privateDev ? passthroughMapper : removePrivateAddressesMapper,
         logPrefix: "libp2p:dht-skein", datastorePrefix: "/dht-skein", metricsPrefix: "libp2p_dht_skein",
@@ -917,7 +900,7 @@ export class P2PHost {
     for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
     await this.handleProtocol(n, MESSAGE_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
-    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)}); Teranode DHT client (${TERANODE_DHT_PROTOCOL})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
+    const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}`;
     if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
     else this.say("router", `libp2p: the host node, peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; ${dhts}`);
     const discover = () => void this.discover(n).catch((e) => this.say(this.nameOf(n), `libp2p: discovery: ${(e as Error).message}`));
@@ -940,8 +923,8 @@ export class P2PHost {
       if (id === node.peerId.toString() || (id && connected.has(id))) continue;
       await node.dial(ma).catch((e) => this.say(name, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
     }
-    // #156: the skein DHT only (node.contentRouting would provide into Teranode's too); the host's own topics are the tracker's.
-    const dht = dhtOf(node, "skeinDht");
+    // #156: the skein DHT (the node's one DHT); the host's own topics are the tracker's.
+    const dht = dhtOf(node);
     if (!dht) return;
     for (const topic of [...n.subscribed].filter((t) => !n.hostTopics.has(t))) {
       const cid = await topicCid(topic);
@@ -1287,9 +1270,9 @@ export function upnpTold(tell: (line: string) => void): ComponentLogger {
   return { forComponent: (c: string) => c.startsWith("libp2p:upnp-nat") ? wrap(base.forComponent(c)) : base.forComponent(c) };
 }
 
-/** A node's DHT service by name (#156), or undefined (SKEIN_LIBP2P_DHT=off). */
-export function dhtOf(node: Libp2p, name: DhtName): KadDHT | undefined {
-  return (node.services as Record<string, unknown>)[name] as KadDHT | undefined;
+/** A node's DHT service, the skein DHT (#156), or undefined (SKEIN_LIBP2P_DHT=off). */
+export function dhtOf(node: Libp2p): KadDHT | undefined {
+  return (node.services as Record<string, unknown>).skeinDht as KadDHT | undefined;
 }
 
 /** The providers a DHT finds for `cid` (its PROVIDER events' peers), on that DHT alone. */

@@ -4,7 +4,7 @@
 // headers service configured.
 //
 // The Teranode network is libp2p (go-p2p-message-bus): TCP, noise, yamux, a
-// kad-DHT, GossipSub with StrictSign. Bootstrap peers are the network's
+// kad-DHT (which skein does not join: see below), GossipSub with StrictSign. Bootstrap peers are the network's
 // `/dnsaddr/<net>.bootstrap.teranode.bsvb.tech` (go-teranode-p2p-client
 // config.go); the block topic is `teranode/bitcoin/1.0.0/<network>-block`
 // (topics.go: main → mainnet, test → testnet, regtest → regtest). A message on
@@ -34,12 +34,15 @@
 // (regtest) and none named: it waits for the first announcement and syncs from
 // ITS hub. Same crawl both ways.
 //
-// The node is the HOST node (p2p.ts P2PHost.hostNode, #156 one node, two
-// DHTs): the node of the host key, which on a one-key host carries the
-// instances' overlay too. The block topic is a host topic on it (judged here:
-// Accept when the message reads as an announcement, else Reject; never the
-// front door); the block topic's providers are looked up on its Teranode DHT
-// (`/ipfs/kad/1.0.0`, a client there: queried, never served), never its skein DHT. The peers met are kept in
+// The node is the HOST node (p2p.ts P2PHost.hostNode, #156 one node): the
+// node of the host key, which on a one-key host carries the instances' overlay
+// too. The block topic is a host topic on it (judged here: Accept when the
+// message reads as an announcement, else Reject; never the front door). Its
+// block-topic peers come from the bootstrap list (SKEIN_TERANODE_BOOTSTRAP, the
+// network's defaults unioned), redialled while fewer than 4 are on the topic,
+// and from GossipSub; there is no Teranode DHT (2026-11-02): it is the public
+// IPFS DHT, and even a kad client crawls it and fills a js-libp2p node's
+// connection cap, which then refuses every newcomer. The peers met are kept in
 // teranode-peers.json between runs.
 
 import { createHash } from "node:crypto";
@@ -47,7 +50,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Libp2p } from "@libp2p/interface";
 import { multiaddr } from "@multiformats/multiaddr";
 import { headerProblem } from "./image-chain.ts";
-import { NETWORK_NAMES, providersOf, tableSize, topicCid, type P2PHost } from "./p2p.ts";
+import { NETWORK_NAMES, tableSize, type P2PHost } from "./p2p.ts";
 
 /** The network's bootstrap peers (go-teranode-p2p-client config.go); regtest has none. */
 export const TERANODE_BOOTSTRAP: Record<string, string[]> = {
@@ -178,7 +181,7 @@ export interface TrackerOptions {
   bulkPage?: number;
   /** The most headers a gap's crawl walks back before it gives up (default 20 160). */
   maxCrawl?: number;
-  /** Peer upkeep: bootstrap redialled, block-topic providers looked up in the DHT (ms, default 30 000). */
+  /** Peer upkeep: bootstrap redialled while too few are on the block topic (ms, default 30 000). */
   discoveryMs?: number;
   hub_?: HubOptions;
   log?(line: string): void;
@@ -243,7 +246,7 @@ export class TeranodeTracker {
     this.timer.unref?.();
   }
 
-  /** The bootstrap peers dialled while too few are connected; the block topic's providers looked up in the DHT. */
+  /** The bootstrap peers dialled while too few are on the block topic. */
   private async upkeep(t0: number): Promise<void> {
     const node = this.node;
     if (!node || this.stopped) return;
@@ -258,34 +261,22 @@ export class TeranodeTracker {
       if (err !== this.lastBootErr) { this.lastBootErr = err; this.say(err ? `headers: Teranode bootstrap ${err}` : "headers: Teranode bootstrap reached"); }
     }
     const p2p = this.o.p2p!;
-    const dht = p2p.hostDht("teranodeDht");
-    if (dht && node.getConnections().length) {
-      try {
-        let dialled = 0;
-        // The Teranode DHT alone (the bus's RoutingDiscovery: the topic name's CID, topicCid).
-        for await (const p of providersOf(dht, await topicCid(this.topic), { signal: AbortSignal.timeout(20_000) })) {
-          if (p.id.equals(node.peerId) || node.getConnections(p.id).length) continue;
-          if (++dialled > 8) break;
-          void node.dial(p.multiaddrs.length ? p.multiaddrs : p.id, { signal: AbortSignal.timeout(15_000) }).catch(() => {}); // a provider that does not answer: the next round's
-        }
-      } catch { /* timed out: the next round */ }
-    }
     const subs = p2p.hostSubscribers(this.topic);
     const n = node.getConnections().length, onTopic = subs.length;
     this.keep(node, subs);
     const t = this.tables();
-    // 2026-11-01: each DHT's mode (auto flips to server on a confirmed public address) and those addresses.
-    const m = p2p.hostDhtModes(), pub = p2p.hostPublicAddrs();
-    const now = `${n} ${onTopic} ${t.teranode} ${t.skein} ${m.teranode} ${m.skein} ${pub.join(" ")}`;
+    // 2026-11-01: the skein DHT's mode (auto flips to server on a confirmed public address) and those addresses.
+    const m = p2p.hostDhtMode(), pub = p2p.hostPublicAddrs();
+    const now = `${n} ${onTopic} ${t.skein} ${m} ${pub.join(" ")}`;
     if (now !== this.peers) {
       this.peers = now;
-      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic; DHT tables: Teranode ${t.teranode ?? "off"}, skein ${t.skein ?? "off"}; DHT modes: Teranode ${m.teranode ?? "off"}, skein ${m.skein ?? "off"}; public ${pub.join(" ") || "none confirmed"}) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+      this.say(`headers: Teranode peers ${n} (${onTopic} on the block topic; skein DHT table ${t.skein ?? "off"}, mode ${m ?? "off"}; public ${pub.join(" ") || "none confirmed"}) at ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     }
   }
 
-  /** The host node's two DHT routing tables' sizes (undefined: the DHTs off). */
-  tables(): { teranode?: number; skein?: number } {
-    return { teranode: tableSize(this.o.p2p?.hostDht("teranodeDht")), skein: tableSize(this.o.p2p?.hostDht("skeinDht")) };
+  /** The host node's DHT routing table's size, the skein DHT's (undefined: the DHT off). */
+  tables(): { skein?: number } {
+    return { skein: tableSize(this.o.p2p?.hostDht()) };
   }
 
   /** The peers on the block topic the host node knows (GossipSub's view). */

@@ -521,7 +521,7 @@ export class Router {
       });
     }
     // #156: the host's libp2p (one node per key; the host node among them) — for the instances, and for the tracker on its own.
-    const hostConfig = { ...(o.libp2p ?? { listen: LOOPBACK_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false }), network: this.chainNetwork() ?? "main", ...(o.teranode ? { teranodeBootstrap: o.teranode.bootstrap } : {}) };
+    const hostConfig = { ...(o.libp2p ?? { listen: LOOPBACK_LISTEN, bootstrap: [], dht: "off" as const, relays: [], mdns: false }), network: this.chainNetwork() ?? "main" };
     this.p2pConfig = hostConfig;
     if (o.peerKeyFor) {
       this.p2p = new P2PHost({

@@ -324,23 +324,21 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   chain. Beside `SKEIN_HEADERS_URL` both feed the same intake;
   `SKEIN_TERANODE=off` turns it off. The tracker rides the host's ONE
   libp2p node (the host key's; a one-key host's instances are on it too),
-  which carries two Kademlia DHTs: Teranode's (`/ipfs/kad/1.0.0`, the
-  block topic's providers) and the skein DHT
-  (`/skein/kad/<network>/1.0.0`, the overlay's topics).
-  `SKEIN_TERANODE_BOOTSTRAP` adds Teranode peers beside the network's,
-  `SKEIN_LIBP2P_BOOTSTRAP` names skein peers. The Teranode DHT is only
-  queried, never served: every skein node is a client in it, whatever
-  `SKEIN_LIBP2P_DHT` says. It is the public IPFS DHT; serving it fills the
-  node's connection cap with IPFS peers, and a full js-libp2p node refuses
-  every newcomer. A skein peer named in `SKEIN_TERANODE_BOOTSTRAP` is still
-  a block-topic peer, but answers no Teranode-DHT query.
+  which carries ONE Kademlia DHT, the skein DHT
+  (`/skein/kad/<network>/1.0.0`, the overlay's topics). It does not join
+  Teranode's DHT: that is the public IPFS DHT, and even a kad client crawls
+  it and fills a js-libp2p node's connection cap, which then refuses every
+  newcomer. Teranode peers come from the bootstrap list and GossipSub:
+  `SKEIN_TERANODE_BOOTSTRAP` adds peers beside the network's defaults
+  (gorillanode in DHT-server mode, the bsvb seeds, a hosted skein node are
+  all fine entries; any one that accepts is enough), redialled while fewer
+  than 4 are on the block topic. `SKEIN_LIBP2P_BOOTSTRAP` names skein peers.
 - The defaults are tuned for discovery: the node listens on TCP port
   **7534** on every interface (IPv4 and IPv6; another port if 7534 is
   taken), asks the router to open it by UPnP/NAT-PMP where allowed
   (`SKEIN_LIBP2P_UPNP=off` stops that), and runs the skein DHT in `auto`
   mode — a client until AutoNAT confirms a public address, then a server
-  (`SKEIN_LIBP2P_DHT` sets the skein DHT's mode; Teranode's is always a
-  client).
+  (`SKEIN_LIBP2P_DHT` sets its mode).
   Nobody has to open a firewall; to be a bootstrap for others, open
   TCP 7534 (or forward it on the router) and the node becomes a DHT
   server by itself. A hosted node needs nothing set; `SKEIN_LIBP2P_DHT=server`

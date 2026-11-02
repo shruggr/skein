@@ -4,12 +4,8 @@
 // Teranode message bus does (`{"name", "data": <base64 BlockMessage JSON>}`),
 // and a data hub (the Teranode asset API's two reads the tracker uses:
 // `GET /bestblockheader` (+ `/json`) and `GET /headers/<hash>?n=` — child to
-// parent, binary) serving a regtest chain the test mines. With `dht`, the
-// node also runs the Teranode DHT (`/ipfs/kad/1.0.0`): `true` or "client" = a
-// client, as a bus peer in client mode, which can provide the block topic
-// there (provideTopic) — the go-p2p-message-bus's RoutingDiscovery.Advertise;
-// "server" = a server from its start, as a Teranode bootstrap in server mode
-// (gorillanode): the DHT the skein nodes query (they never serve it, 2026-11-02).
+// parent, binary) serving a regtest chain the test mines. No DHT: skein nodes
+// find Teranode peers by their bootstrap list and GossipSub alone (2026-11-02).
 
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -18,13 +14,9 @@ import { yamux } from "@chainsafe/libp2p-yamux";
 import { gossipsub } from "@libp2p/gossipsub";
 import { identify } from "@libp2p/identify";
 import type { Libp2p } from "@libp2p/interface";
-import { kadDHT, passthroughMapper, type KadDHT } from "@libp2p/kad-dht";
-import { ping } from "@libp2p/ping";
-import { multiaddr } from "@multiformats/multiaddr";
 import { tcp } from "@libp2p/tcp";
 import { createLibp2p } from "libp2p";
 import { headerProblem } from "./image-chain.ts";
-import { drain, TERANODE_DHT_PROTOCOL, topicCid } from "./p2p.ts";
 import { blockTopic } from "./teranode.ts";
 
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
@@ -55,14 +47,13 @@ export class FakeTeranode {
 
   constructor(network = "regtest") { this.topic = blockTopic(network); }
 
-  static async start(network = "regtest", o: { dht?: boolean | "server" | "client" } = {}): Promise<FakeTeranode> {
+  static async start(network = "regtest"): Promise<FakeTeranode> {
     const f = new FakeTeranode(network);
     f.node = await createLibp2p({
       addresses: { listen: ["/ip4/127.0.0.1/tcp/0"] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
       services: {
         identify: identify(), pubsub: gossipsub({ globalSignaturePolicy: "StrictSign", allowPublishToZeroTopicPeers: true, emitSelf: false }),
-        ...(o.dht ? { ping: ping(), dht: kadDHT({ protocol: TERANODE_DHT_PROTOCOL, clientMode: o.dht !== "server", peerInfoMapper: passthroughMapper }) } : {}),
       } as never,
     });
     f.pubsub().subscribe(f.topic);
@@ -92,22 +83,6 @@ export class FakeTeranode {
 
   /** The node's address (the tracker's bootstrap). */
   addr(): string { return this.node.getMultiaddrs().find((a) => a.toString().includes("127.0.0.1"))!.toString(); }
-
-  /**
-   * Dial `peer` (a multiaddr with /p2p/) and provide the block topic on the Teranode DHT through it
-   * (start with `dht`): a block-topic provider only that peer knows.
-   */
-  async provideTopic(peer: string): Promise<void> {
-    await this.node.dial(multiaddr(peer));
-    const dht = (this.node.services as { dht: KadDHT }).dht;
-    for (let i = 0; ; i++) {
-      // The peer joins the routing table once identify has run.
-      if ((dht as unknown as { routingTable: { size: number } }).routingTable.size > 0) break;
-      if (i > 100) throw new Error("the peer never entered the Teranode DHT's table");
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    await drain(dht.provide(await topicCid(this.topic)));
-  }
 
   /** Peers subscribed to the block topic. */
   subscribers(): number { return this.pubsub().getSubscribers(this.topic).length; }

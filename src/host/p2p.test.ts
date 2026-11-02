@@ -287,7 +287,7 @@ test("p2p: the default listeners — TCP on every interface, IPv4 and IPv6, on t
   assert.deepEqual(anyPort(DEFAULT_LISTEN), ["/ip4/0.0.0.0/tcp/0", "/ip6/::/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"], "the fallback: the same interfaces, OS-chosen ports");
 });
 
-test("p2p: the DHT modes on a started host node — the setting is the skein DHT's: server a server, client and auto clients (no public address on loopback), auto runs AutoNAT; the Teranode DHT always a client", async (t) => {
+test("p2p: the DHT modes on a started host node — one DHT, the skein DHT: server a server, client and auto clients (no public address on loopback), auto runs AutoNAT; no Teranode DHT", async (t) => {
   const inbound = async (): Promise<InboundAnswer> => ({ verdict: "accept" });
   const none = () => { throw new Error("no instance here"); };
   const want: Record<Exclude<DhtMode, "off">, "client" | "server"> = { server: "server", client: "client", auto: "client" };
@@ -295,14 +295,16 @@ test("p2p: the DHT modes on a started host node — the setting is the skein DHT
     const h = new P2PHost({ host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap: [], dht, relays: [], mdns: false, network: "regtest" }, keyOf: none, inbound });
     t.after(() => h.stop());
     const node = await h.hostNode();
-    assert.deepEqual(h.hostDhtModes(), { teranode: "client", skein: want[dht] }, dht);
+    assert.equal(h.hostDhtMode(), want[dht], dht);
+    assert.ok(!("teranodeDht" in node.services), `${dht}: no Teranode DHT`);
     assert.equal("autoNAT" in node.services, dht !== "client", `${dht}: AutoNAT`);
     assert.deepEqual(h.hostPublicAddrs(), [], `${dht}: no public address confirmed on loopback`);
   }
   const off = new P2PHost({ host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap: [], dht: "off", relays: [], mdns: false }, keyOf: none, inbound });
   t.after(() => off.stop());
   await off.hostNode();
-  assert.deepEqual(off.hostDhtModes(), { teranode: undefined, skein: undefined });
+  assert.equal(off.hostDhtMode(), undefined);
+  assert.equal(off.hostDht(), undefined);
 });
 
 test("p2p: the default port — the first node listens on it in both families; a second finds it taken, says so in one line and listens on an OS-chosen port", async (t) => {
