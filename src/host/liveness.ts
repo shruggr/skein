@@ -19,8 +19,12 @@
 //     (identity key), with the peer that published it (`from`); the node's
 //     OWN beats on the topic are written into the same set (gossip does not
 //     echo them: P2PHost.beacons);
-//   - in memory only: empty after a restart until the next beats; dropped at
-//     the app's unliveness or uninstall.
+//   - in memory, and in the host's store when it gives one (host.db
+//     `live_beats`: the frame as received, its time, sender and peer): when
+//     the apps' liveness is set at a start, the frames kept for its topics go
+//     through `observe` again (signature re-checked, window re-applied; the
+//     ones that no longer count deleted); dropped at the app's unliveness or
+//     uninstall.
 //
 // The set is served to the app's page by the host itself, no program in
 // between (Router: GET /<app>/.live/<topic> on the instance's origin).
@@ -67,6 +71,16 @@ export async function livenessOf(store: Pick<Store, "get" | "chains" | "edges">)
 /** A beat kept: the sender's identity key (hex), the beat's time, its body, the peer that published it (peer ID). */
 export interface LiveBeat { sender: string; at: number; body: Uint8Array; from: string }
 
+/** A beat as the store keeps it: the frame as received (re-verified on reload), its time, sender (hex), and the peer that published it. */
+export interface StoredBeat { topic: string; sender: string; at: number; from: string; frame: Uint8Array }
+
+/** Where the beats kept are persisted (host.db `live_beats`, instances.ts HostDb). */
+export interface BeatStore {
+  putBeat(handle: string, topic: string, beat: Omit<StoredBeat, "topic">): void;
+  beatsOf(handle: string, topic?: string): StoredBeat[];
+  dropBeats(handle: string, topic?: string, sender?: string): void;
+}
+
 /** A message's verdict for GossipSub: a verified beat is accepted (forwarded), a bad one rejected, a stale one ignored. */
 export type LiveVerdict = "accept" | "reject" | "ignore";
 
@@ -79,7 +93,15 @@ export class Liveness {
   private readonly now: () => number;
   /** Told each beat newly kept (shruggr/skein#150: the overlay's sync reads a peer's tip anchor from it). */
   kept?: (handle: string, topic: string, beat: LiveBeat) => void;
-  constructor(now: () => number = Date.now) { this.now = now; }
+  /** The store the kept beats are persisted in (absent: memory only). */
+  private readonly store?: BeatStore;
+  constructor(now: () => number = Date.now, store?: BeatStore) { this.now = now; this.store = store; }
+
+  /** A store write: its failure (a closed host.db at shutdown) changes nothing in memory nor any verdict. */
+  private persist(f: (s: BeatStore) => void): void {
+    if (!this.store) return;
+    try { f(this.store); } catch { /* memory stays right; the row is caught up at the next beat */ }
+  }
 
   /** `handle`'s apps keep this liveness now: the beats of topics none keeps any more are dropped. */
   set(handle: string, lives: Live[]): void {
@@ -87,6 +109,15 @@ export class Liveness {
     this.lives.set(handle, lives.map((l) => ({ ...l })));
     const kept = this.beats.get(handle);
     if (kept) for (const t of kept.keys()) if (!lives.some((l) => l.topic === t)) kept.delete(t);
+    if (!this.store) return;
+    let rows: StoredBeat[] = [];
+    this.persist((s) => { rows = s.beatsOf(handle); });
+    for (const t of new Set(rows.map((r) => r.topic))) if (!lives.some((l) => l.topic === t)) this.persist((s) => s.dropBeats(handle, t));
+    // The beats kept before (a restart): each frame judged again by `observe`; one that no longer counts is deleted.
+    for (const r of rows) {
+      if (!lives.some((l) => l.topic === r.topic)) continue;
+      if (this.observe(handle, r.topic, r.frame, r.from) !== "accept") this.persist((s) => s.dropBeats(handle, r.topic, r.sender));
+    }
   }
 
   /** The topics `handle`'s apps keep liveness for (each once). */
@@ -123,10 +154,11 @@ export class Liveness {
     if (!was || b.at > was.at) {
       const beat = { sender, at: b.at, body: b.body, from };
       bySender.set(sender, beat);
+      this.persist((s) => s.putBeat(handle, topic, { sender, at: b.at, from, frame }));
       this.kept?.(handle, topic, beat);
     }
     // The stale ones go as the set is touched.
-    for (const [k, x] of bySender) if (now - x.at >= window) bySender.delete(k);
+    for (const [k, x] of bySender) if (now - x.at >= window) { bySender.delete(k); this.persist((s) => s.dropBeats(handle, topic, k)); }
     return "accept";
   }
 
@@ -146,8 +178,14 @@ export class Liveness {
     return [...(this.beats.get(handle)?.get(topic)?.values() ?? [])].filter((b) => now - b.at < window);
   }
 
-  /** Forget `handle`: its liveness and its beats. */
+  /** Forget `handle`: its liveness and its beats (the stored ones too). */
   drop(handle: string): void {
+    this.forget(handle);
+    this.persist((s) => s.dropBeats(handle));
+  }
+
+  /** Forget `handle` in memory only (the host stopping): the stored beats stay for the next start. */
+  forget(handle: string): void {
     this.lives.delete(handle);
     this.beats.delete(handle);
   }

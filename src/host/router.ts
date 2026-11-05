@@ -140,7 +140,7 @@ import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Con
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
-import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
+import { foldLiveness, LIVENESS_MAX_MS, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
 import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
@@ -553,6 +553,7 @@ export class Router {
         sign: (h, data) => this.signAs(h, data),
         identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
         beat: (h, topic, b) => { this.sync?.beat(h, topic, b); void this.rememberPeer(h, topic, b.from); },
+        beats: o.db,
       });
       const p2pHost = this.p2p;
       this.hostP2p = p2pHost;
@@ -687,6 +688,8 @@ export class Router {
     }
     // #156: a host chain that is empty (or behind) filled from the image chain, before any instance is hydrated.
     await this.syncHolders().catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
+    // #138: the stored liveness beats older than the longest window (a day) go before any instance reloads them.
+    this.o.db.pruneBeats(stampMs(this.now()) - LIVENESS_MAX_MS);
     for (const row of this.o.db.list("enabled")) {
       try { await this.hydrate(row.handle); } catch (e) { this.say(row.handle, `not started: ${(e as Error).message}`); }
     }

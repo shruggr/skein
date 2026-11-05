@@ -259,8 +259,9 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   app keeps `liveness {topic, window}` for, the node subscribes it without
   admitting its messages, verifies each beacon beat's instance signature
   and keeps the latest per sender newer than `window` (its own beats too),
-  in memory; the host serves the set at `GET /<app>/.live/<topic>` on the
-  instance's origin (no program, no entry). A runtime without it records
+  in memory and in host.db (reloaded at a start within its window); the
+  host serves the set at `GET /<app>/.live/<topic>` on the instance's
+  origin (no program, no entry). A runtime without it records
   the events and nothing happens.
 - **The event streams** (#148, `src/host/events.ts`): a page subscribes to
   its app's emitted events at `GET /<app>/.events?event=<name>&topic=<t>…`

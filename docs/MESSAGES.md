@@ -1437,7 +1437,12 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     one dated more than a window ahead is not believed), the latest per
     sender, with the peer that published it; the node's **own** beats on
     the topic are written into the same set (gossip does not echo them);
-  - holds them in memory only: empty after a restart until the next beats.
+  - keeps them in the host's store too (host.db `live_beats`: the frame as
+    received, per instance, topic and sender): when the instance's liveness
+    is set at a start, the beats the host kept are reloaded through the same
+    check (signature, window), so those still inside their windows are
+    there at once; the others are deleted. Stored beats older than a day go
+    at the host's start; an unliveness or an uninstall drops them.
 
   The set is served by the host on the instance's origin, no program in
   between:

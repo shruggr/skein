@@ -109,7 +109,7 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
 import { verifyAnyone } from "../runtime/identity.ts";
-import { Liveness, type Live, type LiveBeat } from "./liveness.ts";
+import { Liveness, type BeatStore, type Live, type LiveBeat } from "./liveness.ts";
 
 export type DhtMode = "off" | "auto" | "client" | "server";
 
@@ -220,6 +220,8 @@ export interface P2POptions {
   hostProtocols?: Record<string, (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>>;
   /** Each beat the liveness tool newly keeps from another peer (shruggr/skein#150). */
   beat?(handle: string, topic: string, beat: LiveBeat): void;
+  /** Where the liveness tool persists the beats it keeps (host.db `live_beats`), reloaded when an instance's liveness is set. Absent: memory only. */
+  beats?: BeatStore;
   /**
    * The host node's peer key (#156): on a one-key host the key every instance's node uses (keyOf's
    * answer for every handle), so the instances join the host node. Absent: a fresh key (a test's).
@@ -615,8 +617,8 @@ export const TOPIC_REQUIRED = "topic required";
 
 export class P2PHost {
   readonly o: P2POptions;
-  /** The liveness tool's state (#138): the apps' liveness and the beats kept, in memory. */
-  readonly live = new Liveness();
+  /** The liveness tool's state (#138): the apps' liveness and the beats kept (persisted in `o.beats` when given). */
+  readonly live: Liveness;
   /** The nodes, by peer ID (#160: one per key). */
   private nodes = new Map<string, Node>();
   /** Each handle's node. */
@@ -632,6 +634,7 @@ export class P2PHost {
 
   constructor(o: P2POptions) {
     this.o = o;
+    this.live = new Liveness(Date.now, o.beats);
     this.hostKey = o.hostKey ?? PrivateKey.fromRandom();
     this.hostId = peerIdOf(this.hostKey).toString();
     if (o.beat) this.live.kept = (h, topic, b) => { if (b.from !== this.peerId(h)) o.beat!(h, topic, b); };
@@ -1247,7 +1250,7 @@ export class P2PHost {
       for (const [handle, hs] of n.handles) {
         for (const b of hs.beats.values()) clearInterval(b.timer);
         this.byHandle.delete(handle);
-        this.live.drop(handle);
+        this.live.forget(handle); // the host stopping: its stored beats stay for the next start
       }
       n.handles.clear();
       this.nodes.delete(n.id);

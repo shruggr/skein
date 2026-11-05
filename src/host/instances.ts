@@ -20,7 +20,8 @@
 // the host last read it (asleep since when: the grace), the periods it ticked
 // (each period's log record, which its tick commits to), and the payments its
 // wallet made (the `payment` events). And overlay sync's: the peers each
-// instance's overlay topics heard beats from (`topic_peers`).
+// instance's overlay topics heard beats from (`topic_peers`). And the liveness
+// tool's (#138): the beats it kept, reloaded at a start (`live_beats`).
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -136,6 +137,17 @@ CREATE TABLE IF NOT EXISTS topic_peers (
   addrs             TEXT NOT NULL,                    -- JSON array of multiaddrs (may be empty)
   last_seen         INTEGER NOT NULL,                 -- ms: the last beat kept from it
   PRIMARY KEY (handle, topic, peer_id)
+) WITHOUT ROWID;
+-- The liveness tool's beats (#138, liveness.ts): per instance and liveness topic, the latest beat kept from each
+-- sender, the frame as received; a start feeds them through the tool again (signature and window re-checked).
+CREATE TABLE IF NOT EXISTS live_beats (
+  handle            TEXT NOT NULL,
+  topic             TEXT NOT NULL,                    -- the liveness topic (e.g. <topic>-live)
+  sender            TEXT NOT NULL,                    -- the beat's identity key (hex)
+  at                INTEGER NOT NULL,                 -- ms: the beat's own time
+  peer_id           TEXT NOT NULL,                    -- the libp2p peer that published it
+  frame             BLOB NOT NULL,                    -- the beacon frame (p2p.ts beaconFrame)
+  PRIMARY KEY (handle, topic, sender)
 ) WITHOUT ROWID;`;
 
 /**
@@ -288,6 +300,32 @@ export class HostDb {
   /** Remove the row (not its store or wallet); false if there was none. */
   remove(handle: string): boolean {
     return Number(this.db.prepare("DELETE FROM instances WHERE handle = ?").run(handle).changes) > 0;
+  }
+
+  /** A liveness beat kept (#138): the sender's row on `handle`'s `topic` replaced. */
+  putBeat(handle: string, topic: string, b: { sender: string; at: number; from: string; frame: Uint8Array }): void {
+    this.db.prepare("INSERT INTO live_beats (handle, topic, sender, at, peer_id, frame) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (handle, topic, sender) DO UPDATE SET at = excluded.at, peer_id = excluded.peer_id, frame = excluded.frame")
+      .run(handle, topic, b.sender, b.at, b.from, b.frame);
+  }
+
+  /** The liveness beats kept for `handle` (on `topic` only, when named). */
+  beatsOf(handle: string, topic?: string): Array<{ topic: string; sender: string; at: number; from: string; frame: Uint8Array }> {
+    const rows = topic === undefined
+      ? this.db.prepare("SELECT topic, sender, at, peer_id, frame FROM live_beats WHERE handle = ? ORDER BY topic, sender").all(handle)
+      : this.db.prepare("SELECT topic, sender, at, peer_id, frame FROM live_beats WHERE handle = ? AND topic = ? ORDER BY sender").all(handle, topic);
+    return rows.map((r) => ({ topic: String(r.topic), sender: String(r.sender), at: Number(r.at), from: String(r.peer_id), frame: new Uint8Array(r.frame as Uint8Array) }));
+  }
+
+  /** Forget `handle`'s liveness beats: all, a topic's, or one sender's on a topic. */
+  dropBeats(handle: string, topic?: string, sender?: string): void {
+    if (topic === undefined) this.db.prepare("DELETE FROM live_beats WHERE handle = ?").run(handle);
+    else if (sender === undefined) this.db.prepare("DELETE FROM live_beats WHERE handle = ? AND topic = ?").run(handle, topic);
+    else this.db.prepare("DELETE FROM live_beats WHERE handle = ? AND topic = ? AND sender = ?").run(handle, topic, sender);
+  }
+
+  /** Forget the liveness beats dated before `before` (ms). → how many rows went. */
+  pruneBeats(before: number): number {
+    return Number(this.db.prepare("DELETE FROM live_beats WHERE at < ?").run(before).changes);
   }
 
   /** The enabled mailbox instance for identity `owner` (hex). */

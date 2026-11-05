@@ -1,7 +1,8 @@
 // The liveness tool (#138, liveness.ts) on its own: the events read and
 // folded; the set — verified beats only, the latest per sender, newer than
 // the window (the app's own window at read), a beat dated far ahead not
-// believed; topics dropped as liveness goes.
+// believed; topics dropped as liveness goes; the beats kept persisted in
+// host.db `live_beats` and reloaded through `observe` when liveness is set.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,6 +11,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
 import { beaconFrame } from "./p2p.ts";
+import { HostDb } from "./instances.ts";
 import { foldLiveness, livenessEvent, Liveness, type LivenessEvent } from "./liveness.ts";
 
 const o = new Signer(PrivateKey.fromHex("55".repeat(32)));
@@ -79,4 +81,58 @@ test("liveness: verified beats only, the latest per sender, newer than the windo
   assert.deepEqual(live.read("x", "amm", "t"), [], "the beats went with it");
   live.set("x", []);
   assert.deepEqual(live.topics("x"), []);
+});
+
+test("liveness: the beats kept persist in host.db and come back through observe within their window", async () => {
+  const db = new HostDb(":memory:");
+  let now = 1_000_000;
+  const lives = [{ app: "amm", topic: "t-live", window: 10_000 }];
+  const a = new Liveness(() => now, db);
+  a.set("x", lives);
+  assert.equal(a.observe("x", "t-live", await frame("ann", "t-live", now - 2000), "peerA"), "accept");
+  assert.equal(a.observe("x", "t-live", await frame("bob", "t-live", now - 8000), "peerB"), "accept");
+  assert.equal(a.observe("x", "t-live", await frame("ann", "t-live", now - 1000, "ann newer"), "peerA"), "accept");
+  assert.equal(a.observe("x", "t-live", await frame("cat", "t-live", now - 20_000), "peerC"), "ignore");
+  assert.deepEqual(db.beatsOf("x").map((r) => [r.topic, r.sender, r.at, r.from]), [
+    ["t-live", o.identity("ann"), now - 1000, "peerA"], ["t-live", o.identity("bob"), now - 8000, "peerB"],
+  ].sort((p, q) => String(p[1]).localeCompare(String(q[1]))), "the latest per sender, stale ones never stored");
+
+  // A tampered frame row: rejected on reload and deleted.
+  const tampered = dagCbor.decode(await frame("dan", "t-live", now - 500)) as Record<string, unknown>;
+  db.putBeat("x", "t-live", { sender: o.identity("dan"), at: now - 500, from: "peerD", frame: dagCbor.encode({ ...tampered, sender: keyOf("eve") }) });
+
+  // A restart 3 s later: a new tool over the same rows; bob's beat (8 s + 3 s) is past the 10 s window.
+  now += 3000;
+  const kept: string[] = [];
+  const b = new Liveness(() => now, db);
+  b.kept = (_h, _t, beat) => kept.push(beat.sender);
+  assert.deepEqual(b.read("x", "amm", "t-live"), undefined, "nothing before the liveness is set");
+  b.set("x", lives);
+  assert.deepEqual(b.read("x", "amm", "t-live")!.map((x) => [x.sender, x.at, new TextDecoder().decode(x.body), x.from]), [[o.identity("ann"), now - 4000, "ann newer", "peerA"]]);
+  assert.deepEqual(kept, [o.identity("ann")], "a reloaded beat is told as kept, as a fresh one");
+  assert.deepEqual(db.beatsOf("x").map((r) => r.sender), [o.identity("ann")], "the stale and the tampered rows deleted");
+
+  // Set again: nothing new kept, nothing lost.
+  b.set("x", lives);
+  assert.deepEqual(kept, [o.identity("ann")]);
+
+  // A topic no app keeps any more: its rows go; drop(handle) clears the rest; forget (the host stopping) keeps them.
+  b.observe("x", "t-live", await frame("bob", "t-live", now), "peerB");
+  db.putBeat("x", "u-live", { sender: o.identity("ann"), at: now, from: "peerA", frame: await frame("ann", "u-live", now) });
+  b.set("x", lives);
+  assert.deepEqual(db.beatsOf("x").map((r) => r.topic), ["t-live", "t-live"]);
+  b.forget("x");
+  assert.equal(db.beatsOf("x").length, 2, "forget keeps the stored beats");
+  b.set("x", lives);
+  b.drop("x");
+  assert.deepEqual(db.beatsOf("x"), []);
+
+  // pruneBeats: rows dated before the bound go.
+  db.putBeat("y", "t-live", { sender: o.identity("ann"), at: now - 90_000_000, from: "peerA", frame: await frame("ann", "t-live", now - 90_000_000) });
+  db.putBeat("y", "t-live", { sender: o.identity("bob"), at: now, from: "peerB", frame: await frame("bob", "t-live", now) });
+  assert.equal(db.pruneBeats(now - 86_400_000), 1);
+  assert.deepEqual(db.beatsOf("y", "t-live").map((r) => r.sender), [o.identity("bob")]);
+  db.dropBeats("y", "t-live", o.identity("bob"));
+  assert.deepEqual(db.beatsOf("y"), []);
+  db.close();
 });
