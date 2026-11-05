@@ -272,6 +272,17 @@ export interface RouterOptions {
    * stock wiring takes, from `handle`, handed over after its step's commit. Absent: logged as ignored.
    */
   appEvent?(handle: string, record: Record<string, unknown>): void;
+  /**
+   * An application host's reads (shruggr/open-exchange 0.11.0, the public read API): a GET for an
+   * instance (its hostname, `/@<handle>/`, or the root instance's hostname), asked AFTER the host's own
+   * reads there (the instance card, `/<app>/.live/<topic>`) and BEFORE the request is forwarded to the
+   * instance's program. `route` is the path at the instance (`/amm/pools`); `undefined`: not the host's,
+   * forwarded as before. An answer with `stream` is held open (RouterResponse). What the host needs
+   * for its reads is the Router's public surface: `dispatch` (in-process reads of the instances),
+   * `p2p.live.live(handle, topic)` (the beats kept), `events.subscribe(handle, query, send, close)` (an
+   * instance's emitted events), `o.db.list("enabled")` (the instances). Absent: nothing is asked.
+   */
+  appRead?(handle: string, route: string, url: URL, req: RouterRequest): Promise<RouterResponse | undefined>;
 }
 
 interface Loaded {
@@ -291,7 +302,16 @@ interface Loaded {
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
 export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array; /** The instance whose `http` this is (none for a socket's). */ from?: string }
-export interface RouterResponse { status: number; headers: Record<string, string>; body: Uint8Array }
+export interface RouterResponse {
+  status: number; headers: Record<string, string>; body: Uint8Array;
+  /**
+   * A response held open (an event stream an `appRead` answers): on a socket (Router.handler) the
+   * status and headers are written, then `stream` is called with `send` (writes a chunk) and `end`
+   * (closes the response); the function it returns is called once when the client goes. `body` is
+   * not written. In process (Router.dispatch's caller) it is not called: the caller gets `body`.
+   */
+  stream?(send: (chunk: string) => void, end: () => void): () => void;
+}
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
@@ -2119,6 +2139,11 @@ export class Router {
       if (live) return await this.held(this.liveRead(x.handle, x.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
       // #148: a stream, served on a socket only (handler).
       if (req.method === "GET" && EVENTS_ROUTE.test(x.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
+      // An application host's own reads (appRead): before the instance's program; undefined falls through.
+      if (req.method === "GET" && this.o.appRead) {
+        const a = await this.o.appRead(x.handle, x.route, url, req);
+        if (a) return a;
+      }
       return await this.held(this.forward(x.handle, x.route, url, req));
     };
     if (t) return await serve(t);
@@ -2311,7 +2336,19 @@ export class Router {
       req.on("end", () => {
         const url = `http://${req.headers.host ?? `127.0.0.1:${this.port}`}${req.url ?? "/"}`;
         this.dispatch({ method: req.method ?? "GET", url, headers: headerMap(req.headers), body: new Uint8Array(Buffer.concat(chunks)) })
-          .then((r) => { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); })
+          .then((r) => {
+            if (!r.stream) { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); return; }
+            // A response held open (an appRead's event stream): written as it comes, until either side ends it.
+            if (res.destroyed) return;
+            res.writeHead(r.status, { ...cors, ...r.headers });
+            res.flushHeaders();
+            let forget: (() => void) | undefined;
+            let gone = false;
+            const leave = () => { if (gone) return; gone = true; forget?.(); };
+            res.on("close", leave);
+            forget = r.stream((chunk) => { if (!gone) res.write(chunk); }, () => { if (!gone) res.end(); });
+            if (gone) forget();
+          })
           .catch((e: Error) => { if (!res.headersSent) { res.writeHead(500, { ...cors, "content-type": "application/json" }); res.end(JSON.stringify({ status: "error", code: "ERR_INTERNAL", description: e.message })); } });
       });
     };

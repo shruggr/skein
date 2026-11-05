@@ -1554,6 +1554,20 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   registry per instance, in memory: an app's close at its uninstall (no row
   of it left), all of an instance's when it stops and when the host shuts
   down. Beats are not events and are not served here.
+- **An application host's reads** (open-exchange 0.11.0). A host built on
+  the Router as a library (its `appEvent` takes the events no stock wiring
+  takes, #164) may also answer GETs at an instance itself: the Router option
+  `appRead(handle, route, url, req)` is asked for every GET at an instance
+  (its hostname, `/@<handle>/`, or the root instance's hostname) after the
+  host's own reads there (the instance card, `/<app>/.live/<topic>`) and
+  before the request goes to the instance's program; it answers a response
+  or `undefined` (forwarded as before). A response with `stream` is held
+  open on its socket (an event stream): the host writes chunks until either
+  side ends it. What such a host reads is the Router's public surface:
+  `dispatch` (an instance's reads, in process), `p2p.live.live(handle,
+  topic)` (the beats kept), `events.subscribe` (the emitted events, as this
+  stream serves them), `o.db.list("enabled")` (the instances). Nothing is
+  logged; the instance's program never sees these requests.
 - **What the node subscribes** (#72, #77, #119). The instance's node takes
   the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's
