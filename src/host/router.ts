@@ -1405,7 +1405,13 @@ export class Router {
       // operator's key, `appConfig` merged.
       // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
       // #164: an owned instance's genesis names `owner` root (boot.ts then seeds no claim route), as the host skein's does.
-      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
+      // The image read from its root to the last object walked: a header taken meanwhile keeps the objects it replaces.
+      const release = this.image.hold();
+      try {
+        await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
+      } finally {
+        release();
+      }
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door

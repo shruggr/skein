@@ -19,7 +19,10 @@
 // two trees above them and the root; every full block stays as it is. The
 // chain part's objects live in host.db (`image_blocks`: only the current ones;
 // a replaced object is deleted with the write that replaces it), the current
-// root and `chain` tree in `host_settings` (`image`, `image_chain`).
+// root and `chain` tree in `host_settings` (`image`, `image_chain`). While a
+// boot reads the image (`hold()`, Router.createInstance), a write puts its new
+// objects and settings but keeps the replaced ones: their deletes wait for the
+// next write with no boot in flight, or the last boot's release.
 //
 // Where the headers come from: the host's headers feed (SKEIN_HEADERS_URL,
 // feeds.ts), each one appended as it arrives; and its history, from the same
@@ -118,6 +121,10 @@ export class ImageChain {
   private stat?: Promise<Static>;
   /** #142, #152: the overlay images' static parts (images/host, a directory with no `bin/`), each merged over the default image once. */
   private merged = new Map<string, Promise<Static>>();
+  /** Boots reading the image now (`hold`): while any, a write's drops wait in `pending`. */
+  private holds = 0;
+  /** The objects writes replaced while a boot read the image: dropped once none does. */
+  private pending = new Set<string>();
   /** Settles once the first sync (start) is done: what a creation waits for. */
   ready: Promise<void> = Promise.resolve();
 
@@ -272,11 +279,35 @@ export class ImageChain {
     }
     const oldRoot = this.o.db.setting("image");
     if (oldRoot) drops.add(oldRoot);
+    for (const d of this.pending) drops.add(d);
     for (const k of puts.keys()) drops.delete(k);
-    this.o.db.writeImage(puts, drops, { image: root.cid.toString(), image_chain: chain.cid.toString() });
+    // A boot reading the image (hold): the replaced objects stay until it is done.
+    const now = this.holds === 0 ? drops : new Set<string>();
+    this.pending = this.holds === 0 ? new Set() : drops;
+    this.o.db.writeImage(puts, now, { image: root.cid.toString(), image_chain: chain.cid.toString() });
     this.blocks = blocks;
     this.last = Buffer.from(last);
     return true;
+  }
+
+  /**
+   * A boot reads the image (its root, then every object under it) from `source()` on: hold it from
+   * before `source()` until the walk is done. Until the last hold is released, a write keeps the
+   * objects it replaces (their deletes wait); the release returned (once) applies them when no
+   * other boot holds.
+   */
+  hold(): () => void {
+    this.holds++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      if (--this.holds === 0 && this.pending.size) void this.serial(() => {
+        if (this.holds !== 0 || !this.pending.size) return;
+        this.o.db.writeImage(new Map(), this.pending, {});
+        this.pending = new Set();
+      }).catch((e) => this.say(`the image's replaced objects not dropped: ${(e as Error).message}`));
+    };
   }
 
   /** The static part: the image directory, scanned once (boot.ts imageDir: the apps it names beside it too). */

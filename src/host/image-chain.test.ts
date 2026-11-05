@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dirSource } from "./boot.ts";
+import { dirSource, treeObjects } from "./boot.ts";
 import { blockName, headerProblem, historyOf, ImageChain, PER_BLOCK } from "./image-chain.ts";
 import { HostDb } from "./instances.ts";
 import { parseTree } from "../runtime/tree.ts";
@@ -147,6 +147,49 @@ test("image chain: filled from genesis, grown per header, a reorg, a gap, kept i
   bad.writeUInt32LE(0, 72);
   await assert.rejects(ic3.put(held.length, [bad]), /unusable target/);
   await assert.rejects(ic3.put(held.length + 5, [mine(sha256d(held.at(-1)!), 1)]), /a gap/);
+});
+
+test("image chain: a header taken while a boot walks the image keeps the objects it replaces until the boot is done", async (t) => {
+  const db = new HostDb(join(tmp(t), "host.db"));
+  t.after(() => db.close());
+  const ic = new ImageChain({ db });
+  const held = chain(12);
+  assert.ok(await ic.put(0, held.slice(0, 10)));
+  const chainNow = () => db.setting("image_chain")!;
+  const objectsOf = (c: string) => [c, ...parseTree(Buffer.from(db.imageBlock(c)!)).map((e) => e.cid.toString())];
+
+  // The boot: hold, the source, then the walk — a header lands after its first object.
+  const release = ic.hold();
+  const src = await ic.source();
+  if (src.kind !== "tree") throw new Error("a tree");
+  const before = chainNow();
+  const old = objectsOf(before);
+  let landed = false;
+  const slow = { get: async (cid: Parameters<typeof src.objects.get>[0]) => {
+    if (!landed) { landed = true; assert.ok(await ic.put(10, [held[10]!])); }
+    return await src.objects.get(cid);
+  } };
+  const walked = await treeObjects(slow, src.root);
+  assert.ok(landed);
+  assert.notEqual(chainNow(), before, "the write's tree and settings went in");
+  assert.ok(walked.some((o) => o.cid.toString() === before), "the boot walked the old chain tree");
+  for (const c of old) assert.ok(db.imageBlock(c), `${c} kept while the boot holds`);
+
+  // Released: the deferred drops go.
+  release();
+  release(); // once
+  await ic.after(undefined); // after the release's drop, in turn
+  for (const c of old.filter((c) => !objectsOf(chainNow()).includes(c))) assert.equal(db.imageBlock(c), undefined, `${c} dropped after the release`);
+  assert.ok(db.imageBlock(before) === undefined);
+
+  // No boot: a write drops at once.
+  const prev = chainNow();
+  assert.ok(await ic.put(11, [held[11]!]));
+  assert.equal(db.imageBlock(prev), undefined);
+  assert.equal(ic.tip()?.height, 11);
+  const now = await ic.source();
+  if (now.kind !== "tree") throw new Error("a tree");
+  assert.ok((await treeObjects(now.objects, now.root)).some((o) => o.cid.toString() === chainNow()));
 });
 
 test("image chain: none held → the static image as before", async (t) => {
