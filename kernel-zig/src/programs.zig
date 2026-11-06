@@ -54,7 +54,7 @@ const call_inputs = [_]cbor.Entry{
 const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 // A description is part of its record, and so of the CID every store pins.
-// The mail program's (the stock messagebox until 0.4.0, which kept mail for
+// The mail program's (the stock messagebox until 0.4.1, which kept mail for
 // other keys) says what it carries now: the skein's own mail.
 const handlers = [_]Handler{
     .{ .name = "mail", .services = &.{}, .inputs = &call_inputs, .description = "The skein's own mail (#40): the front door's sendMessage (one `mail` entry for this instance, routed by its box; any other recipient refused — a messagebox for other keys is an app of its own); launched as a message's delivery thread (#70), emits the `deliver` intention (#157), which the host carries over BRC-103/104, and is stepped by its answer." },

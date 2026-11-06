@@ -1179,23 +1179,32 @@ export class P2PHost {
   }
 
   /**
-   * A `call` intention's carrying (the swap relay's call, 2026-11-06): from `handle`'s node, a
-   * connection to `peer` (a peer ID, or a multiaddr with /p2p/<id>), a stream on `protocol`, ONE
-   * frame written, ONE frame read back, the stream closed → the answer's bytes and the peer the
-   * connection proved (Noise: its peer ID's multihash). No timer of its own: the stream is live until
-   * the peer answers or the connection breaks. A break throws, its message saying which: the dial
-   * refused, the protocol not served, the write failed, the stream closed without a frame.
+   * One request to a peer and its answer, for host code (the open-exchange host's swap relay,
+   * 2026-11-06): from `handle`'s node, a connection to `peer` (a peer ID, or a multiaddr with
+   * /p2p/<id>), a stream on `protocol`, ONE frame written, ONE frame read back, the stream closed →
+   * the answer's bytes and the peer the connection proved (Noise: its peer ID's multihash). Nothing
+   * is logged anywhere. No timer of its own: the stream is live until the peer answers or the
+   * connection breaks. A break throws, its message saying which: the dial refused, the protocol not
+   * served, the write failed, the stream closed without an answer. `signal` is the caller's only
+   * bound: once it fires, a dial in progress is cancelled, a request not yet written is never
+   * written, an open stream is closed, and the call throws "the call was cancelled".
    */
-  async call(handle: string, peer: string, protocol: string, body: Uint8Array): Promise<{ from: Uint8Array; body: Uint8Array }> {
+  async call(handle: string, peer: string, protocol: string, body: Uint8Array, o: { signal?: AbortSignal } = {}): Promise<{ from: Uint8Array; body: Uint8Array }> {
     const n = this.nodeOf(handle);
+    const signal = o.signal;
+    const cancelled = () => new Error(`the call was cancelled${signal?.reason instanceof Error ? `: ${signal.reason.message}` : typeof signal?.reason === "string" ? `: ${signal.reason}` : ""}`);
+    if (signal?.aborted) throw cancelled();
     let target: Multiaddr | PeerId;
     try { target = peer.startsWith("/") ? multiaddr(peer) : peerIdFromString(peer); } catch (e) { throw new Error(`not a peer: ${peer}: ${(e as Error).message}`); }
-    const conn = await n.node.dial(target).catch((e: Error) => { throw new Error(`the dial was refused: ${e.message}`); });
-    const stream = await conn.newStream(protocol).catch((e: Error) => { throw new Error(`the peer does not serve ${protocol}: ${e.message}`); });
+    const conn = await n.node.dial(target, signal ? { signal } : {}).catch((e: Error) => { throw signal?.aborted ? cancelled() : new Error(`the dial was refused: ${e.message}`); });
+    if (signal?.aborted) throw cancelled();
+    const stream = await conn.newStream(protocol, signal ? { signal } : {}).catch((e: Error) => { throw signal?.aborted ? cancelled() : new Error(`the peer does not serve ${protocol}: ${e.message}`); });
     const lp = lpStream(stream);
     try {
-      await lp.write(body).catch((e: Error) => { throw new Error(`the write failed: ${e.message}`); });
-      const answer = await lp.read().catch((e: Error) => { throw new Error(`the stream closed without an answer: ${e.message}`); });
+      // Never written once the signal has fired.
+      if (signal?.aborted) throw cancelled();
+      await lp.write(body, signal ? { signal } : {}).catch((e: Error) => { throw signal?.aborted ? cancelled() : new Error(`the write failed: ${e.message}`); });
+      const answer = await lp.read(signal ? { signal } : {}).catch((e: Error) => { throw signal?.aborted ? cancelled() : new Error(`the stream closed without an answer: ${e.message}`); });
       await stream.close().catch(() => {});
       return { from: conn.remotePeer.toMultihash().bytes, body: answer.subarray() };
     } catch (e) {

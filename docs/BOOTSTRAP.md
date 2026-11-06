@@ -22,7 +22,7 @@ gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. (There are no
-mailbox instances since 0.4.0: a wallet's mail is kept by the host skein's
+mailbox instances since 0.4.1: a wallet's mail is kept by the host skein's
 messagebox app, docs/MESSAGES.md "The messagebox".) **Every genesis that names an owner carries the owner's four admin
 rows** first (the kernel's `objects`, `head`, `dispatch`, `peers`
 operations): a bare genesis is the four tables and those rows; a bundle adds

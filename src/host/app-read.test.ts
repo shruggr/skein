@@ -1,4 +1,5 @@
-// An application host's reads (RouterOptions.appRead, open-exchange 0.11.0): a GET for an instance is
+// An application host's requests (RouterOptions.appRead, open-exchange 0.11.0; every method since
+// 0.3.2, with req.signal on a socket's request): a request for an instance is
 // offered to the host after the host's own reads there and before the instance's program; undefined
 // falls through (forwarded as before); an answer with `stream` is held open on a socket.
 import { test } from "node:test";
@@ -39,10 +40,10 @@ test("appRead answers its route (at /@<handle>/ and at the root instance's hostn
     const c = await get(h.r, "/@alpha/amm/other");
     assert.notEqual(c.status, 200);
     assert.deepEqual(asked.map((x) => x[1]), ["/amm/pools", "/amm/pools", "/amm/other"]);
-    // A POST is never offered; nor are the host's own reads (the instance card).
+    // 0.3.2: every method is offered (the hook reads req.method); the host's own reads (the instance card) are not.
     await h.r.dispatch({ method: "POST", url: `${h.r.origin()}/@alpha/amm/pools`, headers: {}, body: new Uint8Array() });
     await get(h.r, "/@alpha/.well-known/skein");
-    assert.equal(asked.length, 3);
+    assert.deepEqual(asked.slice(3), [["alpha", "/amm/pools", "POST"]]);
   } finally { await h.done(); }
 });
 
@@ -70,5 +71,49 @@ test("an answer with `stream`: held open on a socket, chunks written as sent, fo
     ac.abort();
     for (let i = 0; i < 50 && !forgotten; i++) await new Promise((r) => setTimeout(r, 20));
     assert.equal(forgotten, 1, "the stream forgotten once the client went");
+  } finally { await h.done(); }
+});
+
+test("0.3.2: a POST served by the application host on a socket; req.signal unfired after its answer, fired when the client goes first", async () => {
+  const seen: Array<{ method: string; body: string; signal?: AbortSignal }> = [];
+  let release: (() => void) | undefined;
+  const h = host(async (_handle, route, _url, req) => {
+    if (route === "/amm/swap" && req.method === "POST") {
+      seen.push({ method: req.method, body: new TextDecoder().decode(req.body), signal: req.signal });
+      return { status: 200, headers: { "content-type": "application/json" }, body: enc(JSON.stringify({ ok: true })) };
+    }
+    if (route === "/amm/hold" && req.method === "POST") {
+      seen.push({ method: req.method, body: new TextDecoder().decode(req.body), signal: req.signal });
+      await new Promise<void>((r) => { release = r; req.signal?.addEventListener("abort", () => r()); });
+      return { status: 200, headers: { "content-type": "text/plain" }, body: enc("late") };
+    }
+    return undefined;
+  });
+  try {
+    await h.r.listen(0);
+    const res = await fetch(`http://127.0.0.1:${h.r.port}/@alpha/amm/swap`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ funding: "x" }) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+    assert.equal(seen[0]!.body, JSON.stringify({ funding: "x" }));
+    assert.ok(seen[0]!.signal, "a socket's request carries a signal");
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(seen[0]!.signal!.aborted, false, "unfired after a normal answer");
+    // A client that leaves before the answer: the signal fires.
+    const ac = new AbortController();
+    const p = fetch(`http://127.0.0.1:${h.r.port}/@alpha/amm/hold`, { method: "POST", body: "y", signal: ac.signal }).catch((e: Error) => e);
+    for (let i = 0; i < 100 && seen.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(seen.length, 2, "the held request reached the hook");
+    assert.equal(seen[1]!.signal!.aborted, false);
+    ac.abort();
+    await p;
+    for (let i = 0; i < 100 && !seen[1]!.signal!.aborted; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(seen[1]!.signal!.aborted, true, "fired when the client's connection closed first");
+    assert.match(String((seen[1]!.signal!.reason as Error).message), /the client closed the connection/);
+    release?.();
+    // In process: no signal.
+    let inProc: AbortSignal | undefined | null = null;
+    const h2 = host(async (_h, _r, _u, req) => { inProc = req.signal; return { status: 204, headers: {}, body: new Uint8Array() }; });
+    try { await h2.r.dispatch({ method: "POST", url: `${h2.r.origin()}/@alpha/amm/swap`, headers: {}, body: new Uint8Array() }); } finally { await h2.done(); }
+    assert.equal(inProc, undefined);
   } finally { await h.done(); }
 });

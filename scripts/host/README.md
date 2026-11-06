@@ -358,7 +358,7 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 |---|---|
 | `handle` | primary key; the genesis's `handle` and the front door's host name, e.g. `martha` |
 | `domain` | default `localhost` |
-| `kind`, `owner` | only in files made before 0.4.0 (mailbox instances): nothing reads them, and new files lack them |
+| `kind`, `owner` | only in files made before 0.4.1 (mailbox instances): nothing reads them, and new files lack them |
 | `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the signer's, BRC-42 child, key ID the handle) |
 | `wallet_url`, `wallet_originator` | only in files made before #33: nothing reads them, and new files lack them |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
