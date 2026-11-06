@@ -1178,6 +1178,32 @@ export class P2PHost {
     }
   }
 
+  /**
+   * A `call` intention's carrying (the swap relay's call, 2026-11-06): from `handle`'s node, a
+   * connection to `peer` (a peer ID, or a multiaddr with /p2p/<id>), a stream on `protocol`, ONE
+   * frame written, ONE frame read back, the stream closed → the answer's bytes and the peer the
+   * connection proved (Noise: its peer ID's multihash). No timer of its own: the stream is live until
+   * the peer answers or the connection breaks. A break throws, its message saying which: the dial
+   * refused, the protocol not served, the write failed, the stream closed without a frame.
+   */
+  async call(handle: string, peer: string, protocol: string, body: Uint8Array): Promise<{ from: Uint8Array; body: Uint8Array }> {
+    const n = this.nodeOf(handle);
+    let target: Multiaddr | PeerId;
+    try { target = peer.startsWith("/") ? multiaddr(peer) : peerIdFromString(peer); } catch (e) { throw new Error(`not a peer: ${peer}: ${(e as Error).message}`); }
+    const conn = await n.node.dial(target).catch((e: Error) => { throw new Error(`the dial was refused: ${e.message}`); });
+    const stream = await conn.newStream(protocol).catch((e: Error) => { throw new Error(`the peer does not serve ${protocol}: ${e.message}`); });
+    const lp = lpStream(stream);
+    try {
+      await lp.write(body).catch((e: Error) => { throw new Error(`the write failed: ${e.message}`); });
+      const answer = await lp.read().catch((e: Error) => { throw new Error(`the stream closed without an answer: ${e.message}`); });
+      await stream.close().catch(() => {});
+      return { from: conn.remotePeer.toMultihash().bytes, body: answer.subarray() };
+    } catch (e) {
+      stream.abort(e as Error);
+      throw e;
+    }
+  }
+
   /** The protocols `handle`'s node handles inbound now (the libp2p node's own registry: its rows', the host's, /skein/message/1.0.0). */
   handledProtocols(handle: string): string[] { return this.byHandle.get(handle)?.node.getProtocols() ?? []; }
 
