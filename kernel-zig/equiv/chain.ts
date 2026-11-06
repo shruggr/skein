@@ -101,11 +101,11 @@ function cloneChain(home: string): string {
 }
 try {
   const callerWallet = ephemeralWallet(callerKey);
-  h.mailbox("caller", callerId);
+  const callerMailbox = await h.inbox(callerKey, "caller");
   const inst = h.instance("ch");
   await h.router.start();
   const owner = new RawBox(h.owner, `${h.base}/@ch`);
-  await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
+  await owner.send(inst, "peers", { op: "add", key: callerId, url: callerMailbox });
   await h.router.settled();
   store = storeSpec(h.db.get("ch")!);
   const k = async () => (await h.router.hydrate("ch")).kernel;
@@ -161,7 +161,7 @@ try {
 
   // ------------------------------------------------ calls by message, answers in the caller's mailbox
   const callerBox = new RawBox(callerWallet, `${h.base}/@ch`);
-  const mine_ = new RawBox(callerWallet, h.origin("caller"));
+  const mine_ = new RawBox(callerWallet, callerMailbox);
   type Answer = { fn: string; request?: CID; replyTo?: CID; result?: Record<string, unknown>; error?: { code: string; message: string } };
   const answersTo = async (id: string) => (await mine_.list("chain")).map((x) => x.value as Answer).filter((v) => String(v.request) === id);
   const send = async (body: Record<string, unknown>) => (await callerBox.send(inst, "chain", body)).id.toString();
@@ -265,7 +265,7 @@ try {
   const bootId = h.instance("boot");
   const src = await dirSource(sys);
   await h.router.bootRow("boot", { kind: "tree", root: src.root, objects: src.objects });
-  await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: h.origin("caller") });
+  await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: callerMailbox });
   for (const raw of [h1, h2]) await h.router.chainHeaders("boot", "chain", [raw]);
   await h.router.settled();
   const bootStore = storeSpec(h.db.get("boot")!);

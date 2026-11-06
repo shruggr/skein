@@ -1,15 +1,18 @@
 // A test host (#40): a router over a temporary host.db and SKEIN_HOME,
-// instances (mailbox instances among them) with keys of their own (the signer's stand-in). With no
-// host skein its own origin's BRC-169 requests are answered by a fixture over
+// instances with keys of their own (the signer's stand-in). With no host
+// skein its own origin's BRC-169 requests are answered by a fixture over
 // host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
-// skein with the onboarding app installed, which then answers them.
+// skein with the onboarding app and the messagebox app installed, which then
+// answers them. A key outside the host (the owner, the inference peer, a
+// caller) reads its mail as any wallet does: registered there as a handle
+// (`inbox`), at the messagebox URL its handle resolves to.
 
 import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
+import { AuthFetch, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import type { Store } from "../runtime/store.ts";
@@ -21,7 +24,7 @@ import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from ".
 import { fakeDiscovery } from "./fake-discovery.ts";
 import { imageSource } from "./boot.ts";
 import { HostDb } from "./instances.ts";
-import { Router, type SignedClaim } from "./router.ts";
+import { REGISTER_PROTOCOL, Router, type SignedClaim } from "./router.ts";
 import { Signer } from "./signer.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -64,7 +67,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
   return out;
 }
 
-/** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
+/** A host with instances, each instance's key its own (the signer's stand-in). */
 export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
@@ -125,8 +128,6 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
       db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() });
       return await router.bootRow(handle, await imageSource(dir), { image: true });
     },
-    /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
-    mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() }); },
     /**
      * The host skein (#90, #113, #142): `host` from the host image (the
      * default image with the onboarding app), its genesis naming the owner
@@ -136,10 +137,34 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
      * origin's BRC-169 requests are then the app's.
      */
     async hostSkein(config: Record<string, unknown> = {}) {
-      const c = await router.createInstance("host", ownerId, { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base, ...config } } } });
+      const c = await router.createInstance("host", ownerId, { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base, messagebox: `${router.originOf("host")}/messagebox`, ...config } } } });
       await router.hydrate("host");
       await router.settled();
       return c;
+    },
+    /**
+     * A key's hosted inbox: the host skein made if it is not yet (hostSkein), `key` registered there as
+     * `handle` — the registration a wallet makes (POST /account/register over its session, signed over
+     * `register <handle>@localhost`) — and its messagebox URL, what the handle resolves to (the host
+     * skein's messagebox app, `<host skein>/messagebox`). Read it with RawBox at that URL.
+     */
+    async inbox(key: PrivateKey, handle: string): Promise<string> {
+      if (!db.hostSkein()) await h.hostSkein();
+      const { signature } = await new ProtoWallet(key).createSignature({ protocolID: REGISTER_PROTOCOL, keyID: handle, counterparty: "anyone", data: Utils.toArray(`register ${handle}@localhost`, "utf8") });
+      const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: handle, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+      const a = await r.json() as { messagebox?: string; error?: string };
+      if (r.status !== 200 || !a.messagebox) throw new Error(`register ${handle}: HTTP ${r.status} ${a.error ?? ""}`);
+      return a.messagebox;
+    },
+    /**
+     * The owner's hosted inbox (`inbox` with the owner's key, as `handle`), and the owner's messagebox
+     * setting (the router's `ownerMessagebox`, SKEIN_OWNER_MESSAGEBOX's) set to it — before any
+     * instance's genesis names it. Its URL.
+     */
+    async ownerInbox(handle = "david"): Promise<string> {
+      const url = await h.inbox(ownerKey, handle);
+      router.o.ownerMessagebox = url;
+      return url;
     },
     origin: (handle: string) => router.originOf(handle),
     storeSize(handle: string) { const p = db.get(handle)!.store; return statSync(p).size + (existsSync(`${p}-wal`) ? statSync(`${p}-wal`).size : 0); },
@@ -160,7 +185,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
 
 /**
  * A small world on a test host (the explorer's and the store reader's tests):
- * the owner's mailbox, the inference peer's, and instance `alpha` with the shell
+ * the owner's inbox, the inference peer's (hosted in the host skein), and instance `alpha` with the shell
  * app and the chat app installed (#83); `dir` imported into alpha (objects →
  * `main`); a chat whose turn makes one bash
  * tool call (`ls | head -3`) and answers "README and **src**." into the
@@ -169,8 +194,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
 export async function chatWorld(t: { after(f: () => unknown): void }, dir: string, o: { sqlite?: boolean } = {}) {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId, ...o });
-  h.mailbox("david", h.ownerId);
-  h.mailbox("infer", inferId);
+  const mailbox = await h.ownerInbox();
+  const inferBox = await h.inbox(inferKey, "infer");
   const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha");
@@ -184,16 +209,16 @@ export async function chatWorld(t: { after(f: () => unknown): void }, dir: strin
     wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, log: (l) => h.lines.push(`[infer] ${l}`),
     fetch: (async () => script.shift() ?? new Response("no more", { status: 500 })) as unknown as typeof fetch,
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, inferBox),
       outbox: (url) => new RawBox(w, url),
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
     },
   });
   const owner = new RawBox(h.owner, `${h.base}/@alpha`);
   const { root, bundles } = await dirBundles(dir);
   for (const b of bundles) await owner.send(alpha, "objects", b);
   const chat = (await owner.send(alpha, "chat", { text: "What is here?" })).id;
-  const mine = new RawBox(h.owner, `${h.base}/@david`);
+  const mine = new RawBox(h.owner, mailbox);
   await until("alpha's answer", async () => {
     await peer.poll();
     return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text === "README and **src**.");

@@ -26,7 +26,7 @@ const die = (msg: string): never => { process.stderr.write(`skein-infer: ${msg}\
 const providersFile = env.SKEIN_INFER_PROVIDERS || `${home}/infer.json`;
 let providers: Record<string, Provider>;
 try { providers = JSON.parse(readFileSync(providersFile, "utf8")); } catch (e) { die(`${providersFile}: ${(e as Error).message}`); }
-if (!env.SKEIN_MAILBOX_URL) die("SKEIN_MAILBOX_URL is not set (its mailbox instance: skein-host add infer --mailbox --owner <its key>)");
+if (!env.SKEIN_MAILBOX_URL) die("SKEIN_MAILBOX_URL is not set (its messagebox: the URL its handle resolves to, e.g. a host skein's <origin>/messagebox)");
 const wallet = await connectWallet({ kind: "remote", url: env.SKEIN_INFER_WALLET_URL || "http://127.0.0.1:3323", originator: "skein-infer" });
 const { publicKey } = await wallet.getPublicKey({ identityKey: true });
 const cache = env.SKEIN_INFER_CACHE ?? `${home}/infer-cache`;

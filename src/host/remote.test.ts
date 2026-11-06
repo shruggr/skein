@@ -13,11 +13,12 @@ import { KERNEL_BIN } from "./kernel.ts";
 import { fetchHttp } from "./router.ts";
 import { testHost, until } from "./testhost.ts";
 import { SHELL_APP } from "../testapps.ts";
+import { sessionBase } from "../session-base.ts";
 
 test("remote delivery: an admin peer record; the run's result delivered over http to the owner's mailbox on another host; the peer removed", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
-  // Host B keeps the owner's mailbox; host A runs the agent. The same owner.
+  // Host B keeps the owner's mailbox (its host skein's messagebox app); host A runs the agent. The same owner.
   const b = await testHost(t);
-  b.mailbox("david", b.ownerId);
+  const url = await b.inbox(b.ownerKey, "david");
   const wire: string[] = [];
   const a = await testHost(t, {
     ownerKey: b.ownerKey,
@@ -30,7 +31,6 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
   const toAlpha = new RawBox(a.owner, a.origin("alpha"));
 
   // The owner, as admin, tells alpha where the owner's mailbox is.
-  const url = b.origin("david");
   await toAlpha.send(alpha, "peers", { op: "add", key: Uint8Array.from(Buffer.from(a.ownerId, "hex")), url });
   await a.router.settled();
   const k = (await a.router.hydrate("alpha")).kernel;
@@ -57,7 +57,7 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
   assert.equal(r.exitCode, 0);
   assert.equal(r.replyTo.toString(), sent.id.toString());
   assert.equal(new TextDecoder().decode(r.stdout), "remote\n");
-  assert.ok(wire.some((w) => w.startsWith(`POST ${url}/.well-known/auth`)), `a handshake over the wire (${wire})`);
+  assert.ok(wire.some((w) => w.startsWith(`POST ${sessionBase(url)}/.well-known/auth`)), `a handshake over the wire, with the skein the URL is for (${wire})`);
   assert.ok(a.lines.some((l) => l.startsWith("[alpha] deliver results for ") && l.endsWith(`→ ${url}/sendMessage (remote): 200 delivered`)), "the delivery's log line: remote");
   assert.ok(wire.some((w) => w === `POST ${url}/sendMessage`), `the delivery over the wire (${wire})`);
 

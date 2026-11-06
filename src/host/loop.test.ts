@@ -1,6 +1,6 @@
 // The loop over #40's delivery, end to end with the real Zig kernel: a chat
-// to alpha; alpha's `infer` goes over http to the inference peer's mailbox
-// instance (its record from its own resolve, first contact, kept under
+// to alpha; alpha's `infer` goes over http to the inference peer's hosted
+// mailbox (the host skein's messagebox app; its record from its own resolve, first contact, kept under
 // `resolve/peers` — #87: never the address book, which is the owner's); the
 // peer answers into alpha's `completions` at the messagebox its own address
 // book names for alpha; the model calls `message` to @beta@localhost — alpha
@@ -41,11 +41,11 @@ function watchBoxes(h: Awaited<ReturnType<typeof testHost>>): string[] {
 const answer = (message: Json) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200 });
 const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 
-test("the loop: infer over http to a mailbox instance; `message` to another agent resolved and delivered in process; replies both ways; the answer in the owner's mailbox", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("the loop: infer over http to the inference peer's hosted mailbox; `message` to another agent resolved and delivered in process; replies both ways; the answer in the owner's mailbox", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId });
-  h.mailbox("david", h.ownerId);
-  h.mailbox("infer", inferId);
+  const mailbox = await h.ownerInbox();
+  const inferBox = await h.inbox(inferKey, "infer");
   const alpha = h.instance("alpha");
   const beta = h.instance("beta");
   await h.router.start();
@@ -67,15 +67,15 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   const peer = new InferPeer({
     wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, fetch: f, log: (l) => h.lines.push(`[infer] ${l}`),
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, inferBox),
       outbox: (url) => new RawBox(w, url),
       // Its address book (#40), configured by its admin: every agent's key at its origin.
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
     },
   });
 
   const sent = await new RawBox(h.owner, `${h.base}/@alpha`).send(alpha, "chat", { text: "ask beta" });
-  const mine = new RawBox(h.owner, `${h.base}/@david`);
+  const mine = new RawBox(h.owner, mailbox);
   const final = await until("alpha's answer", async () => {
     await peer.poll();
     return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text?.startsWith("beta says"));
@@ -109,8 +109,8 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
 test("the loop: a stranger (in no address book) chats an agent on its open box: admitted, inferred, and the answer fails once with \"no route\" (no retry; #87: in the delivery thread)", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "100" } } });
-  h.mailbox("david", h.ownerId);
-  h.mailbox("infer", inferId);
+  const mailbox = await h.ownerInbox();
+  const inferBox = await h.inbox(inferKey, "infer");
   const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]);
@@ -122,10 +122,10 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   const peer = new InferPeer({
     wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, fetch: f, log: (l) => h.lines.push(`[infer] ${l}`),
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, inferBox),
       outbox: (url) => new RawBox(w, url),
       // Its address book (#40), configured by its admin: every agent's key at its origin.
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
     },
   });
 
@@ -139,20 +139,20 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   // #87: the emit goes to the delivery thread (a key the address book does not name may be one the
   // resolve program recorded); it finds no record and errors once, and the loop is told so, once.
   const lines = noRoute();
-  const delivery = lines.filter((l) => / messagebox step \d+ → errored/.test(l)), loop = lines.filter((l) => l.includes("could not deliver the answer"));
+  const delivery = lines.filter((l) => / mail step \d+ → errored/.test(l)), loop = lines.filter((l) => l.includes("could not deliver the answer"));
   assert.equal(delivery.length, 1, `the delivery errored once (no retry):\n${lines.join("\n")}`);
   assert.equal(loop.length, 1, `logged once by the loop:\n${lines.join("\n")}`);
   assert.equal(lines.length, 2, `nothing else:\n${lines.join("\n")}`);
   assert.match(loop[0]!, new RegExp(`could not deliver the answer: .*no route to ${stranger}: not in the address book, and not resolved`));
   assert.equal(boxes.filter((b) => b === "chat").length, 1, "the only chat delivered is the stranger's own: no answer went out");
-  assert.equal((await new RawBox(h.owner, `${h.base}/@david`).list("chat")).length, 0, "nothing reached the owner");
+  assert.equal((await new RawBox(h.owner, mailbox).list("chat")).length, 0, "nothing reached the owner");
 });
 
 test("the loop (#157): a `message` whose recipient's server is down (an unsigned 503) is not answered — the delivery rests, and goes again at the instance's next start (delivered); no deadline, no attempts", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId });
-  h.mailbox("david", h.ownerId);
-  h.mailbox("infer", inferId);
+  const mailbox = await h.ownerInbox();
+  const inferBox = await h.inbox(inferKey, "infer");
   const alpha = h.instance("alpha");
   h.instance("beta");
   await h.router.start();
@@ -189,15 +189,15 @@ test("the loop (#157): a `message` whose recipient's server is down (an unsigned
   const peer = new InferPeer({
     wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, fetch: f, log: (l) => h.lines.push(`[infer] ${l}`),
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, inferBox),
       outbox: (url) => new RawBox(w, url),
       // Its address book (#40), configured by its admin: every agent's key at its origin.
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
     },
   });
 
   await new RawBox(h.owner, `${h.base}/@alpha`).send(alpha, "chat", { text: "ask beta" });
-  const mine = new RawBox(h.owner, `${h.base}/@david`);
+  const mine = new RawBox(h.owner, mailbox);
   await until("the first delivery", async () => { await peer.poll(); return statuses.length >= 1 || undefined; }, 60_000);
   await h.router.settled();
   assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver → ") && l.includes("HTTP 503, unsigned: nothing to admit")), "the unanswered delivery's log line says why");

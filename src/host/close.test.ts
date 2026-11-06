@@ -68,10 +68,10 @@ test("router.close(): the kernels it hydrated, its servers and timers — once, 
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   t.after(() => db.close());
-  db.add("m", { store: join(home, "m.db"), kind: "mailbox", owner: PrivateKey.fromRandom().toPublicKey().toString() });
+  db.add("m", { store: join(home, "m.db") });
   const before = live();
   const key = PrivateKey.fromRandom();
-  const r = new Router({ db, walletFor: () => ephemeralWallet(key), home, idleMs: 60_000, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } } });
+  const r = new Router({ db, walletFor: () => ephemeralWallet(key), owner: PrivateKey.fromRandom().toPublicKey().toString(), home, idleMs: 60_000, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } } });
   await r.listen(0);
   const k = (await r.hydrate("m")).kernel;
   assert.ok(live().length > before.length);

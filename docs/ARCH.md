@@ -144,7 +144,8 @@ owner. `APPS.md` is the specification.
 | app | where | what |
 |---|---|---|
 | front door | `programs/frontdoor` | BRC-103/104 on every request, sessions under `frontdoor/sessions`, the HTTP and libp2p rows, signed answers |
-| messagebox | `programs/messagebox` | BRC-33 send/list/ack; delivery threads to other instances' messageboxes |
+| mail | `programs/mail` | the skein's own mail: `/sendMessage` for this instance only; delivery threads to other identities' messageboxes |
+| messagebox | shruggr/skein-messagebox | the hosted BRC-33 messagebox, in the host skein: one mailbox per key onboard records, under `/messagebox/`; send and ack in the request's step, list a read |
 | resolve | `programs/resolve` | BRC-169 handle lookup; keeps what it finds under `resolve/peers` and answers with the record's CID (never the address book) |
 | wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`). Not installable: a genesis-wired program the kernel pins, with no `etc/app.json`; `wallet` is a reserved app name |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
@@ -199,12 +200,13 @@ sender on the `peers` row. No program writes it: every program emits as the
 instance, and no row admits the instance's own key to an admin box. The
 resolve program keeps what a BRC-169 lookup finds under its own name
 (`resolve/peers`); a message to a key the address book does not name goes to
-the messagebox's delivery thread, which reads that record. Nothing registers
+the mail program's delivery thread, which reads that record. Nothing registers
 itself. A key in neither is "no route": the delivery fails.
 
-**Mailbox instances.** An identity outside the host (a person's wallet, the
-inference peer, a browser tab) has its mail kept by an instance of its own
-with only the front door and the messagebox.
+**Hosted mailboxes.** An identity outside the host (a person's wallet, the
+inference peer, a browser tab) has its mail kept by the host skein's
+messagebox app, once its key is registered as a handle there; the handle's
+messagebox URL is `<the host skein's URL>/messagebox`.
 
 ## The host
 
@@ -419,8 +421,6 @@ message is answered with a signed message:
   owner's admin rows is the row enabled, which publishes the hostname: no
   request can reach the claim row first. `url` is the instance's origin
   (`SKEIN_INSTANCE_ORIGIN`, default `http://<handle>.localhost:<port>`).
-  Image `mailbox` (#113): a mailbox instance for `owner` (its owner in its
-  genesis, no claim), published at once — what a registration asks for.
 - `start {handle}` → `{handle, started: true, url}`; `stop {handle}` →
   `{handle, stopped: true}`: published and started, or unpublished and
   stopped. Not the host skein itself.
@@ -448,13 +448,13 @@ management page"), served by the host skein itself.
 The same app is the host's **BRC-169 server and registrar** (#113,
 skein-onboard 0.2.0): a registration (`POST /account/register` at the
 host's origin, signed over `register <name>@<domain>`) is a thread that
-asks the manager for a mailbox instance (`create`, image `mailbox`) and the
-certifier for the certificate (`issue`), records the certificate under
+asks the certifier for the certificate (`issue`) — no instance, the handle's
+messagebox the configured one (skein-onboard 0.5.0), records the certificate under
 `onboard/handles/<handle>` (each issue a new serial: the hash of its
 issuance record; `prev` the trail) and answers the holder's copy;
 resolve, search, the manifest and the paymail PKI read those records. The
 handle domain is its `config.onboard.domain`, the one setting. The message
-sequence and the records: docs/MESSAGES.md "Mailbox instances" and
+sequence and the records: docs/MESSAGES.md "Registering a handle" and
 "BRC-169 is discovery".
 
 ## The browser host
@@ -470,7 +470,7 @@ page's own messages (a chat, an install) on the page wallet's BRC-104
 session with its instance — `http` requests its front door verifies, as any
 client's (#126 step 4) — and the providers' signed answers (`local`
 requests), the waker's timers among them. The page reads the page
-identity's mailbox instance with its wallet and shows what is there; it
+identity's mailbox with its wallet and shows what is there; it
 admits none of it into the instance (the mailbox is the user's: to have the
 instance act on one, the user sends it a message of their own). Nothing runs while the
 tab is closed. Logs cross between browser and native in both directions.

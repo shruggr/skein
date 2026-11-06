@@ -21,12 +21,9 @@ An instance with no tree (a plain `skein-host add`, and so the live agents)
 gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
-hydration of an empty store calls `boot` with this source. A **mailbox
-instance** (#40; #113: the instance manager's `create` with image `mailbox`, which a registration asks for and `skein-host add <h> --mailbox --owner <key>` calls) is code genesis
-too, with only the kernel's `frontdoor` and `messagebox` programs,
-`MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
-box (`*`) → messagebox), the default http rows and reads, and no peers or
-names. **Every genesis that names an owner carries the owner's four admin
+hydration of an empty store calls `boot` with this source. (There are no
+mailbox instances since 0.3.0: a wallet's mail is kept by the host skein's
+messagebox app, docs/MESSAGES.md "The messagebox".) **Every genesis that names an owner carries the owner's four admin
 rows** first (the kernel's `objects`, `head`, `dispatch`, `peers`
 operations): a bare genesis is the four tables and those rows; a bundle adds
 what its apps ask for. An **image** names no owner: it carries the claim row
@@ -41,9 +38,9 @@ outpoint later. A new skein starts from it and is then claimed.
 
 ```
 images/default/
-  bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
+  bin/frontdoor.cid, bin/mail.cid         the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
   bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
-  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows (no route to the wallet);
+  etc/dispatch.json                       the claim row; the handshake and the skein's own /sendMessage (no route to the wallet);
                                           the explorer row (root's)
   etc/config.json                         {collect: []}
   chain/headers/<first>, chain/tip        the chain part (#132): not in the repo — the host adds it (below)
@@ -329,9 +326,8 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   (exact first, then the longest prefix), its filters and the program and
   function the front door calls with the request. The default http routes
   are the handshake (`/.well-known/auth` → the front door's `handshake`),
-  the BRC-33 messagebox — `sendMessage`, `listMessages`,
-  `acknowledgeMessage` at the root and under `/messagebox` (program
-  `messagebox`, behind `kernel.brc104`) — and the explorer, prefix
+  the skein's own mail — `/sendMessage` (program `mail`, behind
+  `kernel.brc104`) — and the explorer, prefix
   `/explore` (program `frontdoor`, fn `explore`, behind `kernel.brc104`,
   gated by root: `etc/config.json`'s `roles` add to the stock
   `{root: ["frontdoor.explore"]}`).
@@ -346,8 +342,7 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   static app (shruggr/skein-static) is archived.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
-  (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
-  fills it. It is the only peer a genesis names: the address book
+  (`SKEIN_OWNER_MESSAGEBOX`) fills it. It is the only peer a genesis names: the address book
   (head `peers`, one of the kernel's tables) is written by the kernel's
   `peers` operation on the owner's messages (`skein peers`, or the owner's wallet) only — no
   program writes it. The resolve program keeps what it finds under its own

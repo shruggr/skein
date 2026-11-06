@@ -86,7 +86,7 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   void t;
   const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
   const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox", "wallet"], "#116, #130: the wallet is core, in the image");
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail", "wallet"], "#116, #130: the wallet is core, in the image");
   assert.equal(s.apps, undefined, "#152: no etc/apps.json — the image carries no apps");
   assert.equal(encode(s.programs.find((p) => p.name === "wallet")!.record).cid.toString(), encode(WALLET).cid.toString(), "the image's wallet record is WALLET (bin/wallet.json)");
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
@@ -101,9 +101,9 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   assert.deepEqual([explorer.prefix, explorer.filters, explorer.fn], [true, ["kernel.brc104"], "explore"], "the explorer route: behind kernel.brc104, gated by root");
   const http = (g.dispatch as Array<{ transport: string; address: string }>).filter((r) => r.transport === "http").map((r) => r.address);
   assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image's own routes (${http.join(", ")})`);
-  assert.ok(http.every((a) => /^\/(messagebox\/)?(sendMessage|listMessages|acknowledgeMessage)$/.test(a) || ["/explore", "/.well-known/auth"].includes(a)), "the image's http routes: the handshake, the messagebox's and the explorer");
-  // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
-  for (const n of ["frontdoor", "messagebox", "wallet"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
+  assert.deepEqual(http.sort(), ["/.well-known/auth", "/explore", "/sendMessage"], "the image's http routes: the handshake, the skein's own /sendMessage and the explorer — no /listMessages, /acknowledgeMessage, nothing under /messagebox/ (the messagebox app's)");
+  // The image names the kernel's pinned front door and mail program: the tree's .cid files are the wasm/ modules'.
+  for (const n of ["frontdoor", "mail", "wallet"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
 });
 
 test("system tree: refusals — no routes, the forms before #77/#115, a sender, a bad .cid, a handler that is no program, $infer on a host without one, $owner", async (t) => {
@@ -229,21 +229,22 @@ test("SKEIN_NETWORK: the whole host's network, every genesis's defaults.walletNe
   assert.equal(net(test_.genesisConfig(row, key(), false)), "test", "an agent's genesis");
   assert.equal(net(test_.imageConfig(row, key())), "test", "an image's genesis (the host skein, an instance the manager makes)");
   assert.equal((genesisRecord(test_.genesisConfig(row, key()), codeSystem(test_.genesisConfig(row, key()), programs)) as Record<string, any>).defaults.walletNetwork, "test", "code genesis");
-  const mailbox = test_.genesisConfig({ ...row, kind: "mailbox", owner: key() }, key());
-  assert.equal((genesisRecord(mailbox, codeSystem(mailbox, { frontdoor: programs.echo!, messagebox: programs.echo! })) as Record<string, any>).defaults.walletNetwork, "test", "a mailbox instance's genesis");
   assert.equal(net(test_.imageConfig(row, key()), pinned, own.root), "regtest", "a tree's defaults.walletNetwork wins over the host's network");
   const warned: string[] = [];
   assert.equal(net({ ...test_.imageConfig(row, key()), overrides: { walletNetwork: "main" }, warn: (l) => warned.push(l) }, pinned, own.root), "main", "an explicit override wins over the tree");
   assert.match(warned[0]!, /replaces the system tree's walletNetwork = regtest/);
 });
 
-test("#142, #152: the host image (images/host over images/default) names skein-onboard v0.4.0 by tarball, and nothing else", async () => {
+test("#142, #152: the host image (images/host over images/default) names skein-onboard and skein-messagebox by tarball, and nothing else", async () => {
   const base = await imageSource(join(import.meta.dirname, "../../images/default"));
   const own = await imageSource(join(import.meta.dirname, "../../images/host"));
   const merged = new MemBlocks();
   const src = anyOf(merged, base.objects, own.objects);
   const s = await readSystemTree(src, await mergeImages(src, base.root, own.root, merged));
-  assert.deepEqual(s.apps?.install, [{ url: "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz", hash: "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae" }]);
+  assert.deepEqual(s.apps?.install, [
+    { url: "https://github.com/shruggr/skein-onboard/archive/83feca56c255344cdac17d756a9e257e3acb3f68.tar.gz", hash: "7f0c8010df4b57f319689f44d6b8b7f0cc23627c" },
+    { url: "https://github.com/shruggr/skein-messagebox/archive/8acc6e82c376fe7eb923d3fa18762d7c14d33469.tar.gz", hash: "a309121acb9a050a0d7c61ab7d65df24f2d1ab26" },
+  ]);
   assert.equal(s.apps?.routes, undefined, "no root route");
 });
 
@@ -271,7 +272,7 @@ test("#152: an image directory with no bin/ (an app repository's image/, etc/app
   if (src.kind !== "tree") return;
   assert.deepEqual(Object.keys(src.apps ?? {}), [".."], "the app beside the image is read with it");
   const s = await readSystemTree(src.objects, src.root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox", "wallet"], "the default image's programs");
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail", "wallet"], "the default image's programs");
   const def = await imageSource(DEFAULT);
   assert.deepEqual(s.dispatch, (await readSystemTree(def.objects, def.root)).dispatch, "the default image's routes, the claim route among them");
   assert.ok(s.dispatch.some((r) => r.program === "kernel" && r.address === "claim"), "the claim route");
@@ -317,7 +318,7 @@ const imageDir_ = async (dir: string) => { const x = await imageSource(dir); ret
 
 const showRow = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
 
-test("#152: skein-host add <handle> --image takes default, host or a directory — host boots unclaimed with the onboarding app; another name is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("#152: skein-host add <handle> --image takes default, host or a directory — host boots unclaimed with the onboarding app and the messagebox app; another name is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-img-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
@@ -335,7 +336,8 @@ test("#152: skein-host add <handle> --image takes default, host or a directory �
   assert.deepEqual(plain.filter((r) => r.app), [], "#152: the default image installs no app");
   const k = (await router.hydrate("hosted")).kernel;
   const rows = (await k.dispatch()).rows as Array<Record<string, any>>;
-  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["onboard"], "the onboarding app, installed at birth");
+  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["onboard", "messagebox"], "the onboarding app and the messagebox app, installed at birth");
   assert.ok(rows.some((r) => r.program === "kernel" && r.address === "claim"), "unclaimed: the claim route");
-  assert.equal((await k.store.get(await k.call("head", "onboard/app") as CID) as unknown as { version: string }).version, "0.4.0");
+  assert.equal((await k.store.get(await k.call("head", "onboard/app") as CID) as unknown as { version: string }).version, "0.5.0");
+  assert.equal((await k.store.get(await k.call("head", "messagebox/app") as CID) as unknown as { version: string }).version, "0.1.0");
 });

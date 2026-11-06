@@ -1245,11 +1245,11 @@ pub const Runtime = struct {
 
     /// The outbound middleware of the `mailbox` transport (#70): the program
     /// the kernel launches as a message's delivery thread — the genesis's
-    /// `middleware.mailbox`, else its messagebox program.
+    /// `middleware.mailbox`, else its mail program.
     pub fn deliveryOf(g: Value) ?[]const u8 {
         if (g.get("middleware")) |m| if (m == .map) if (Value.cidOf(m.get("mailbox"))) |c| return c;
         const progs = g.get("programs") orelse return null;
-        return Value.cidOf(progs.get("messagebox"));
+        return Value.cidOf(progs.get("mail"));
     }
 
     /// A message's delivery thread (#70), from the message alone: the mailbox

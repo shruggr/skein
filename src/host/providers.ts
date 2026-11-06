@@ -93,17 +93,13 @@
 //              start {handle}   → {handle, started: true, url}: published and started
 //              stop {handle}    → {handle, stopped: true}: unpublished and stopped (off its
 //                     libp2p node too: its beacons stop, skein-amm#4)
-//              create {handle, owner, image: "mailbox", domain?} (#113): a mailbox
-//                     instance for `owner` (the front door and the messagebox,
-//                     keeping its mail), published at once; the same owner and
-//                     handle again: the same answer (it exists). `domain` (both
-//                     images): the handle's domain, recorded with the row
+//              create {…, domain?} (#113): the handle's domain, recorded with the row
 //              (`list` later.) It signs no claim (#127): it forwards the owner's,
 //              as signed — but on a one-key host (#160, #162) a create with no
 //              claim is claimed by the host's own key, its owner
 //              create {…, config?} (#162): `config` the new instance's apps' config
 //                     at birth ({<app>: {…}}, merged as an install's --config);
-//                     `image` the default image, `mailbox`, or an image by name
+//                     `image` the default image, or an image by name
 //                     ($SKEIN_HOME/images/<name>, SKEIN_IMAGES_DIR)
 //              create {…, beef?} (skein-amm#4): an Atomic BEEF handed into the new
 //                     instance's receive row /skein/overlay/beef/1.0.0 once it is up

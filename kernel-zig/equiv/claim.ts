@@ -75,7 +75,7 @@ const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) }, { rocks: ROCKS_MODE });
 const stores: string[] = [];
 try {
-  h.mailbox("david", h.ownerId);
+  const mailbox = await h.ownerInbox();
   const booted = await h.image("inst");
   const inst = h.db.get("inst")!.identity!;
   await h.router.start();
@@ -124,7 +124,7 @@ try {
   // ------------------------------------------------ the claim: the owner's own message (#127)
   const stranger = PrivateKey.fromRandom(), strangerId = stranger.toPublicKey().toString();
   const lines0 = h.lines.length;
-  const plan = planClaim(inst, { messagebox: h.origin("david") });
+  const plan = planClaim(inst, { messagebox: mailbox });
   (plan.messages[0]!.body as Record<string, unknown>).owner = strangerId; // a key in the body is not read: root goes to the sender
   await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", plan);
   check(h.lines.slice(lines0).some((l) => /kernel claim: root [0-9a-f]+; the claim route removed; the claimant's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
@@ -133,10 +133,10 @@ try {
   check((await kernelRows()).join(",") === "objects,head,dispatch,peers,grant", `the claim route gone: ${(await kernelRows()).join(", ")}`);
   const claimRoot = await (await k()).call("head", "claim") as CID | null;
   const claimed = claimRoot ? await (await k()).store.get(claimRoot) as { claimant?: unknown; messagebox?: string } : undefined;
-  check(hex(claimed?.claimant) === h.ownerId && claimed?.messagebox === h.origin("david"), `the head \`claim\` names what was claimed: the sender (not the body's key) and its messagebox (${claimed?.messagebox})`);
+  check(hex(claimed?.claimant) === h.ownerId && claimed?.messagebox === mailbox, `the head \`claim\` names what was claimed: the sender (not the body's key) and its messagebox (${claimed?.messagebox})`);
   const peers = await (await k()).call("head", "peers") as CID | null;
   const book = peers ? await Promise.all((((await (await k()).store.get(peers)) as { peers?: Array<{ peer: CID }> }).peers ?? []).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array; address: string; source: string })) : [];
-  check(book.some((p) => hex(p.key) === h.ownerId && p.address === h.origin("david") && p.source === "claim"), "the owner's messagebox is in the address book (source claim)");
+  check(book.some((p) => hex(p.key) === h.ownerId && p.address === mailbox && p.source === "claim"), "the owner's messagebox is in the address book (source claim)");
   // The explorer: root's (the genesis's roles) — the claimant's now.
   const ex = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore/head/claim`, { method: "GET" });
   check(ex.status === 200 && (await ex.text()).includes(claimRoot!.toString()), `after the claim the owner reads the explorer: GET /explore/head/claim → ${ex.status}`);

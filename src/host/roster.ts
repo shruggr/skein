@@ -128,11 +128,10 @@ export interface HostRow {
   wake?: number;
 }
 
-/** The router's side of the page (#40): where it is, each instance's origin, the mailbox instances. */
+/** The router's side of the page (#40): where it is, each instance's origin. */
 export interface HostInfo {
   router?: string;
   originOf?(handle: string): string;
-  mailboxes?: Array<{ handle: string; domain: string; owner?: string | null }>;
 }
 
 const esc = (x: unknown) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -152,8 +151,7 @@ th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,m
 ${info.router ? `<p class="mut">router <code>${esc(info.router)}</code>${info.originOf ? ` · an instance at <code>${esc(info.originOf("<handle>"))}</code> (its front door)` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
 <table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>origin</th></tr>
 ${body}</table>
-${info.mailboxes ? `<h2 style="font-size:16px">mailbox instances</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>whose</th><th>origin</th></tr>
-${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.owner ?? "")}">${esc((m.owner ?? "").slice(0, 16))}…</td><td class="k">${esc(info.originOf?.(m.handle) ?? "")}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (skein-host add --mailbox, or POST /account/register)</p>`}` : ""}</body></html>`;
+</body></html>`;
 }
 
 /**

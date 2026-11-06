@@ -1,7 +1,7 @@
-// The messagebox program (#40): Zig 0.16.0, wasm32-wasi, over the SDK
+// The mail program (#40: the skein's own mail): Zig 0.16.0, wasm32-wasi, over the SDK
 // (skein-sdk: its dag-cbor, CIDs and the `skein` imports).
 //
-//   zig build        → zig-out/bin/messagebox.wasm (scripts/build-programs.sh copies it to wasm/)
+//   zig build        → zig-out/bin/mail.wasm (scripts/build-programs.sh copies it to wasm/)
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const dagjson = sdk.module("dagjson");
     const message = sdk.module("message");
     const exe = b.addExecutable(.{
-        .name = "messagebox",
+        .name = "mail",
         .root_module = b.createModule(.{
             .root_source_file = b.path("main.zig"),
             .target = t,

@@ -4,11 +4,11 @@
 // add`), by the instance manager (`create`, #90), or by registration; `skein-host
 // run` (the router, router.ts) serves every enabled row.
 //
-// #40: a row is an agent (its own identity) or a **mailbox instance** — an
-// instance whose system is only the front door and the messagebox, keeping
-// mail for an identity outside the host (`owner`: a user's wallet, the
-// inference peer). There is no messagebox host: every identity's mailbox is
-// an instance at its own origin. Beside the rows, the **fuel ledger**: what
+// A row is an instance with its own identity (#40). Mail for identities
+// outside the host is kept by a messagebox app (shruggr/skein-messagebox, in
+// the host skein: one mailbox per registered key), not by an instance per
+// identity: since 0.3.0 there are no mailbox instances (files made before keep
+// their `kind` and `owner` columns, unread). Beside the rows, the **fuel ledger**: what
 // each caller's calls (#40: the front door's reads, which the log never sees)
 // cost, per instance and op. And the broadcaster's three (#58, #65, arc.ts):
 // the last event id taken from Arcade's stream, the statuses already routed,
@@ -36,8 +36,6 @@ CREATE TABLE IF NOT EXISTS instances (
   knows             TEXT,                             -- JSON array of the handles this agent knows (its ROSTER.md); ["*"]: everyone; NULL: nobody
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
   created_at        TEXT NOT NULL,
-  kind              TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'mailbox')),
-  owner             TEXT,                              -- a mailbox instance's: the identity (hex) whose mailbox it is
   topics            TEXT                               -- JSON array: the overlay names (topics, lookup services) the host routes to it at the bare host (#137); NULL: none
 );
 -- The fuel of calls (#40): per instance, caller (hex, or '' for none) and op (the route).
@@ -154,7 +152,7 @@ CREATE TABLE IF NOT EXISTS live_beats (
  * A handle: one hostname label (lower-case letters, digits and "-", at most
  * 63, no "-" at either end), so `<handle>.<domain>` is the instance's origin.
  * The one grammar for every row (H22): `add`, the instance manager's
- * `create`, a mailbox instance.
+ * `create`.
  */
 export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -174,8 +172,6 @@ export const pathOnly = (handle: string): boolean => TOKEN_HANDLE.test(handle);
 
 export type Status = "enabled" | "disabled";
 
-export type Kind = "agent" | "mailbox";
-
 /** One row of the fuel ledger. */
 export interface Ledger { instance: string; caller: string; op: string; calls: number; fuel: number; updated_at: string }
 
@@ -190,9 +186,6 @@ export interface InstanceRow {
   knows: string | null;
   status: Status;
   created_at: string;
-  kind?: Kind;
-  /** A mailbox instance's: whose mailbox it is (hex). */
-  owner?: string | null;
   /**
    * JSON array of the overlay names (gossip topics and lookup services alike) a bare-host POST /submit
    * or /lookup naming them is routed to this instance by (#137: what the instance manager's create or
@@ -204,7 +197,7 @@ export interface InstanceRow {
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "store", "tree", "source", "knows", "status", "kind", "owner", "topics"] as const;
+const FIELDS = ["domain", "identity", "store", "tree", "source", "knows", "status", "topics"] as const;
 
 /** The overlay names a row is routed by (#137): its `topics` column, a list (none: empty). */
 export function topicsOf(row: Pick<InstanceRow, "topics">): string[] {
@@ -239,8 +232,6 @@ export class HostDb {
     const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));
     if (!cols.has("source")) this.db.exec("ALTER TABLE instances ADD COLUMN source TEXT");
     if (!cols.has("knows")) this.db.exec("ALTER TABLE instances ADD COLUMN knows TEXT");
-    if (!cols.has("kind")) this.db.exec("ALTER TABLE instances ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
-    if (!cols.has("owner")) this.db.exec("ALTER TABLE instances ADD COLUMN owner TEXT");
     if (!cols.has("topics")) this.db.exec("ALTER TABLE instances ADD COLUMN topics TEXT");
   }
 
@@ -267,14 +258,10 @@ export class HostDb {
     return r ? { ...r } as unknown as InstanceRow : undefined; // node:sqlite rows have a null prototype
   }
 
-  /**
-   * The identity handle@domain names (BRC-169's answer): an agent's own, or
-   * the owner of a mailbox instance (whose mailbox the instance is).
-   */
+  /** The identity handle@domain names (BRC-169's answer): the instance's own. */
   identityOf(handle: string, domain: string): string | undefined {
-    const r = this.db.prepare("SELECT identity, kind, owner FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null; kind?: string; owner?: string | null } | undefined;
-    if (!r) return undefined;
-    return (r.kind === "mailbox" ? r.owner : r.identity) ?? undefined;
+    const r = this.db.prepare("SELECT identity FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null } | undefined;
+    return r?.identity ?? undefined;
   }
 
   list(status?: Status): InstanceRow[] {
@@ -328,7 +315,6 @@ export class HostDb {
     return Number(this.db.prepare("DELETE FROM live_beats WHERE at < ?").run(before).changes);
   }
 
-  /** The enabled mailbox instance for identity `owner` (hex). */
   /** A beat kept from `peer` on `handle`'s overlay `topic` (sync): upserted with its addresses (kept when none are known now). */
   seenPeer(handle: string, topic: string, peer: string, addrs: string[], now: number): void {
     this.db.prepare("INSERT INTO topic_peers (handle, topic, peer_id, addrs, last_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (handle, topic, peer_id) DO UPDATE SET addrs = CASE WHEN excluded.addrs = '[]' THEN addrs ELSE excluded.addrs END, last_seen = excluded.last_seen")
@@ -344,11 +330,6 @@ export class HostDb {
   /** Forget the peers not heard from since `before` (ms). → how many rows went. */
   prunePeers(before: number): number {
     return Number(this.db.prepare("DELETE FROM topic_peers WHERE last_seen < ?").run(before).changes);
-  }
-
-  mailboxOf(owner: string): InstanceRow | undefined {
-    const r = this.db.prepare("SELECT * FROM instances WHERE kind = 'mailbox' AND owner = ? AND status = 'enabled'").get(owner);
-    return r ? { ...r } as unknown as InstanceRow : undefined;
   }
 
   /** Add calls and fuel to the ledger (#40): `rows` aggregated by (instance, caller, op). */

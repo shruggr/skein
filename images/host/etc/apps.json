@@ -1,8 +1,12 @@
 {
   "install": [
     {
-      "url": "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz",
-      "hash": "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae"
+      "url": "https://github.com/shruggr/skein-onboard/archive/83feca56c255344cdac17d756a9e257e3acb3f68.tar.gz",
+      "hash": "7f0c8010df4b57f319689f44d6b8b7f0cc23627c"
+    },
+    {
+      "url": "https://github.com/shruggr/skein-messagebox/archive/8acc6e82c376fe7eb923d3fa18762d7c14d33469.tar.gz",
+      "hash": "a309121acb9a050a0d7c61ab7d65df24f2d1ab26"
     }
   ]
 }

@@ -129,7 +129,7 @@ test("handles: the host skein serves BRC-169 (#113) — the manifest (the certif
     assert.equal(r.status, 200);
     const a = await r.json() as Record<string, unknown> & { certificate: Certificate };
     assert.equal(a.certificate.subject, a.identityKey);
-    assert.deepEqual({ ...a, certificate: undefined }, { metanetHandles: "1.0", handle: "dave", domain: "localhost", identityKey: dave, certificate: undefined, messagebox: h.origin("dave"), ttl: 300, revoked: false });
+    assert.deepEqual({ ...a, certificate: undefined }, { metanetHandles: "1.0", handle: "dave", domain: "localhost", identityKey: dave, certificate: undefined, messagebox: `${h.origin("host")}/messagebox`, ttl: 300, revoked: false });
     const c = a.certificate;
     assert.equal(c.type, HANDLE_CERTIFICATE_TYPE);
     assert.equal(c.certifier, manifest.metanet.trust.publicKey);

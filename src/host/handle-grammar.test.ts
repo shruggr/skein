@@ -13,7 +13,7 @@ import { ephemeralWallet } from "../wallet.ts";
 import { HostDb } from "./instances.ts";
 import { hostDomain, Router } from "./router.ts";
 
-test("handles: one grammar for add, mailbox and create; the reserved names and the router's own label", async (t) => {
+test("handles: one grammar for add and create; the reserved names and the router's own label", async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-handles-"));
   const db = new HostDb(join(home, "host.db"));
   const router = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://id.example.test", idleMs: 0, ledgerMs: 60_000 });
@@ -22,7 +22,6 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
 
   for (const bad of ["a.b", "a_b", "Alice", "-a", "a-", "x".repeat(64)]) {
     assert.throws(() => db.add(bad, { store: join(home, `${bad}.db`) }), /hostname label/, `add ${bad}`);
-    await assert.rejects(router.createInstance(bad, key, { image: "mailbox" }), /hostname label/, `mailbox ${bad}`);
     await assert.rejects(router.createInstance(bad, key), /hostname label/, `create ${bad}`);
   }
   db.add("alice", { store: join(home, "alice.db") });
@@ -30,7 +29,6 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   assert.equal(router.ownLabel(), "id");
   for (const r of ["id", "host"]) {
     assert.ok(router.reserved(r));
-    await assert.rejects(router.createInstance(r, key, { image: "mailbox" }), /reserved/, `mailbox ${r}`);
     await assert.rejects(router.createInstance(r, key), /reserved/, `create ${r}`);
   }
   assert.ok(!router.reserved("alice"));

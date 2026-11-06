@@ -4,8 +4,8 @@
 // the real install path (the owner's messages src/client/admin.ts builds, sent
 // on the owner's BRC-104 session as the client sends them, #142), from a
 // checkout at the commit pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR /
-// $SKEIN_ONBOARD_DIR / $SKEIN_GIT_DIR name a checkout instead,
-// $SKEIN_SHELL_REV / $SKEIN_CHAT_REV / $SKEIN_ONBOARD_REV / $SKEIN_GIT_REV
+// $SKEIN_ONBOARD_DIR / $SKEIN_MESSAGEBOX_DIR / $SKEIN_GIT_DIR name a checkout instead,
+// $SKEIN_SHELL_REV / $SKEIN_CHAT_REV / $SKEIN_ONBOARD_REV / $SKEIN_MESSAGEBOX_REV / $SKEIN_GIT_REV
 // another commit. A pinned commit is fetched once into
 // <tmpdir>/skein-apps/<name>-<rev> and reused. Not part of anything that runs.
 
@@ -39,10 +39,16 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "e01eb737b234f4abdfb2704bb3cc0d6747b8a01f", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0). */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration (0.5.0: no instance, the handle's messagebox the configured one), BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "189b7c2df3041c4914dcf189ade4c8ca241a9b5f", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "83feca56c255344cdac17d756a9e257e3acb3f68", dir: process.env.SKEIN_ONBOARD_DIR,
+};
+
+/** shruggr/skein-messagebox: the hosted BRC-33 messagebox, installed in the host skein beside onboard: one mailbox per key onboard records (config.messagebox.index), under /messagebox/ (0.1.0). */
+export const MESSAGEBOX_APP: PinnedApp = {
+  name: "messagebox", repo: "https://github.com/shruggr/skein-messagebox",
+  rev: process.env.SKEIN_MESSAGEBOX_REV ?? "8acc6e82c376fe7eb923d3fa18762d7c14d33469", dir: process.env.SKEIN_MESSAGEBOX_DIR,
 };
 
 /** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1); 0.1.2: the manifest checked by every rule of src/host/manifest.ts (an overlay may list no topics, #120; boxes relative to the app, #128); 0.1.3: reads[] in the record, /lookup a read (#135); 0.2.0: routes, filters and roles, the record checked by every rule of #143's checkManifest. */

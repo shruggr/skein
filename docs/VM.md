@@ -238,12 +238,10 @@ root holders; the claim grants root to its claimant; the admin operation
 
 - **The genesis carries the seed.** Every genesis gets the admin routes
   first — `{mailbox, objects | head | dispatch | peers | grant, kernel}` —
-  then its own `dispatch` (src/host/genesis.ts; the default seed: `:ack` →
-  the messagebox as an event route, the handshake route
-  `/.well-known/auth` → the front door's `handshake`, the messagebox's http
-  routes behind `kernel.brc104`, and the explorer `/explore` behind
-  `kernel.brc104`, gated by root; a mailbox instance's: those and `*` → the
-  messagebox), written as the chain's first updates when the genesis entry
+  then its own `dispatch` (src/host/genesis.ts; the default seed: the
+  handshake route `/.well-known/auth` → the front door's `handshake`, the
+  skein's own `/sendMessage` → the mail program behind `kernel.brc104`, and
+  the explorer `/explore` behind `kernel.brc104`, gated by root), written as the chain's first updates when the genesis entry
   is processed (no `thread`), and its `root` into the grants. An **image**
   (#89: the default image, BOOTSTRAP.md) names no root: its routes carry
   the claim route, `{mailbox, claim, kernel, claim}`.
@@ -777,7 +775,7 @@ shape as any event's, `{kind: "log", prev, n, time, event, box}`, no `door`
 — names the record as the door handed it back. A BEEF that does not prove,
 or no BEEF in the record (no principal: "nothing to validate"): no entry,
 and the host's `admitEvent` throws the door's answer. An event route that
-names no filter (headers, proofs, `chain`, `:ack`): no door, as before.
+names no filter (headers, proofs, `chain`): no door, as before.
 
 **The door is lossless for anything a signature covers.** What a filter
 rewrites must be reconstructible to the exact bytes, so a reader of the log
@@ -1101,7 +1099,7 @@ built by the host, n = 0 with no `prev`).
   `local` request `{kind: "message", message, body}`, its signature checked
   by the front door; the browser page's own messages come as `http`
   requests on its session with its instance (#126 step 4: it admits nothing
-  from its mailbox instance, which is the user's). A `mail` entry
+  from its mailbox, which is the user's). A `mail` entry
   in a log written before that still processes on replay. The mail
   record's CID is the message's id — what the sender computes too, and what
   a reply's `replyTo` names; the same record is admitted once (the `unique`
@@ -1112,7 +1110,7 @@ built by the host, n = 0 with no `prev`).
   the row's program.
 - **`event`** in a box: a self-validating record from the host's specific
   wiring (#29: a header from a feed; #65: a transaction's proof from the
-  broadcaster), or one a front door's step routes (`:ack`, an accepted
+  broadcaster), or one a front door's step routes (an accepted
   libp2p message, a gossiped `submit`), or a record the door validates on
   the way in (#121, #164: its box's `event` route names `kernel.beef` — the
   entry names the record as the door rewrote it; "The door", above), routed

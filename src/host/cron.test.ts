@@ -137,8 +137,8 @@ test("cron: the schedules kept in host.db and taken up at a start — an every o
 });
 
 /**
- * A system tree: cron-demo for the `schedule` and `tick` boxes; the
- * messagebox (its routes, so the owner can send, and the mailbox transport's
+ * A system tree: cron-demo for the `schedule` and `tick` boxes; the mail
+ * program (its route, so the owner can send, and the mailbox transport's
  * delivery) and resolve.
  */
 async function cronTree(t: { after(f: () => unknown): void }) {
@@ -147,11 +147,10 @@ async function cronTree(t: { after(f: () => unknown): void }) {
   await fs.mkdir(join(dir, "bin"));
   await fs.mkdir(join(dir, "etc"));
   await fs.writeFile(join(dir, "bin/cron-demo.wasm"), readFileSync(DEMO_WASM));
-  for (const p of ["messagebox", "resolve"]) await fs.writeFile(join(dir, `bin/${p}.wasm`), readFileSync(join(ROOT, `wasm/${p}.wasm`)));
+  for (const p of ["mail", "resolve"]) await fs.writeFile(join(dir, `bin/${p}.wasm`), readFileSync(join(ROOT, `wasm/${p}.wasm`)));
   // #143: routes, no senders (the owner's `peers` is the kernel's admin route, root's).
   await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([
     { address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" },
-    { transport: "event", address: ":ack", program: "messagebox" },
   ]));
   return dir;
 }
@@ -235,10 +234,10 @@ test("cron: a stopped instance with only an unsubscribed box is not woken", { sk
 });
 
 test("cron, remote: the same program, the cron provider reached by mailbox over BRC-103/104 on a second router; its ticks come back the same way", { skip, timeout: 120_000 }, async (t) => {
-  // Host B: the cron service — its mailbox instance (the service's key) and the service reading it.
+  // Host B: the cron service — its key's hosted mailbox (B's host skein) and the service reading it.
   const b = await testHost(t);
   const svcKey = PrivateKey.fromRandom(), svc = svcKey.toPublicKey().toString();
-  b.mailbox("cronsvc", svc);
+  const svcBox = await b.inbox(svcKey, "cronsvc");
   await b.router.start();
   // Host A: the agent, whose http goes out for real (to B).
   const a = await testHost(t, { http: fetchHttp });
@@ -249,7 +248,7 @@ test("cron, remote: the same program, the cron provider reached by mailbox over 
   await a.router.start();
   const w = ephemeralWallet(svcKey);
   const peer = new CronPeer({
-    inbox: new RawBox(w, b.origin("cronsvc")), outbox: (url) => new RawBox(w, url),
+    inbox: new RawBox(w, svcBox), outbox: (url) => new RawBox(w, url),
     addressOf: (key) => key === id ? a.origin("cronny") : undefined, log: (l) => b.lines.push(`[cronsvc] ${l}`),
   });
   t.after(() => peer.stop());
@@ -258,7 +257,7 @@ test("cron, remote: the same program, the cron provider reached by mailbox over 
   // The owner, as admin: the cron provider is the remote service now, by mailbox (the host's own taken out).
   const owner = new RawBox(a.owner, a.origin("cronny"));
   await owner.send(id, "peers", { op: "remove", key: Uint8Array.from(Buffer.from(a.router.providers.key("cron"), "hex")) });
-  await owner.send(id, "peers", { op: "add", key: Uint8Array.from(Buffer.from(svc, "hex")), transport: "mailbox", address: b.origin("cronsvc") });
+  await owner.send(id, "peers", { op: "add", key: Uint8Array.from(Buffer.from(svc, "hex")), transport: "mailbox", address: svcBox });
   await a.router.settled();
   // #126: no roles — the owner's schedule names the service's key.
   await owner.send(id, "schedule", { name: "beat", every: 60_000, rest: 100, cron: Uint8Array.from(Buffer.from(svc, "hex")) });
