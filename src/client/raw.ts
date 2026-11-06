@@ -4,7 +4,9 @@
 // dag-cbor (BRC-231: an application/cbor request, recipient and body as
 // bytes). One AuthFetch per box URL — the stock AuthFetch keeps one session
 // per origin, so a URL with a `/@<handle>` path prefix (a host's dev form)
-// gets its handshake sent under the prefix too.
+// gets its handshake sent under the prefix too (src/session-base.ts: the
+// skein the URL is for; the rest of its path, `/messagebox` for a hosted
+// messagebox, is a route in that skein).
 //
 //   const mb = new RawBox(wallet, "http://127.0.0.1:8100/@martha")   (or http://martha.localhost:8100)
 //   await mb.send(martha, "chat", {text: "hi"})     → {id}: the message's id (what a reply's replyTo names)
@@ -15,6 +17,7 @@ import { AuthFetch, Peer, SimplifiedFetchTransport, type WalletInterface } from 
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
+import { sessionBase } from "../session-base.ts";
 
 export interface Listed {
   /** The message's id: its record's CID (text). */
@@ -75,10 +78,10 @@ export class RawBox {
   constructor(wallet: WalletInterface, url: string, o: { fetch?: typeof fetch; originator?: string } = {}) {
     this.url = url.replace(/\/+$/, "");
     const u = new URL(this.url);
-    const prefix = u.pathname === "/" ? "" : u.pathname;
+    const prefix = new URL(sessionBase(u)).pathname.replace(/\/$/, "");
     // A bound fetch: the browser's must be called on the window.
     const base = o.fetch ?? (((input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch);
-    // AuthFetch shakes hands at <origin>/.well-known/auth: under the path prefix, if the URL has one.
+    // AuthFetch shakes hands at <origin>/.well-known/auth: under the skein's `/@<handle>` prefix, if the URL has one.
     const f = prefix
       ? ((input: string | URL | Request, init?: RequestInit) => {
           const s = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

@@ -19,6 +19,7 @@ import { join as joinPath } from "node:path";
 import { planInstallApp, planRoute, planUninstallApp, type AdminPlan } from "./client/admin.ts";
 import { RawBox } from "./client/raw.ts";
 import { WASM_DIR, wasmDirObjects } from "./host/boot.ts";
+import { sessionBase } from "./session-base.ts";
 import { HostDb } from "./host/instances.ts";
 import { fetchApp, instanceView, readApp, shellProgram, type InstanceView } from "./host/install.ts";
 import { storeSpec } from "./runtime/index-store.ts";
@@ -217,8 +218,8 @@ export function signedSubmitter(wallet: WalletInterface): (url: string, init?: {
   const sessions = new Map<string, { af: AuthFetch; topics?: string }>();
   return async (url, init = {}) => {
     const u = new URL(url);
-    // The dev form /@<handle>/…: the session is that instance's, its handshake under the prefix (as RawBox's).
-    const prefix = /^\/@[^/]+/.exec(u.pathname)?.[0] ?? "";
+    // The dev form /@<handle>/…: the session is that instance's, its handshake under the prefix (as RawBox's: sessionBase).
+    const prefix = new URL(sessionBase(u)).pathname.replace(/\/$/, "");
     let s = sessions.get(u.origin + prefix);
     if (!s) {
       const slot: { af?: AuthFetch; topics?: string } = {};
