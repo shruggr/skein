@@ -37,15 +37,15 @@
 //!
 //! The route handler contract (docs/MESSAGES.md, "Route handlers"): called
 //! with {caller?, method, path, route, query, headers, body, contentType,
-//! session?, match, request} (and, called again, resolved? | event? | reply?
+//! session?, payment? (#149: kernel.pay's), match, request} (and, called again, resolved? | event? | reply?
 //! | woke?), it answers {status, type?, body, headers?, admit?} — or {wait:
 //! true, admit?} once it has launched (or awaits) the thread its answer
 //! depends on: this thread then waits, and when that thread comes to rest
 //! the handler is called again with the same request and `resolved` — or
 //! {read: true}: its answer is a read of live state (the explorer), made by
 //! the host once this thread has ended (fn "read"). Its `headers` go out
-//! with the answer but for content-type (its `type`) and the x-bsv-* ones
-//! (the front door's). A handler never sees the session table; a message it
+//! with the answer but for content-type (its `type`) and the x-bsv-auth-* ones
+//! (the front door's); its other x-bsv-* ones are signed with it (#149). A handler never sees the session table; a message it
 //! admits carries the sender key, the 104 signature and both nonces, so its
 //! authorship verifies from the log alone.
 //!
@@ -174,7 +174,9 @@ fn verifiedByDoor(a: Allocator, req: Value, d: Value, request_id: []const u8) !?
     const theirs = Value.str(x.get("theirs")) orelse return null;
     const headers = req.get("headers");
     var p = cbor.MapBuilder.init(a);
-    if (Value.bytesOf(req.get("body"))) |body| if (brc.decode64(a, request_id)) |rid| {
+    // The payload is the request as signed: a header the door rewrote (#149: kernel.pay's payment, behind its
+    // pointer record) is not text here, like a body kernel.beef rewrote — then no payload (door.zig restore has it).
+    if (Value.bytesOf(req.get("body"))) |body| if (allText(headers)) if (brc.decode64(a, request_id)) |rid| {
         try p.put("payload", .{ .bytes = try brc.requestPayload(a, rid, Value.str(req.get("method")) orelse "GET", Value.str(req.get("path")) orelse "/", Value.str(req.get("query")) orelse "", try brc.headerList(a, headers), body) });
     };
     if (brc.headerOf(headers, "x-bsv-auth-signature")) |h| if (sk.unhex(a, h)) |sig| try p.put("signature", .{ .bytes = sig });
@@ -182,6 +184,13 @@ fn verifiedByDoor(a: Allocator, req: Value, d: Value, request_id: []const u8) !?
     try p.put("yourNonce", cbor.optStr(brc.headerOf(headers, "x-bsv-auth-your-nonce")));
     const proof = p.value();
     return .{ .peer = peer, .theirs = theirs, .request_id = request_id, .proof = if (proof.get("payload") != null) proof else null };
+}
+
+fn allText(headers: ?Value) bool {
+    const hs = headers orelse return true;
+    if (hs != .map) return true;
+    for (hs.map) |e| if (Value.str(e.value) == null) return false;
+    return true;
 }
 
 /// A step of a request's thread: the first verifies and routes; a later one
@@ -413,10 +422,12 @@ fn respOf(a: Allocator, out: Value) !Resp {
         .admit = out.get("admit"),
     };
     // #52: the handler's own headers (ETag, Location, Allow, …), but for the
-    // content type (its `type`) and the BRC-104 headers (the front door's).
+    // content type (its `type`) and the BRC-104 headers (the front door's). Its
+    // other x-bsv-* headers (#149: kernel.pay's x-bsv-payment-*) are signed with
+    // the answer (sign), as ts-stack's auth middleware signs them.
     if (out.get("headers")) |hs| if (hs == .map) for (hs.map) |x| {
         const val = Value.str(x.value) orelse continue;
-        if (std.ascii.eqlIgnoreCase(x.key, "content-type") or std.ascii.startsWithIgnoreCase(x.key, "x-bsv-")) continue;
+        if (std.ascii.eqlIgnoreCase(x.key, "content-type") or std.ascii.startsWithIgnoreCase(x.key, "x-bsv-auth")) continue;
         try resp.headers.append(a, .{ .name = try std.ascii.allocLowerString(a, x.key), .value = val });
     };
     return resp;
@@ -452,6 +463,8 @@ fn invoke(a: Allocator, in: Value, r: Value, rc: ?[]const u8, req: Value, v: ?Ve
     const ct = brc.headerOf(req.get("headers"), "content-type") orelse "";
     try h.put("contentType", cbor.string(std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " ")));
     if (v) |x| try h.put("session", x.proof);
+    // #149: what kernel.pay admitted, beside the caller: {satoshisPaid, txid, derivationPrefix, derivationSuffix, sender}.
+    if (in.get("door")) |d| try h.put("payment", d.get("payment"));
     // #52: the dispatch row that matched (a handler's own settings: static's root, index; the install's app).
     try h.put("match", r);
     if (rc) |c| try h.put("request", cbor.cidv(c));
@@ -557,7 +570,19 @@ fn verify(a: Allocator, in: Value, req: Value, request_id: []const u8) !Verified
 /// Sign the response on the session (in a step: a recorded wallet call; in a call: not recorded).
 fn sign(a: Allocator, in: Value, r: *Resp, v: Verified) !void {
     const rid = brc.decode64(a, v.request_id) orelse return error.Malformed;
-    const payload = try brc.responsePayload(a, rid, r.status, &.{}, r.body);
+    // The headers BRC-104 signs on a response (ts-stack's buildResponsePayload): x-bsv-* but
+    // x-bsv-auth*, and authorization; lower-cased, sorted by name.
+    var signed: std.ArrayList(brc.Header) = .empty;
+    for (r.headers.items) |h| {
+        const k = try std.ascii.allocLowerString(a, h.name);
+        if ((std.mem.startsWith(u8, k, "x-bsv-") and !std.mem.startsWith(u8, k, "x-bsv-auth")) or eql(u8, k, "authorization")) try signed.append(a, .{ .name = k, .value = h.value });
+    }
+    std.mem.sort(brc.Header, signed.items, {}, struct {
+        fn lt(_: void, x: brc.Header, y: brc.Header) bool {
+            return std.mem.order(u8, x.name, y.name) == .lt;
+        }
+    }.lt);
+    const payload = try brc.responsePayload(a, rid, r.status, signed.items, r.body);
     const nonce = try brc.random64(a);
     const key_id = try std.fmt.allocPrint(a, "{s} {s}", .{ nonce, v.theirs });
     const sig = try brc.createSignature(a, brc.AUTH_PROTOCOL, key_id, .{ .other = v.peer }, payload);
