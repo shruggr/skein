@@ -339,7 +339,7 @@ pub const Runtime = struct {
                 if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m, origin);
                 continue;
             }
-            // #126: an event the thread awaits (a `deadline`, a `fetch`, a `call`) goes out again: the host
+            // #126: an event the thread awaits (a `deadline`, a `fetch`) goes out again: the host
             // that kept it may be gone (a restart), its timers with it; a host that still has it
             // ignores it (hosts dedupe by the record's CID). #119: any other event is handed over
             // once, after its step's commit; a host that needs it again reads it from the log.
@@ -2164,11 +2164,11 @@ pub const Runtime = struct {
         return if (r == .cid) .{ .cid = r.cid } else .not_cid;
     }
 
-    /// An intention a step records and awaits (#126): a `deadline`, a `fetch` or a `call` event.
+    /// An intention a step records and awaits (#126): a `deadline` or a `fetch` event.
     fn isIntention(rec: Value) bool {
         if (!isEvent(rec)) return false;
         const name = Value.str(rec.get("event")).?;
-        return std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fetch") or std.mem.eql(u8, name, "call");
+        return std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fetch");
     }
 
     /// The answer to an intention (#126): a signed message (the front door checked its signature)
@@ -2181,9 +2181,8 @@ pub const Runtime = struct {
     /// in the log (the answer's body holds the request). The thread awaiting the event steps: a
     /// `deadline` at its time with `woke` (a shell carries on past its sleep), a `fetch` with
     /// `reply` ({message, body, box, sender, replyTo}: the answer's body {replyTo, request,
-    /// status, headers, body} | {replyTo, request, error}), a `call` the same way (the answer's
-    /// body {replyTo, request, from, body} | {replyTo, request, error}). Anything else is
-    /// recorded and runs nothing.
+    /// status, headers, body} | {replyTo, request, error}). Anything else is recorded and runs
+    /// nothing.
     fn intentionAnswer(rt: *Runtime, a: std.mem.Allocator, what: []const u8, ctx: Ctx, mc: []const u8, m: Value, body: []const u8, ev: []const u8, rec: Value, sender: []const u8, at: i64) !void {
         const bv = rt.store.getOpt(a, body) orelse return;
         if (rt.requestProblem(a, bv.get("request"), ev, sender)) |why| {
@@ -2943,13 +2942,6 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, name, "fetch")) {
             // #126: an intention — the step awaits it (sk.fetch), and the runtime answers it.
             if (fetchProblem(m)) |why| return imp.failFmt("emit: fetch: {s}", .{why});
-            fields = try ownedBy(a, m, st.origin, st.n);
-        }
-        if (std.mem.eql(u8, name, "call")) {
-            // An intention (the swap relay's call, 2026-11-06): one frame to a libp2p peer on a
-            // protocol and its one answer frame, carried by the host; the thread awaits it as a
-            // `fetch` (sk.awaitRecord), and the host's libp2p provider answers it.
-            if (logm.callProblem(m)) |why| return imp.failFmt("emit: call: {s}", .{why});
             fields = try ownedBy(a, m, st.origin, st.n);
         }
         if (std.mem.eql(u8, name, "deliver")) {

@@ -125,56 +125,6 @@ pub fn eventRecord(a: std.mem.Allocator, emit: Value, name: []const u8, app: ?[]
     return rec.value();
 }
 
-/// Why a `call` intention is not one: {event: "call", peer: <a peer ID, text>, protocol: <a
-/// libp2p protocol, text>, body: bytes} — one request frame to a peer on a protocol, one answer
-/// frame back, carried by the host (its libp2p node dials, writes, reads, closes, and answers the
-/// intention). Nothing else: no timeout, no limit (the stream is live until the answer or a break).
-/// `thread` and `step` are the kernel's. Null: it is one.
-pub fn callProblem(m: Value) ?[]const u8 {
-    const want = "want {peer, protocol, body}";
-    if (m != .map) return want;
-    const peer = Value.str(m.get("peer")) orelse return want;
-    if (peer.len == 0) return "an empty peer";
-    const protocol = Value.str(m.get("protocol")) orelse return want;
-    if (protocol.len == 0 or protocol[0] != '/') return "the protocol is not a libp2p protocol (/…)";
-    const b = m.get("body") orelse return want;
-    if (b != .bytes) return "body: want bytes";
-    for (m.map) |e| {
-        if (std.mem.eql(u8, e.key, "thread") or std.mem.eql(u8, e.key, "step")) return "`thread` and `step` are the kernel's to set";
-        const known = for ([_][]const u8{ "event", "peer", "protocol", "body" }) |k| {
-            if (std.mem.eql(u8, e.key, k)) break true;
-        } else false;
-        if (!known) return want;
-    }
-    return null;
-}
-
-test "callProblem: {peer, protocol, body} and nothing else" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const x = arena.allocator();
-    const mk = struct {
-        fn f(al: std.mem.Allocator, es: []const cbor.Entry) !Value {
-            return .{ .map = try al.dupe(cbor.Entry, es) };
-        }
-    }.f;
-    const ev = cbor.Entry{ .key = "event", .value = cbor.string("call") };
-    const peer = cbor.Entry{ .key = "peer", .value = cbor.string("16Uiu2HAm") };
-    const proto = cbor.Entry{ .key = "protocol", .value = cbor.string("/amm-validator/1/swap") };
-    const body = cbor.Entry{ .key = "body", .value = .{ .bytes = "x" } };
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, peer, proto, body })) == null);
-    try std.testing.expect(callProblem(try mk(x, &.{ peer, proto, body })) == null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, proto, body })) != null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, peer, body })) != null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, peer, proto })) != null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, .{ .key = "peer", .value = cbor.string("") }, proto, body })) != null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, peer, .{ .key = "protocol", .value = cbor.string("amm") }, body })) != null);
-    try std.testing.expect(callProblem(try mk(x, &.{ ev, peer, proto, .{ .key = "body", .value = cbor.string("x") } })) != null);
-    try std.testing.expectEqualStrings("want {peer, protocol, body}", callProblem(try mk(x, &.{ ev, peer, proto, body, .{ .key = "timeoutMs", .value = cbor.int(15000) } })).?);
-    try std.testing.expectEqualStrings("`thread` and `step` are the kernel's to set", callProblem(try mk(x, &.{ ev, peer, proto, body, .{ .key = "step", .value = cbor.int(1) } })).?);
-}
-
 /// A `deadline` event (#126): a thread's intention to rest until `at` (ms) at
 /// most, recorded by the kernel when a step ends waiting with a deadline (or a
 /// shell sleeps) — {kind: "event", event: "deadline", at, thread: <origin>,

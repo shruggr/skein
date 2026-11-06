@@ -163,11 +163,9 @@ export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certif
 export const UNADDRESSED: readonly ProviderName[] = ["billing"];
 export type ProviderName = typeof PROVIDERS[number];
 
-/** The intentions a step records and the runtime answers (#126; `call`: one libp2p request frame and its answer, carried by the host's node). */
-export type Intention = "fetch" | "deadline" | "call";
-const SERVICE: Record<Intention, { box: string; provider: ProviderName }> = { fetch: { box: "fetch", provider: "fetch" }, deadline: { box: "wake", provider: "waker" }, call: { box: "call", provider: "libp2p" } };
-/** A `call` the host was handed at an instance's start (the kernel's re-offer of what a waiting thread awaits): its answer. Nothing is sent again. */
-export const CALL_RESTARTED = "the host restarted";
+/** The intentions a step records and the runtime answers (#126). */
+export type Intention = "fetch" | "deadline";
+const SERVICE: Record<Intention, { box: string; provider: ProviderName }> = { fetch: { box: "fetch", provider: "fetch" }, deadline: { box: "wake", provider: "waker" } };
 
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number; maxBytes?: number };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
@@ -234,8 +232,6 @@ export interface ProvidersOptions {
     dial(handle: string, peer: string, protocol: string, frames: (f: { body: Uint8Array } | { closed: true; error?: string }) => void): Promise<number>;
     send(handle: string, stream: number, body: Uint8Array): Promise<void>;
     close(handle: string, stream: number): Promise<void>;
-    /** A `call` intention: one frame to `peer` on `protocol`, one frame back → its bytes and the peer the connection proved; a break throws. */
-    call(handle: string, peer: string, protocol: string, body: Uint8Array): Promise<{ from: Uint8Array; body: Uint8Array }>;
   };
   /** The clock (ms), as entries are stamped. */
   now(): number;
@@ -260,8 +256,6 @@ export class Providers {
   /** Messages being carried now, and the waker's answers being appended. */
   private inflight = new Set<Promise<unknown>>();
   private stopped = false;
-  /** The instances whose kernel is starting now: what they hand over meanwhile is the start's re-offer. */
-  private starts = new Map<string, number>();
 
   constructor(o: ProvidersOptions) { this.o = o; }
 
@@ -290,17 +284,6 @@ export class Providers {
     this.stopped = true;
     for (const t of this.timers.values()) clearTimeout(t.timer);
     this.timers.clear();
-  }
-
-  /**
-   * `handle`'s kernel is starting (`on`) or has started: what it hands over in between is its start's
-   * re-offer of what its waiting threads still await (scheduler.zig reoffer). A `call` this host is not
-   * carrying then is answered at once that the host restarted (its caller's request is gone with the
-   * process that held the stream; nothing is sent again).
-   */
-  starting(handle: string, on: boolean): void {
-    const n = (this.starts.get(handle) ?? 0) + (on ? 1 : -1);
-    if (n > 0) this.starts.set(handle, n); else this.starts.delete(handle);
   }
 
   /** A message (or an event, #65) from `handle` to carry out (the kernel's `emit` notice). */
@@ -348,15 +331,12 @@ export class Providers {
       this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
       return;
     }
-    if ((out.address === "deadline" || out.address === "fetch" || out.address === "call") && m.kind === "event" && m.event === out.address) {
+    if ((out.address === "deadline" || out.address === "fetch") && m.kind === "event" && m.event === out.address) {
       const k = `${handle} ${encode(m).cid}`;
       if (this.taken.has(k)) return; // handed over again (a kernel's start): kept already
       this.taken.add(k);
-      // A `call` re-offered at a start, which this host is not carrying: answered so, once (no resend).
-      const restarted = out.address === "call" && this.starts.has(handle);
-      const p = this.intention(handle, out.address, m, restarted).catch((e) => { this.taken.delete(k); this.say(handle, `provider: ${out.address}: ${(e as Error).message}`); });
-      // A call's stream may stay open as long as its peer takes to answer: waiting, as a waker's timer is, not busy (its answer's append is tracked).
-      if (out.address !== "call") this.track(p);
+      const p = this.intention(handle, out.address, m).catch((e) => { this.taken.delete(k); this.say(handle, `provider: ${out.address}: ${(e as Error).message}`); });
+      this.track(p);
       return;
     }
     if (out.address === "deliver" && m.kind === "event" && m.event === "deliver") {
@@ -495,7 +475,7 @@ export class Providers {
    * the thread awaiting the event steps — `woke` at a deadline, `reply` with a
    * fetch's response ({status, headers, body} | {error}).
    */
-  private async intention(handle: string, name: Intention, ev: Record<string, unknown>, restarted = false): Promise<void> {
+  private async intention(handle: string, name: Intention, ev: Record<string, unknown>): Promise<void> {
     const r = this.o.route?.[name] ?? { transport: "local" as const, address: SERVICE[name].provider };
     if (r.transport !== "local") throw new Error(`no transport ${String(r.transport)} wired for ${name}`);
     if (!PROVIDERS.includes(r.address)) throw new Error(`no provider ${r.address} on this host`);
@@ -513,32 +493,7 @@ export class Providers {
       this.timer(handle, id, at, () => this.track(reply({ at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`))));
       return;
     }
-    if (name === "call") {
-      const answer = restarted ? { error: CALL_RESTARTED } : await this.call(handle, ev);
-      const p = reply(answer);
-      this.track(p);
-      await p;
-      return;
-    }
     await reply(await this.proxy(handle, ev));
-  }
-
-  /**
-   * A `call` intention carried (the swap relay's call, 2026-11-06): {peer, protocol, body} → one frame
-   * to the peer on the protocol, its one answer frame back → {from: <the peer the connection proved>,
-   * body} | {error: <what broke>}. One attempt; no timer, no retry: the stream is live until the peer
-   * answers or the connection breaks.
-   */
-  private async call(handle: string, ev: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const p = this.o.p2p;
-    if (!p) return { error: "this host runs no libp2p" };
-    if (typeof ev.peer !== "string" || typeof ev.protocol !== "string" || !(ev.body instanceof Uint8Array)) return { error: "a call wants {peer, protocol, body}" };
-    try {
-      const r = await p.call(handle, ev.peer, ev.protocol, ev.body);
-      return { from: r.from, body: r.body };
-    } catch (e) {
-      return { error: (e as Error).message };
-    }
   }
 
   /** Run `fire` at `at` (by the clock `now`), once per (handle, id). */

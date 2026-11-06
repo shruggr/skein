@@ -689,7 +689,6 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | `app`'s subscription to `topic` ends; the node leaves the topic when nothing else takes it |
   | `deadline` (#126) | `{kind: "event", event: "deadline", at, thread, step, app?}` — the kernel records it (the `deadline` import, a shell's sleep), never an emit | an intention: its waker answers at `at` (below, "Intentions"); re-offered at a start while the thread awaits it |
   | `fetch` (#126) | `{kind: "event", event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?, thread, step, app?}` (`sk.fetch`; the kernel adds `thread`, `step`) | an intention: its HTTP proxy performs it and answers (below, "Intentions"); re-offered at a start while the thread awaits it |
-  | `call` (0.3.0) | `{kind: "event", event: "call", peer, protocol, body, thread, step, app?}` (the kernel adds `thread`, `step`) | an intention: the host's libp2p node carries one frame to `peer` on `protocol` and answers with the one frame back, or the break (below, "Intentions"); re-offered at a start while the thread awaits it, and then answered "the host restarted" |
   | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes a new frame on `topic` every `every` ms — `body`, the beat's time, the instance's signature — logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | `liveness` (#138) | `{kind: "event", event: "liveness", app, topic, window}` | its liveness tool: the node subscribes `topic` without admitting its messages and keeps the verified beacon beats newer than `window` ms, the latest per sender, served at `GET /<app>/.live/<topic>` — "Liveness (#138)", below |
@@ -758,7 +757,7 @@ replying sender** — a provider answers as itself, so its key is what the
 address book names — or an intention this instance recorded, answered with
 the instance's own signed request for it to the replying sender (below).
 
-### Intentions: deadline, fetch and call (#126)
+### Intentions: deadline and fetch (#126)
 
 A program says what it wants and awaits it; the runtime does it as it is
 wired, and the answer is an entry.
@@ -767,7 +766,6 @@ wired, and the answer is an entry.
 |---|---|---|---|
 | `deadline(until_ms)` (and a shell's `sleep`) | when the step ends waiting: `{kind: "event", event: "deadline", at, thread, step, app?}`, in `emitted` and `awaits` | by the kernel | at `at`: `woke: true` (a shell carries on past its sleep); one stamped before `at` runs nothing |
 | `sk.fetch(a, method, url, headers, body)` / `sk.fetchWith(…, {timeout_ms, max_bytes})` | the emit `{event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?}` → `{kind: "event", event: "fetch", …, thread, step, app?}` | by the program (`sk.fetch` awaits its CID) | `reply: {message, body, box, sender, replyTo}`, the body `{replyTo, request, status, headers, body}` or `{replyTo, request, error}` (`sk.replyOf`) |
-| `call` (0.3.0: one libp2p request and its answer) | the emit `{event: "call", peer: <a peer ID, or a multiaddr with /p2p/<id>>, protocol: "/<protocol>", body: bytes}` — nothing else (no timeout) → `{kind: "event", event: "call", peer, protocol, body, thread, step, app?}` | by the program (it awaits the event's CID) | `reply` as `fetch`'s, from the host's `libp2p` provider in box `call`: the body `{replyTo, request, from: <the peer ID's multihash, as the connection proved it>, body: bytes}` or `{replyTo, request, error}` |
 
 **How it is answered.** The kernel hands the event to the host after the
 step's commit (transport `event`, address the name; again at a start while
@@ -789,20 +787,6 @@ awaiting the event. Both signatures are in the log. A message naming the
 event without such a request is recorded and runs nothing. A log before
 #126 (a deadline was a wake-me message to the waker, answered by
 `replyTo`) replays as it was written.
-
-**A `call`** is carried by the host's libp2p node, ONE attempt with no timer:
-it dials `peer`, opens a stream on `protocol`, writes `body` as one frame,
-waits on the open stream for one frame back, closes it, and answers `{from,
-body}` (`from`: the peer the Noise connection proved). The wait has no bound
-of its own: the stream is live until the peer answers or the connection
-breaks. Any break answers `{error}` at once, naming it — the dial refused, the
-protocol not served, the write failed, the stream closed without an answer —
-the host's own observation of its transport, as a `fetch` error is. Nothing is
-retried and nothing is sent again: a `call` still awaited when its instance
-starts (the kernel's re-offer, a host restart) is answered `{error: "the host
-restarted"}` at that start (the stream that carried it is gone with the
-process). A program that still messages the `libp2p` provider (`dial`, `send`,
-`close`, its frames; below) is answered as before. Not billed.
 
 ### The address book
 
@@ -1608,6 +1592,24 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   topic)` (the beats kept), `events.subscribe` (the emitted events, as this
   stream serves them), `o.db.list("enabled")` (the instances). Nothing is
   logged; the instance's program never sees these requests.
+- **An application host's own calls** (0.3.1: the open-exchange host relays
+  a swap itself; the instance logs facts, never attempts). Host code, outside
+  any step, nothing logged for the attempt: `p2p.call(handle, peer, protocol,
+  body, {signal})` — one frame to a peer on a protocol and the one frame
+  back, `{from, body}`, on a live stream with no timer; a break throws, named
+  (the dial refused, the protocol not served, the write failed, the stream
+  closed without an answer); once `signal` fires a dial in progress is
+  cancelled, a request not yet written is never written, an open stream is
+  closed ("the call was cancelled"). `p2pInbound(handle, {protocol, from,
+  body})` — a frame handed to an instance on THIS host as one arriving from a
+  peer would be (a `p2p-frame` request entry, the same front door, the
+  frame's answer waited for until its thread rests) → `{verdict, body?,
+  reason?}`. `signMessage(handle, {recipient?, box, body, nonce?})` — a
+  BRC-169 mail record signed by the instance's key through the host's key
+  holder, as an intention's request is → `{message, body}`. `dispatch({method:
+  "POST", url: <origin>/@<handle>/submit, headers: {"x-topics": …}, body:
+  <BEEF>})` — the overlay submission in process, its STEAK or its failure as
+  the HTTP answer.
 - **What the node subscribes** (#72, #77, #119). The instance's node takes
   the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's
@@ -1678,7 +1680,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   (entries, as an HTTP route handler returns them) is routed, `close` or
   `reject` ends the stream. A frame's handler may wait on a thread as an
   HTTP route's may (`{wait: true}`); the frame's answer is written back when
-  the request's thread comes to rest — however long that is (0.3.0): the
+  the request's thread comes to rest — however long that is (0.3.0, kept in 0.3.1): the
   host holds the stream open and waits again past its answer wait
   (`SKEIN_ANSWER_WAIT_MS`), never answering `ignore` "not answered in time"
   on a frame nor dropping a late answer; the next frame on the stream is

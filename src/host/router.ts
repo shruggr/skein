@@ -115,6 +115,8 @@ import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
 import { KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
+import { randomBytes } from "node:crypto";
+import { encode as encodeBlock } from "../runtime/cid.ts";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
@@ -614,7 +616,6 @@ export class Router {
           dial: (h: string, peer: string, protocol: string, frames: Parameters<P2PHost["dial"]>[3]) => p2p.dial(h, peer, protocol, frames),
           send: (h: string, s: number, body: Uint8Array) => p2p.send(h, s, body),
           close: (h: string, s: number) => p2p.close(h, s),
-          call: (h: string, peer: string, protocol: string, body: Uint8Array) => p2p.call(h, peer, protocol, body),
         },
       } : {}),
       now: () => stampMs(this.now()),
@@ -868,6 +869,31 @@ export class Router {
     if (!row) throw new Error(`no instance ${handle}`);
     const { signature } = await (await this.o.walletFor(row)).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] });
     return Uint8Array.from(signature);
+  }
+
+  /**
+   * A BRC-169 message signed by `handle`'s key through this host's key holder, outside any step (as
+   * the host signs an intention's request, providers.ts): the mail record {kind: "mail", op: "put",
+   * sender: the instance's identity, recipient?, box, body: <the body's CID>, nonce, signature}
+   * ([2, "metanet handles envelope"], key "send", counterparty anyone, over the record's dag-cbor
+   * without `signature`) and the body's dag-cbor bytes. `recipient` an identity key (33 bytes or
+   * hex); `nonce` 16 bytes, fresh when absent. For host code (the open-exchange host's swap relay
+   * signs its package to a validator with the token instance's key, 2026-11-06). Nothing is logged.
+   */
+  async signMessage(handle: string, m: { recipient?: Uint8Array | string; box: string; body: Uint8Array; nonce?: Uint8Array }): Promise<{ message: MailRecord; body: Uint8Array }> {
+    const id = this.o.db.get(handle)?.identity;
+    if (!id) throw new Error(`no instance ${handle} with an identity here`);
+    let value: unknown;
+    try { value = dagCbor.decode(m.body); } catch { throw new Error("the body is not dag-cbor"); }
+    const block = encodeBlock(value as never);
+    if (Buffer.compare(Buffer.from(block.bytes), Buffer.from(m.body)) !== 0) throw new Error("the body is not canonical dag-cbor");
+    if (m.nonce && m.nonce.length !== 16) throw new Error("nonce: want 16 bytes");
+    const recipient = m.recipient === undefined ? undefined : typeof m.recipient === "string" ? keyBytes(m.recipient) : m.recipient;
+    const unsigned = {
+      kind: "mail" as const, op: "put" as const, sender: keyBytes(id), ...(recipient ? { recipient } : {}),
+      box: m.box, body: block.cid, nonce: m.nonce ?? Uint8Array.from(randomBytes(16)),
+    };
+    return { message: { ...unsigned, signature: await this.signAs(handle, dagCbor.encode(unsigned)) } as MailRecord, body: m.body };
   }
 
   /**
@@ -1205,9 +1231,7 @@ export class Router {
       g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
-      // What the start hands over is its re-offer (providers.ts `starting`: a `call` no longer carried is answered so).
-      this.providers.starting(handle, true);
-      try { await kernel.start(); } finally { this.providers.starting(handle, false); }
+      await kernel.start();
       // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
       await this.chainBootstrap(handle, kernel);
       // #156: a serve kernel's own host chain still empty (born before the image held a chain): from the image chain now.
