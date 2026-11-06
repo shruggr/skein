@@ -11,7 +11,7 @@
 //                               src/host/providers.ts): the HTTP proxy `fetch`
 //                               and the `waker` (setTimeout), and the bytes of
 //                               the kernel's `authfetch` (the instance delivers
-//                               its messages itself — the messagebox program's
+//                               its messages itself — the mail program's
 //                               delivery thread, a BRC-104 client — and resolves
 //                               handles through the proxy). Each provider answers
 //                               with a signed message from its own key, admitted
@@ -28,8 +28,8 @@
 //                     (`local` requests: the waker's among them, a deadline's
 //                     or a shell's sleep, #69).
 //
-// The mailbox: registering this identity on the host creates its mailbox
-// instance (#40) — the user's, read with the user's wallet, never the
+// The mailbox: registering this identity's handle on the host gives it a
+// mailbox at the host skein's messagebox app — the user's, read with the user's wallet, never the
 // instance's inbox (#126 step 4: a skein receives mail only where it
 // verifies the sender itself, and the page's instance has no front door
 // anyone else reaches). The genesis names it as the owner's messagebox, so
@@ -38,7 +38,7 @@
 // admits none into the instance: if the user wants the instance to act on
 // one, the user sends it a message of their own. An intermittent host
 // (#16): nothing runs while the tab is closed; mail waits in the mailbox
-// instance and wakes fire late, at the next open.
+// and wakes fire late, at the next open.
 
 import { AuthFetch, KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
@@ -63,7 +63,7 @@ const COLLECT = ["chat", "turn", "results", "completions"];
 
 export interface HostOptions {
   wallet: WalletInterface;
-  /** The skein host (the router), e.g. http://127.0.0.1:8100: where this identity registers its mailbox instance and handles resolve. */
+  /** The skein host (the router), e.g. http://127.0.0.1:8100: where this identity registers its handle (its mailbox the host skein's messagebox app) and handles resolve. */
   host: string;
   handle: string;
   domain?: string;
@@ -160,7 +160,7 @@ export class BrowserHost {
   private box!: RawBox;
   /** The page's client of its own instance: a BRC-104 session over frontFetch. */
   private own!: RawBox;
-  /** This identity's mailbox instance on the host. */
+  /** This identity's mailbox on the host (the messagebox URL its registration answers). */
   mailbox = "";
   private queue: Promise<unknown> = Promise.resolve();
   private pollTimer?: ReturnType<typeof setTimeout>;
@@ -255,7 +255,7 @@ export class BrowserHost {
   }
 
   /**
-   * This identity's mailbox instance on the host (messages to it wait there
+   * This identity's mailbox on the host (messages to it wait there
    * while the tab is closed): its URL. #113: the host skein's onboarding app
    * takes the registration, signed over `register <handle>@<domain>` — the
    * host's handle domain, from /.well-known/skein-host.
@@ -330,7 +330,7 @@ export class BrowserHost {
 
   /**
    * listMessages in every box the subscriptions route (and COLLECT) on this
-   * identity's mailbox instance: each message — the instance's to its owner,
+   * identity's mailbox: each message — the instance's to its owner,
    * a peer's to the user — shown (`onMessage`, an event `message`) and
    * acknowledged. None is admitted into the instance (#126 step 4): the
    * mailbox is the user's, and the user's own message is how the instance

@@ -1,7 +1,7 @@
 // skein — David's client. Signs as David through his wallet-api; raw BRC-33 on
 // a BRC-104 session (#40): sends to the instance's front door
 // (SKEIN_INSTANCE_URL, default $SKEIN_HOST_URL/@<handle>), reads David's
-// mailbox instance (SKEIN_MAILBOX_URL, ~/.skein/mailbox.url, default
+// mailbox (SKEIN_MAILBOX_URL, ~/.skein/mailbox.url, default
 // $SKEIN_HOST_URL/@david). See scripts/host/README.md for the processes it expects.
 //
 //   skein whoami

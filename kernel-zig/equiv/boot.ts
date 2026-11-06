@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
+import { inboxes } from "./inboxes.ts";
 import { PrivateKey } from "@bsv/sdk";
 import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
@@ -53,6 +54,12 @@ const work = mkdtempSync(join(tmpdir(), "skein-kz-boot-"));
 const key = (h: string) => new PrivateKey(h, 16);
 const owner = ephemeralWallet(key("2222")), ownerId = key("2222").toPublicKey().toString();
 const inferKey = key("4444"), inferId = inferKey.toPublicKey().toString();
+// The owner's and the inference peer's mailboxes: hosted at the inboxes' host (inboxes.ts), a registration each,
+// before the agents (whose geneses name the owner's: SKEIN_OWNER_MESSAGEBOX); named here for their handles.
+const ib = await inboxes(join(work, "inboxes"), { command: kernel });
+const ownerBox = await ib.register(key("2222"), "david");
+const inferBox = await ib.register(inferKey, "infer");
+const elsewhere = new Map([["david", { identityKey: ownerId, messagebox: ownerBox }], ["infer", { identityKey: inferId, messagebox: inferBox }]]);
 
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -63,11 +70,11 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
 }
 const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 const lines: string[] = [];
-// The port the routers serve on: an agent's genesis names its owner's mailbox by URL (#40), so it is fixed before the boots.
+// The port the routers serve on, fixed before the boots (the checkpoint's second host serves its instances at the same origins).
 const port = await new Promise<number>((res) => { const srv = createServer(); srv.listen(0, "127.0.0.1", () => { const p = (srv.address() as { port: number }).port; srv.close(() => res(p)); }); });
 const cli = async (home: string, ...argv: string[]) => {
   const out: string[] = [];
-  const code = await main(argv, { vars: { ...process.env, SKEIN_HOME: home, SKEIN_OWNER: ownerId, SKEIN_INFER: inferId, SKEIN_KERNEL_BIN: kernel, SKEIN_ROUTER_PORT: String(port) }, out: (l) => out.push(l), err: (l) => out.push(`ERR ${l}`) });
+  const code = await main(argv, { vars: { ...process.env, SKEIN_HOME: home, SKEIN_OWNER: ownerId, SKEIN_INFER: inferId, SKEIN_KERNEL_BIN: kernel, SKEIN_ROUTER_PORT: String(port), SKEIN_OWNER_MESSAGEBOX: ownerBox }, out: (l) => out.push(l), err: (l) => out.push(`ERR ${l}`) });
   lines.push(`$ skein-host ${argv.join(" ")}`, ...out);
   if (process.env.VERBOSE) process.stdout.write(`  | $ skein-host ${argv.join(" ")}\n${out.map((l) => `  | ${l}\n`).join("")}`);
   return { code, out };
@@ -82,8 +89,9 @@ const routerFor = (h: string, db: HostDb) => {
   const signer = new Signer(masterKey({}, h));
   const r: Router = new Router({
     db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), home: h, port,
-    // No host skein here (#113): the handles resolve over host.db (a fixture).
-    discovery: fakeDiscovery(db, () => r),
+    // No host skein here (#113): the handles resolve over host.db (a fixture), the inbox handles at the inboxes' host.
+    discovery: fakeDiscovery(db, () => r, elsewhere),
+    http: (req) => ib.http(req), ownerMessagebox: ownerBox,
     owner: ownerId, infer: inferId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: h } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
   });
@@ -106,12 +114,12 @@ async function talk(r: Router, handles: string[], install?: string): Promise<voi
       return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: soul.includes("booted from a system tree") ? "I was booted from a system tree." : `no soul: ${soul.slice(0, 80)}` } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch,
     raw: {
-      inbox: new RawBox(iw, `${base}/@infer`),
+      inbox: new RawBox(iw, inferBox),
       outbox: (url) => new RawBox(iw, url),
       // Its address book (#40), configured: every row's key at its origin.
-      addressOf: (k) => { const x = r.o.db.list().find((y) => y.identity === k && y.kind !== "mailbox") ?? r.o.db.mailboxOf(k); return x && r.originOf(x.handle); },
+      addressOf: (k) => { const x = r.o.db.list().find((y) => y.identity === k); return x && r.originOf(x.handle); },
     } });
-  const mine = new RawBox(owner, `${base}/@david`);
+  const mine = new RawBox(owner, ownerBox);
   const box = { ack: (ids: string[]) => mine.ack(ids) };
   const inbox = async (b: string) => (await mine.list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
   for (const h of handles) {
@@ -172,8 +180,7 @@ try {
   } else process.stdout.write("note: no wallet component build (programs/wallet: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
 
-  // The owner's and the inference peer's mailbox instances, before the agents (whose geneses name the owner's).
-  check((await cli(home, "add", "david", "--mailbox", "--owner", ownerId)).code === 0 && (await cli(home, "add", "infer", "--mailbox", "--owner", inferId)).code === 0, "mailbox instances for the owner and the inference peer");
+  check(ownerBox === inferBox && ownerBox.endsWith("/messagebox"), `the owner and the inference peer registered at the inboxes' host: one messagebox (${ownerBox})`);
   // Source A: the directory.
   const a = await cli(home, "add", "alpha", "--boot", sys);
   check(a.code === 0 && a.out.some((l) => l.startsWith("alpha: booted from ")), `add --boot <dir> (${a.out.join(" | ").slice(0, 200)})`);
@@ -198,7 +205,7 @@ try {
     const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; dispatch: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === `frontdoor,messagebox,resolve${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s, no shell (#83: an app) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `frontdoor,mail,resolve${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s, no shell (#83: an app) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { root: Uint8Array[] }).root?.[0]) === ownerId, `${h}: root is the host's owner (#143)`);
   }
   await talk(router, ["alpha", "beta"], home);
@@ -211,8 +218,6 @@ try {
   check(c.code === 0, `pack <handle> --checkpoint (${c.out.join(" | ")})`);
   await fs.mkdir(home2, { recursive: true });
   copyFileSync(join(home, "master.key"), join(home2, "master.key"));
-  await cli(home2, "add", "david", "--mailbox", "--owner", ownerId);
-  await cli(home2, "add", "infer", "--mailbox", "--owner", inferId);
   const rc = await cli(home2, "add", "alpha", "--packet", ck);
   check(rc.code === 0 && rc.out.some((l) => l.startsWith("alpha: restored checkpoint")), `add --packet <checkpoint> (${rc.out.join(" | ").slice(0, 200)})`);
   const db2 = new HostDb(join(home2, "host.db"));
@@ -236,6 +241,7 @@ try {
   check(false, `the scenario ran: ${(e as Error).stack}\n${lines.slice(-30).join("\n")}`);
   await router?.stop();
 }
+await ib.stop();
 if (!process.env.KEEP) rmSync(work, { recursive: true, force: true }); else process.stdout.write(`kept ${work}\n`);
 process.stdout.write(failures ? `boot: ${failures} FAILED\n` : "boot: all ok\n");
 process.exit(failures ? 1 : 0);

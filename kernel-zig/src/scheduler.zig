@@ -1599,9 +1599,7 @@ pub const Runtime = struct {
     /// awaiting that record steps with it; else routed by its box's route
     /// (#143: through the gate, its principal the sender — or, for a message
     /// carried in whole, who the door's filters said), and the handler
-    /// launched with {message, body, box, sender, fn?}. A message for an
-    /// identity this instance keeps mail for (in a mailbox instance) is never
-    /// a reply here: it is routed.
+    /// launched with {message, body, box, sender, fn?}.
     fn processMail(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, mc: []const u8, at: i64) !void {
         const m = rt.store.getOpt(a, mc) orelse return error.NotFound;
         const sender = Value.bytesOf(m.get("sender")).?;

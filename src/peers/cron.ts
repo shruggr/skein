@@ -3,7 +3,7 @@
 // provider's key with transport `mailbox` (its messagebox URL) emits its tick
 // requests exactly as it would to the host's own (`local`) cron provider:
 // the instance's delivery thread carries each over BRC-103/104 into the
-// service's mailbox instance; the program does not know which it talks to.
+// service's mailbox; the program does not know which it talks to.
 //
 // The service collects its `cron` box there (raw BRC-33 on a BRC-104
 // session as its own key, like the inference peer: src/peers/infer.ts),
@@ -20,7 +20,7 @@ import type { Listed } from "../client/raw.ts";
 import { Cron, type ScheduleStore } from "../host/cron.ts";
 
 export interface CronPeerOptions {
-  /** Its mailbox instance (a RawBox as the service's key): requests arrive in box `cron`. */
+  /** Its mailbox (a RawBox as the service's key): requests arrive in box `cron`. */
   inbox: { list(box: string): Promise<Listed[]>; ack(ids: string[]): Promise<void> };
   /** A session with the messagebox at `url` (a RawBox as the service's key). */
   outbox(url: string): { send(recipient: string, box: string, body: unknown): Promise<unknown> };

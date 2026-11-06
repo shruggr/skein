@@ -2,7 +2,7 @@
 // `skein-infer`: the inference peer process (infer.ts). Its environment
 // (bin/skein-infer fills it from ~/.skein):
 //   SKEIN_INFER_WALLET_URL  its BRC-100 wallet, default http://127.0.0.1:3323 (`1sat serve wallet-api`), origin "skein-infer"
-//   SKEIN_MAILBOX_URL       its mailbox instance (#40), e.g. http://infer.localhost:8100 or http://127.0.0.1:8100/@infer
+//   SKEIN_MAILBOX_URL       its mailbox (#40): the messagebox its handle resolves to, e.g. http://host.localhost:8100/messagebox
 //   SKEIN_INFER_PEERS       its address book (#40): {"<identity key hex>": "<messagebox URL>", …}, default
 //                           $SKEIN_HOME/infer-peers.json (scripts/host/up.sh writes every agent's); read again
 //                           when it changes. A request from a key not in it has nowhere to go: dropped, one line.

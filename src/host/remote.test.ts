@@ -18,7 +18,7 @@ import { sessionBase } from "../session-base.ts";
 test("remote delivery: an admin peer record; the run's result delivered over http to the owner's mailbox on another host; the peer removed", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   // Host B keeps the owner's mailbox (its host skein's messagebox app); host A runs the agent. The same owner.
   const b = await testHost(t);
-  const url = await b.inbox(b.ownerKey, "david");
+  const url = await b.register(b.ownerKey, "david");
   const wire: string[] = [];
   const a = await testHost(t, {
     ownerKey: b.ownerKey,

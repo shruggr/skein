@@ -9,8 +9,7 @@
 // refused and nothing is published; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
 // unpublishes, `start` publishes again. #113: `create` records the domain it
-// is given; image `mailbox` makes a mailbox instance (what a registration
-// asks for), the same owner and handle again the same answer. GET /skeins?key=
+// is given. GET /skeins?key=
 // lists a key's skeins on the host from their grants. (kernel-zig/
 // equiv/host.ts runs the whole flow through the onboarding app.)
 

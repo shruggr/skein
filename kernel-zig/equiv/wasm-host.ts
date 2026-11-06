@@ -147,7 +147,10 @@ if (!ONLY || ONLY === "c") {
     await refused({ ...ans!, signature: Uint8Array.from((ans!.signature as Uint8Array).map((b, i) => (i === 10 ? b ^ 1 : b))) }, "a bad signature");
     await refused({ ...ans!, replyTo: encode({ kind: "event", event: "fetch" }).cid }, "an answer naming no deliver event of alpha's");
     await h.router.close();
-    for (const hh of ["alpha", "host"]) replayNative(storeSpec(h.db.get(hh)!), `(d) ${hh}`);
+    const inboxes = await h.inboxHost();
+    await inboxes.router.close();
+    replayNative(storeSpec(h.db.get("alpha")!), "(d) alpha");
+    replayNative(storeSpec(inboxes.db.get("host")!), "(d) host (the inboxes' host skein)");
   } finally { await t.done(); }
 }
 

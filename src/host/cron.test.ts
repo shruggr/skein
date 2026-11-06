@@ -234,10 +234,10 @@ test("cron: a stopped instance with only an unsubscribed box is not woken", { sk
 });
 
 test("cron, remote: the same program, the cron provider reached by mailbox over BRC-103/104 on a second router; its ticks come back the same way", { skip, timeout: 120_000 }, async (t) => {
-  // Host B: the cron service — its key's hosted mailbox (B's host skein) and the service reading it.
+  // Host B: the cron service — its key's mailbox (registered at B's host skein) and the service reading it.
   const b = await testHost(t);
   const svcKey = PrivateKey.fromRandom(), svc = svcKey.toPublicKey().toString();
-  const svcBox = await b.inbox(svcKey, "cronsvc");
+  const svcBox = await b.register(svcKey, "cronsvc");
   await b.router.start();
   // Host A: the agent, whose http goes out for real (to B).
   const a = await testHost(t, { http: fetchHttp });

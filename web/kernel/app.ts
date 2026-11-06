@@ -3,7 +3,7 @@
 // is the connected wallet's, and a chat box that talks to it. Configured by
 // the query string:
 //
-//   host         the skein host, the router (default http://127.0.0.1:8100): this identity's mailbox instance is registered there
+//   host         the skein host, the router (default http://127.0.0.1:8100): this identity's handle is registered there (its mailbox the host skein's messagebox app)
 //   handle       this instance's name there (default "me")
 //   infer        the inference peer's identity (hex), inferHandle its handle@domain
 //   key          tests only: a private key (hex) — a wallet in this tab over that key

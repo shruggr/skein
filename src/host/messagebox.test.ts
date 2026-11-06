@@ -19,8 +19,8 @@ test("hosted messagebox: two keys registered; a third session sends to each at t
   const h = await testHost(t);
   const aliceKey = PrivateKey.fromRandom(), bobKey = PrivateKey.fromRandom(), carolKey = PrivateKey.fromRandom();
   const alice = aliceKey.toPublicKey().toString(), bob = bobKey.toPublicKey().toString();
-  const url = await h.inbox(aliceKey, "alice");
-  assert.equal(await h.inbox(bobKey, "bob"), url, "one messagebox for every handle: the host skein's");
+  const url = await h.register(aliceKey, "alice");
+  assert.equal(await h.register(bobKey, "bob"), url, "one messagebox for every handle: the host skein's");
   assert.equal(url, `${h.origin("host")}/messagebox`);
   assert.deepEqual(h.db.list().map((r) => r.handle), ["host"], "a registration makes no instance row");
 

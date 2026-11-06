@@ -1,5 +1,5 @@
 // One handle grammar (a hostname label) for every row (`add`, the manager's
-// create, a mailbox instance), and the reserved names: `id`, `host`, and the first label of the router's own origin, which
+// create), and the reserved names: `id`, `host`, and the first label of the router's own origin, which
 // no instance may take and which never routes to one — unless the operator names it in SKEIN_MANAGER_FOR. No kernel needed: each
 // refusal comes before anything is booted.
 

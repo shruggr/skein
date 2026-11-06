@@ -2,9 +2,8 @@
 // every instance is an HTTP server (its front door) at its own origin; the
 // stock @bsv/message-box-client talks to an instance by host name, our raw
 // BRC-33 client by path prefix; the instance answers into its owner's mailbox —
-// a mailbox instance — over http, short-circuited in process; the owner lists
-// and acknowledges there; every request is an entry (#68), a poll moves
-// nothing; sessions are records and survive a killed kernel. The host's
+// the hosted messagebox another test host keeps — over http; the owner lists
+// and acknowledges there; a poll is a read (no entry), it moves nothing; sessions are records and survive a killed kernel. The host's
 // headers feed (#102) reaches only the instances with a row taking events in
 // box `chain`, following their dispatch tables live. A registration from a
 // page (#103, #113): signed by the key over `register <name>@<domain>`,
@@ -38,7 +37,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
   const mb = new MessageBoxClient({ host: h.origin("alpha"), walletClient: h.owner });
   await mb.sendMessage({ recipient: alpha, messageBox: "shell/run", body: { cmd: "echo hello; echo from $PWD" }, skipEncryption: true }, h.origin("alpha"));
 
-  // The run's result is delivered by alpha itself, over http, to the owner's hosted mailbox (the host skein's messagebox app) — in process.
+  // The run's result is delivered by alpha itself, over http, to the owner's hosted mailbox (host B's host skein's messagebox app).
   const dav = new MessageBoxClient({ host: mailbox, walletClient: h.owner });
   const results = await until("the result in david's mailbox", async () => {
     const ms = await dav.listMessagesLite({ messageBox: "results", host: mailbox });
@@ -48,7 +47,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
   assert.equal(r.exitCode, 0);
   assert.match(Buffer.from(r.stdout["/"].bytes, "base64").toString(), /^hello\n/);
   assert.equal(results[0]!.sender, alpha, "the sender is the session's identity: alpha's");
-  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver results for ") && l.endsWith(`→ ${mailbox}/sendMessage (local): 200 delivered`)), "the delivery's log line: where, how, the result");
+  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver results for ") && l.endsWith(`→ ${mailbox}/sendMessage (remote): 200 delivered`)), "the delivery's log line: where, how (another host's), the result");
   await dav.acknowledgeMessage({ messageIds: results.map((m) => m.messageId), host: mailbox });
   await h.router.settled();
   assert.deepEqual(await dav.listMessagesLite({ messageBox: "results", host: mailbox }), [], "acknowledged: removed from the box");
@@ -72,13 +71,14 @@ test("router: the stock client by host name, our client by path prefix; the answ
   assert.deepEqual(seeded.map((p) => p.transport === "local" ? p.address : p.transport).sort(), ["cron", "fetch", "mailbox", "waker"], "the providers (#69: the cron provider among them) and the owner's mailbox");
 
   // Polls: listMessages is a read route (the messagebox app's filter answers it): no entry, the mailbox unchanged.
-  await h.router.settled();
-  const kd = (await h.router.hydrate("host")).kernel;
-  const n0 = await h.entries("host"), m0 = await kd.call("head", "messagebox/mailbox") as CID;
+  const b = await h.inboxHost();
+  await b.router.settled();
+  const kd = (await b.router.hydrate("host")).kernel;
+  const n0 = await b.entries("host"), m0 = await kd.call("head", "messagebox/mailbox") as CID;
   const n = Number(process.env.SKEIN_POLLS ?? 100);
   for (let i = 0; i < n; i++) await dav.listMessagesLite({ messageBox: "results", host: mailbox });
-  await h.router.settled();
-  assert.equal(await h.entries("host"), n0, `${n} polls: no entries`);
+  await b.router.settled();
+  assert.equal(await b.entries("host"), n0, `${n} polls: no entries`);
   assert.ok((await kd.call("head", "messagebox/mailbox") as CID).equals(m0), `${n} polls: the mailbox unchanged`);
 });
 
@@ -95,18 +95,21 @@ test("router: an instance's genesis names the owner's configured messagebox (SKE
   assert.ok(!h.lines.some((l) => l.startsWith("[late] WARNING")), "no warning for an instance whose genesis names it");
 });
 
-test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on the host skein (the hosted mailbox) and another instance; a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on the host skein that keeps the hosted mailbox (host B) and an instance (host A); a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
   h.instance("alpha");
   await h.router.start();
   await h.router.settled();
-  // Every forwarded request's answer, as the client got it: `<handle> <route> <status>`.
+  const b = await h.inboxHost();
+  // Every forwarded request's answer, as the client got it, on either host: `<handle> <route> <status>`.
   const seen: string[] = [];
-  const r = h.router as unknown as { forward(handle: string, route: string, ...rest: unknown[]): Promise<{ status: number }> };
-  const forward = r.forward.bind(h.router);
-  r.forward = async (handle, route, ...rest) => { const a = await forward(handle, route, ...rest); seen.push(`${handle} ${route} ${a.status}`); return a; };
-  const n0 = { host: await h.entries("host"), alpha: await h.entries("alpha") };
+  for (const router of [h.router, b.router]) {
+    const r = router as unknown as { forward(handle: string, route: string, ...rest: unknown[]): Promise<{ status: number }> };
+    const forward = r.forward.bind(router);
+    r.forward = async (handle, route, ...rest) => { const a = await forward(handle, route, ...rest); seen.push(`${handle} ${route} ${a.status}`); return a; };
+  }
+  const n0 = { host: await b.entries("host"), alpha: await h.entries("alpha") };
 
   // The first request to each origin shakes hands: the handshake is an entry, and its session a record.
   const dav = new MessageBoxClient({ host: mailbox, walletClient: h.owner });
@@ -114,22 +117,23 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   const al = new AuthFetch(h.owner);
   assert.equal((await al.fetch(`${h.origin("alpha")}/explore`, { method: "GET" })).status, 200);
   await h.router.settled();
+  await b.router.settled();
   assert.deepEqual(seen, ["host /.well-known/auth 200", "host /messagebox/listMessages 200", "alpha /.well-known/auth 200", "alpha /explore 200"]);
-  assert.equal(await h.entries("host"), n0.host + 1, "the host skein: the handshake an entry; the listing a read (none)");
+  assert.equal(await b.entries("host"), n0.host + 1, "the host skein: the handshake an entry; the listing a read (none)");
   assert.equal(await h.entries("alpha"), n0.alpha + 2, "the instance: the handshake and the explorer's request, an entry each");
-  const kd = (await h.router.hydrate("host")).kernel;
+  const kd = (await b.router.hydrate("host")).kernel;
   const s1 = await kd.call("head", "frontdoor/sessions") as CID | null;
   assert.ok(s1, "the host skein's session: a record (head `frontdoor/sessions`)");
 
   // Kill both kernels: the next request hydrates a new process over the same store; the sessions are there.
   // A killed kernel: a serve process SIGKILLed, or (the settled split) a wasm machine's worker terminated.
-  const kill = async (handle: string) => {
-    const k = (await h.router.hydrate(handle)).kernel as Kernel & { machine?: { worker: { terminate(): Promise<number> } } };
+  const kill = async (router: typeof h.router, handle: string) => {
+    const k = (await router.hydrate(handle)).kernel as Kernel & { machine?: { worker: { terminate(): Promise<number> } } };
     if (k.machine) await k.machine.worker.terminate(); else k.proc.kill("SIGKILL");
     await k.exited();
   };
-  await kill("host");
-  await kill("alpha");
+  await kill(b.router, "host");
+  await kill(h.router, "alpha");
   seen.length = 0;
   const sent = await dav.sendMessage({ recipient: h.ownerId, messageBox: "chat", body: { text: "after the restart" }, skipEncryption: true }, mailbox);
   assert.ok(sent.messageId, "send works after the restart");
@@ -140,12 +144,12 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   seen.length = 0;
   assert.equal((await al.fetch(`${h.origin("alpha")}/explore`, { method: "GET" })).status, 200, "the instance after its restart");
   assert.deepEqual(seen, ["alpha /explore 200"]);
-  const kd2 = (await h.router.hydrate("host")).kernel;
+  const kd2 = (await b.router.hydrate("host")).kernel;
   assert.notEqual(kd2, kd, "a new kernel process");
   assert.ok((await kd2.call("head", "frontdoor/sessions") as CID).equals(s1), "the same session table");
 
   // The message is kept in its step (the messagebox app's head), and its record carries its proof: the sender, the 104 signature, both nonces.
-  await h.router.settled();
+  await b.router.settled();
   const box = await kd2.call("head", "messagebox/mailbox") as CID;
   const lists = (await kd2.store.get(box) as unknown as { lists: Array<{ box: string; list: CID }> }).lists;
   const chat = await kd2.store.get(lists.find((l) => l.box === "chat")!.list) as unknown as { messages: Array<{ id: CID }> };

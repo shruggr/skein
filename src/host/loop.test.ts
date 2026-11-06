@@ -27,15 +27,18 @@ import { testHost, until } from "./testhost.ts";
 type Json = Record<string, unknown>;
 
 /** Every box a message is delivered to over the router's http (sendMessage), in order, from now on. */
-function watchBoxes(h: Awaited<ReturnType<typeof testHost>>): string[] {
+/** The boxes every sendMessage names, on this host and on the host that keeps the hosted inboxes. */
+async function watchBoxes(h: Awaited<ReturnType<typeof testHost>>): Promise<string[]> {
   const seen: string[] = [];
-  const dispatch = h.router.dispatch.bind(h.router);
-  h.router.dispatch = async (req) => {
-    if (req.method === "POST" && req.url.endsWith("/sendMessage")) {
-      try { seen.push(String((dagCbor.decode(req.body) as { message?: { messageBox?: string } }).message?.messageBox)); } catch { /* JSON: the stock client */ try { seen.push(String(JSON.parse(new TextDecoder().decode(req.body)).message?.messageBox)); } catch { /* neither */ } }
-    }
-    return await dispatch(req);
-  };
+  for (const router of [h.router, (await h.inboxHost()).router]) {
+    const dispatch = router.dispatch.bind(router);
+    router.dispatch = async (req) => {
+      if (req.method === "POST" && req.url.endsWith("/sendMessage")) {
+        try { seen.push(String((dagCbor.decode(req.body) as { message?: { messageBox?: string } }).message?.messageBox)); } catch { /* JSON: the stock client */ try { seen.push(String(JSON.parse(new TextDecoder().decode(req.body)).message?.messageBox)); } catch { /* neither */ } }
+      }
+      return await dispatch(req);
+    };
+  }
   return seen;
 }
 const answer = (message: Json) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200 });
@@ -52,7 +55,7 @@ test("the loop: infer over http to the inference peer's hosted mailbox; `message
   // #83: the chat loop is an app; the genesis has none.
   await h.install("alpha", [CHAT_APP]);
   await h.install("beta", [CHAT_APP]);
-  const boxes = watchBoxes(h);
+  const boxes = await watchBoxes(h);
   // The admin's configuration: alpha in beta's address book (the owner, through beta's `peers` box).
   await new RawBox(h.owner, `${h.base}/@beta`).send(beta, "peers", { op: "add", key: alpha, url: h.origin("alpha"), handle: "alpha", domain: "localhost" });
 
@@ -114,7 +117,7 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]);
-  const boxes = watchBoxes(h);
+  const boxes = await watchBoxes(h);
 
   const asked: Json[] = [];
   const f = (async (_u: string, init: { body: string }) => { asked.push(JSON.parse(init.body)); return answer({ content: "hello, stranger" }); }) as unknown as typeof fetch;

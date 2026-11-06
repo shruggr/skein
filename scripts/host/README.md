@@ -8,7 +8,7 @@ no funds.
 ```
 bin/skein-host run                          # the host; on its first run operator.key, master.key, host.db and the host skein
 bin/skein-host add martha                   # a row: identity derived from ~/.skein/master.key (made on first use), no wallet process
-scripts/host/up.sh                          # wallets, mailbox instances, the host on :8100, grants, address books, in that order (idempotent)
+scripts/host/up.sh                          # wallets, the host skein, the host on :8100, grants, the owner's and infer's handles, address books, in that order (idempotent)
 ```
 
 **Settings.** Every command reads `$SKEIN_HOME/host.env` (default
@@ -23,35 +23,32 @@ signs the owner's messages with it.
 
 An agent's genesis is written at its first hydration and names the owner's
 messagebox (`defaults.ownerMessagebox`) — fixed for the store's life. If the
-owner has no mailbox instance then, nothing the agent sends him (its
+host has no `SKEIN_OWNER_MESSAGEBOX` then, nothing the agent sends him (its
 answers) can ever be delivered, and only a new store (re-genesis) fixes it.
 So `up.sh` goes:
 
 1. **The client wallets** (`wallets.sh owner infer`): `owner.identity`,
    `infer.identity`.
-2. **The mailbox instances** of the owner (`david`) and of the inference peer
-   (`infer`): `skein-host add <h> --mailbox --owner <key>`, unless the key has
-   one already (whatever its handle). `~/.skein/mailbox.url` names the
-   owner's. No registration (`POST /account/register`) is needed for keys this machine
-   knows: the rows are what a registration would make.
-2b. **The host skein** (#90, #142): `skein-host init` (the first run's
+2. **The host skein** (#90, #142): `skein-host init` (the first run's
    part of `run`), once — the operator's own instance (`host`), from the
-   host image (the default image with the onboarding app, its only app),
-   its genesis naming the operator's key: its admin rows and the onboarding
-   app's routes are there at birth, no claim. The onboarding app's config comes from the
+   host image (the default image with the onboarding app and the messagebox
+   app), its genesis naming the operator's key: its admin rows and the apps'
+   routes are there at birth, no claim. The onboarding app's config comes from the
    settings (`SKEIN_HANDLE_DOMAIN`, default the domain of
    `SKEIN_ROUTER_ORIGIN`, i.e. `localhost`; the router's origin;
-   `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`). The instance manager is in its
+   `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`; every handle's messagebox, the host
+   skein's own URL + `/messagebox`). The instance manager is in its
    address book (no other instance's book names it). Run again, it only says
    which instance it is. `skein-host list` shows it as kind `host`, so the
    steps below that walk the agents leave it out. up.sh points
    `SKEIN_OPERATOR_KEY` at the dev owner's key (`~/.skein/owner-dev.key`,
-   written from `owner-wallet.env`), so the dev owner owns the host skein.
+   written from `owner-wallet.env`), so the dev owner owns the host skein,
+   and sets `SKEIN_OWNER_MESSAGEBOX` to `<host skein>/messagebox` (also
+   written to `~/.skein/mailbox.url`).
 3. **The host** (`skein-host run`, if nothing listens on :8100). It
    hydrates every enabled row, so the agents' geneses happen here, naming the
-   owner's mailbox instance (the host's default for
-   `SKEIN_OWNER_MESSAGEBOX`; `run` prints which at start, and a WARNING if
-   there is none).
+   owner's messagebox (`SKEIN_OWNER_MESSAGEBOX`; `run` prints which at
+   start, and a WARNING if there is none).
 3b. **The host skein's chain, git and site** (#152: an image carries no
    apps), as the owner's messages (`skein install <dir> --instance host`):
    the checkouts `SKEIN_CHAIN_DIR`, `SKEIN_GIT_DIR`, `SKEIN_SITE_DIR` if
@@ -63,12 +60,16 @@ So `up.sh` goes:
    sends only the head.
 4. **The grants** (`grants.sh`), toward every row's front-door key from
    `skein-host list`, now that every row exists.
+4b. **The handles** of the owner (`david`) and the inference peer (`infer`):
+   `register.ts` (their wallets sign `register <name>@<domain>` and post it
+   to `POST /account/register` over their sessions): no instance, their
+   mailboxes the host skein's messagebox app.
 5. **The address books** (#40). Into every enabled agent, through its
    `peers` box as the owner (`skein peers add <key> <origin> … --instance
-   <agent>`; see "The owner's messages" below): the owner's key and mailbox instance
-   origin (`http://david.localhost:8100`, handle `SKEIN_OWNER_HANDLE`), the
-   inference peer's (`http://infer.localhost:8100`, `SKEIN_INFER_HANDLE`)
-   and every other agent's. The inference peer's own address book, every
+   <agent>`; see "The owner's messages" below): the owner's key at the
+   hosted messagebox (`http://host.localhost:8100/messagebox`, handle
+   `SKEIN_OWNER_HANDLE`), the inference peer's (the same URL,
+   `SKEIN_INFER_HANDLE`) and every other agent's at its origin. The inference peer's own address book, every
    agent's key → origin, is written to `~/.skein/infer-peers.json`
    (bin/skein-infer reads it, again whenever it changes). Run `up.sh` again
    after adding an agent.
@@ -79,15 +80,10 @@ So `up.sh` goes:
    `#v0.1.0`). Installing what an instance already has sends only the head
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
-7. **The mailboxes adopted** (#113): step 2's mailboxes, which the host
-   skein's onboarding app (installed at its birth) did not make, are
-   recorded and certified so they resolve: `skein-host import-handles`
-   prints the owner's `onboard.adopt` request for each, and the dev owner's
-   wallet sends it. Any wallet with a session then creates a skein of its
-   own with `POST http://host.localhost:8100/onboard/call {"fn":
-   "onboard.create", "args": {"handle": "…", "claim": …}}` (docs/ARCH.md,
-   "The host skein"), and registers a handle and its mailbox at the
-   router's `POST /account/register`.
+Any wallet with a session then creates a skein of its own with `POST
+http://host.localhost:8100/onboard/call {"fn": "onboard.create", "args":
+{"handle": "…", "claim": …}}` (docs/ARCH.md, "The host skein"), and
+registers a handle at the router's `POST /account/register`.
 
 Steps 5–6 are the owner's messages, signed by `bin/skein` with the dev
 owner's key (`SKEIN_OPERATOR_KEY=~/.skein/owner-dev.key`) and handed to the
@@ -104,7 +100,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 | host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600 | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the signer (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
-| inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
+| inference peer `bin/skein-infer` | — | polls its mailbox (`SKEIN_MAILBOX_URL`: the hosted messagebox, e.g. `http://host.localhost:8100/messagebox`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
 
 Instances need no wallet and no grants: the host's signer signs for them.
 The scripts of the layout before #33 (an instance wallet on 3321, a host
@@ -141,16 +137,16 @@ ledger [handle]`).
 The host's own endpoints. The BRC-169 rows are the host skein's onboarding
 app's (#113): the router maps these paths at its own origin onto the host
 skein's `/onboard/…` routes, each request an entry there; with no host
-skein they are 404 (docs/MESSAGES.md, "Mailbox instances", "BRC-169 is
+skein they are 404 (docs/MESSAGES.md, "Registering a handle", "BRC-169 is
 discovery").
 
 | | |
 |---|---|
 | `GET /manifest.json` | BRC-169 §5.1: `metanet.trust` (`name`, `note`, `icon` from the app's config when set; `publicKey`, the certifier key), `metanet.handles` (`version`, `resolve`, `search` under the app's configured origin) |
-| `GET /.well-known/metanet-handles/resolve?handle=<h>[@<d>]` | BRC-169 §5.2 `{metanetHandles, handle, domain, identityKey, certificate, messagebox, ttl, revoked}` from the app's record of the handle: a mailbox instance's owner's key and the instance's origin, an onboarded skein's own identity; `certificate` as the certifier signed it (revocation not implemented: the host has no wallet); with the holder's signed profile (#104, kept by the app) also `profile {record, signature, protocolID, keyID}`, `displayName`, `avatarURL` |
+| `GET /.well-known/metanet-handles/resolve?handle=<h>[@<d>]` | BRC-169 §5.2 `{metanetHandles, handle, domain, identityKey, certificate, messagebox, ttl, revoked}` from the app's record of the handle: a registered wallet's key and the hosted messagebox (`<host skein>/messagebox`), an onboarded skein's own identity and origin; `certificate` as the certifier signed it (revocation not implemented: the host has no wallet); with the holder's signed profile (#104, kept by the app) also `profile {record, signature, protocolID, keyID}`, `displayName`, `avatarURL` |
 | `GET /.well-known/metanet-handles/search?q=<text>&limit=<n>` | BRC-169 §5.6 (#104) `{metanetHandles, results: [{handle, identityKey, displayName?, avatarURL?, profile?}], truncated}`: the app's handles whose handle or profile name contains `q` (any case), at most `limit` (default 20, at most 100) |
 | `GET /bsvalias/id/<handle>[@<domain>]` | paymail PKI (identity keys by handle, from the app's records) |
-| `POST /account/register {username, identityKey, signature}` | over the identity's BRC-104 session with the host's origin (#135: a signed request; `identityKey` the session's): a mailbox instance for that identity at the handle domain (the app's `config.onboard.domain`): the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username (a host name label), counterparty anyone, over `register <username>@<domain>` → `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}`, the handle certificate for the wallet's `acquireCertificate` (#103); the same key and name again, a new certificate (a new serial) for the same mailbox; 409 if the name is taken, reserved (`id`, `host`) or the key has another |
+| `POST /account/register {username, identityKey, signature}` | over the identity's BRC-104 session with the host's origin (#135: a signed request; `identityKey` the session's): the handle for that identity at the handle domain (no instance: its messagebox the host skein's messagebox app) (the app's `config.onboard.domain`): the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username (a host name label), counterparty anyone, over `register <username>@<domain>` → `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}`, the handle certificate for the wallet's `acquireCertificate` (#103); the same key and name again, a new certificate (a new serial) for the same mailbox; 409 if the name is taken, reserved (`id`, `host`) or the key has another |
 | `POST /account/profile {handle, record, signature}` | the handle holder's signed profile (#104), kept by the app and served with resolve and search |
 | `GET /.well-known/skein-host` | at every host name, an instance's origin too: `{origin, domain}` — the router's origin and the handle domain, where the management page finds the manifest and the register route (#103) |
 | `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |
@@ -197,21 +193,15 @@ step's line in host.log: `stderr: loop: could not deliver the answer: … no
 route to <key>: not in the address book`. `up.sh` writes the owner, the
 inference peer and every other agent.
 
-**Mailbox instances.** A person or peer outside the host gets a mailbox: an
-instance of its own with only the front door and the messagebox, keeping
-every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
---mailbox --owner <key>` makes one; so does a signed registration
-(`POST /account/register`: the front end's Register, for a key this machine does not
-know; #113: the host skein's onboarding app takes it and asks the instance
-manager, whose `create` with image `mailbox` is the one creation path —
-`add --mailbox` calls it too). `up.sh` makes `david`'s and `infer`'s with `add`, then
-adopts them into the app (`skein-host import-handles` prints the owner's
-`onboard.adopt` request for each; the owner's wallet sends it). `skein-host mailboxes` lists them (whose, the key their front door signs
-sessions with, and where); `skein-host list` prints that key for every row
-(its fifth column), which is what `grants.sh` grants toward. The
-owner's is where every instance delivers what it sends him: a new genesis
-names it (`defaults.ownerMessagebox`: `SKEIN_OWNER_MESSAGEBOX`, else the
-owner's mailbox instance here), the one peer a genesis names.
+**Hosted mailboxes.** A person or peer outside the host gets a mailbox by
+registering a handle (`POST /account/register`, signed: the front end's
+Register, or `register.ts`): the host skein's onboarding app certifies it and
+the host skein's messagebox app keeps its mail, at `<host skein>/messagebox`
+(docs/MESSAGES.md, "The messagebox"). `skein-host list` prints every row's
+front-door key (its fifth column), which is what `grants.sh` grants toward.
+The owner's mailbox is where every instance delivers what it sends him: a new
+genesis names it (`defaults.ownerMessagebox`: `SKEIN_OWNER_MESSAGEBOX`), the
+one peer a genesis names.
 
 Files:
 
@@ -219,8 +209,8 @@ Files:
 - `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322). `bin/skein-host` reads `owner.identity` into `SKEIN_OWNER` and `infer.identity` into `SKEIN_INFER`, unless they are set, for `run`, `add` (so `add --boot`/`--packet` needs no `SKEIN_OWNER` by hand), `event` and `init`.
 - `~/.skein/host.sock` — the running host's control socket (0600; there only while `run` is up): `skein-host event` sends through it.
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
-- `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
-- `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
+- `~/.skein/mailbox.url` — the owner's mailbox, the hosted messagebox `http://host.localhost:8100/messagebox` (`up.sh`): where `bin/skein` reads.
+- `~/.skein/host.db` — the instances (identity → store) and the fuel ledger (`skein-host list`, `skein-host ledger`).
 
 Sessions are state (#68): a handshake is a request like any other, and
 the front door's step on it writes the session under the instance's head
@@ -368,8 +358,7 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 |---|---|
 | `handle` | primary key; the genesis's `handle` and the front door's host name, e.g. `martha` |
 | `domain` | default `localhost` |
-| `kind` | `agent`, or `mailbox` (a mailbox instance, #40: the front door and the messagebox, keeping mail for `owner`) |
-| `owner` | a mailbox instance's: the identity (hex) whose mailbox it is |
+| `kind`, `owner` | only in files made before 0.3.0 (mailbox instances): nothing reads them, and new files lack them |
 | `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the signer's, BRC-42 child, key ID the handle) |
 | `wallet_url`, `wallet_originator` | only in files made before #33: nothing reads them, and new files lack them |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
@@ -381,14 +370,12 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 
 ```
 bin/skein-host add <handle> [--domain d] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-bin/skein-host add <handle> --mailbox --owner <hex>   # a mailbox instance for an identity outside the host
 bin/skein-host knows <handle> [a,b | --all | --none]   # who its ROSTER.md lists; no list: print it
-bin/skein-host list | mailboxes | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store
+bin/skein-host list | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store
 bin/skein-host run                    # the host, the host page and roster
 bin/skein-host roster                 # the roster JSON, printed
 bin/skein-host roster --for <handle>  # that agent's ROSTER.md, printed
 bin/skein-host peers <handle> list    # its address book, from its store
-bin/skein-host import-handles         # the mailboxes the onboarding app has no record of, each with the owner's adopt request
 ```
 
 ### Running them: `skein-host run`
@@ -588,7 +575,7 @@ bin/skein install|dispatch|… <where>               # the owner's admin message
 - Where: raw BRC-33 on a BRC-104 session (#40). It sends to the instance's
   front door, `SKEIN_INSTANCE_URL` (default `$SKEIN_HOST_URL/@<handle>`,
   `SKEIN_HOST_URL` default `http://127.0.0.1:8100`), and reads David's
-  mailbox instance, `SKEIN_MAILBOX_URL`, else `~/.skein/mailbox.url`, else
+  mailbox, `SKEIN_MAILBOX_URL`, else `~/.skein/mailbox.url`, else
   `$SKEIN_HOST_URL/@david`.
 - Boxes: `objects` (bundles `{records: [{cid, bytes}]}`, dag-cbor, ≤ 1 MiB;
   blobs first, the root tree last), `run` (`{cmd, tree: CID, cwd?, env?}`;
@@ -717,10 +704,10 @@ where they use one. Unset means the default.
 | `SKEIN_KERNEL_BIN` | the kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
 | `SKEIN_FUEL_PER_STEP` | a new genesis's `fuelPerStep` |
 | `SKEIN_OWNER`, `SKEIN_OWNER_HANDLE` | a new code genesis's owner key and its handle (default `david@localhost`); bin/skein-host fills the key from `owner.identity` |
-| `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (default: the owner's mailbox instance here) |
+| `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (unset: none; `up.sh`: the host skein's `<origin>/messagebox`) |
 | `SKEIN_NETWORK` | the network the whole host runs on: `main`, `test` or `regtest` (default `main`; any other value: `skein-host` refuses to start; `run` prints it). Every genesis the host makes has it as `defaults.walletNetwork`, under a tree's own config; the chain app takes its network from that default, so `SKEIN_HEADERS_URL` must feed this network's headers or the chain app refuses them |
 | `SKEIN_INFER`, `SKEIN_INFER_HANDLE` | a new code genesis's inference peer key and handle (default `infer@localhost`); bin/skein-host fills the key from `infer.identity` |
-| `SKEIN_HOST_URL` | where `event` and `import-handles` find the running host (default `http://127.0.0.1:8100`) |
+| `SKEIN_HOST_URL` | where `event` finds the running host (default `http://127.0.0.1:8100`) |
 | `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above) |
 | `SKEIN_HEADERS_URL` | the host's headers feed (#102) |
 | `SKEIN_BILLING` | `off`: the host bills no one (#130, "Billing" above); else it bills a skein whose host row names its billing key |
@@ -749,7 +736,7 @@ where they use one. Unset means the default.
 | variable | what |
 |---|---|
 | `SKEIN_INSTANCE_IDENTITY`, `SKEIN_INSTANCE_HANDLE`, `SKEIN_INSTANCE_URL` | the client's instance: its key (default `$SKEIN_HOME/instance.identity`), `handle@domain`, its URL |
-| `SKEIN_MAILBOX_URL`, `SKEIN_MAILBOX_HANDLE` | the client's (or the inference peer's) mailbox instance; the handle when no URL is set (default `david`) |
+| `SKEIN_MAILBOX_URL`, `SKEIN_MAILBOX_HANDLE` | the client's (or the inference peer's) mailbox; the handle when no URL is set (default `david`) |
 | `SKEIN_INFER_WALLET_URL` | the inference peer's wallet (default `http://127.0.0.1:3323`) |
 | `SKEIN_INFER_PEERS`, `SKEIN_INFER_PROVIDERS` | its address book and provider map files |
 | `SKEIN_INFER_CACHE`, `SKEIN_INFER_NODES` | its conversation graph on disk, and how many nodes it keeps in memory |

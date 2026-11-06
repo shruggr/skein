@@ -2,7 +2,7 @@
 // "Everything outside is a peer"; docs/MESSAGES.md). It speaks raw BRC-33 on a
 // BRC-104 session (#40, raw.ts): a message is sent to the instance's own front
 // door (its URL: the instance is an HTTP server), and David's boxes are read
-// from his mailbox — the mailbox instance the instance delivers to (the one
+// from his mailbox — the messagebox the instance delivers to (the one
 // peer its genesis names, etc/config.json `owner.messagebox`). No envelope: the
 // session proves who sends; a message's id is its record's CID, which a reply's
 // `replyTo` names.

@@ -4,8 +4,11 @@
 // host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
 // skein with the onboarding app and the messagebox app installed, which then
 // answers them. A key outside the host (the owner, the inference peer, a
-// caller) reads its mail as any wallet does: registered there as a handle
-// (`inbox`), at the messagebox URL its handle resolves to.
+// caller) reads its mail as any wallet does: registered as a handle at a host
+// skein — a second test host's (`inbox`: host B, so this host keeps its own
+// fake discovery) — at the messagebox URL its handle resolves to; this host's
+// fake discovery answers that handle with that URL, as a registrar answers a
+// handle whose messagebox is elsewhere.
 
 import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -24,7 +27,7 @@ import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from ".
 import { fakeDiscovery } from "./fake-discovery.ts";
 import { imageSource } from "./boot.ts";
 import { HostDb } from "./instances.ts";
-import { REGISTER_PROTOCOL, Router, type SignedClaim } from "./router.ts";
+import { fetchHttp, REGISTER_PROTOCOL, Router, type SignedClaim } from "./router.ts";
 import { Signer } from "./signer.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -67,6 +70,9 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
   return out;
 }
 
+/** What a test needs of host B (testHost's `inboxHost`): its router and rows, its entries, its registrations. */
+export interface InboxHost { base: string; db: HostDb; router: Router; origin(handle: string): string; entries(handle: string): Promise<number>; register(key: PrivateKey, handle: string): Promise<string> }
+
 /** A host with instances, each instance's key its own (the signer's stand-in). */
 export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
@@ -84,9 +90,19 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
   const providerMaster = PrivateKey.fromRandom();
+  // The hosted inboxes (inbox): host B, made on first use; the handles this host's fake discovery answers with B's messagebox.
+  let b: InboxHost | undefined;
+  const elsewhere = new Map<string, { identityKey: string; messagebox: string }>();
+  // This host's http beyond its own (the router's default, SKEIN_HTTP), and host B's URLs for real: deliveries to the hosted inboxes.
+  const http = o.http ?? (async (req: Parameters<NonNullable<Router["o"]["http"]>>[0]) => {
+    let toB = false;
+    try { toB = !!b && new URL(req.url).port === String(b.router.port); } catch { /* not a URL: not B's */ }
+    if (toB || process.env.SKEIN_HTTP === "fetch") return await fetchHttp(req);
+    throw new Error(`this host answers no http beyond its own (${req.url})`);
+  });
   const router = new Router({
     db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
-    idleMs: o.idleMs ?? 0, http: o.http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
+    idleMs: o.idleMs ?? 0, http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
     // A broadcaster (#58, #65): its Arcade, and so a `status` provider.
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // The host's headers feed (#102).
@@ -100,7 +116,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     // The settled split: the wasm kernel over the host's one SQLite database (SKEIN_TEST_STORE=sqlite: every test host so).
     ...(sqlite ? { sqliteStore: join(home, "store.sqlite") } : {}),
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
-    discovery: fakeDiscovery(db, () => router),
+    discovery: fakeDiscovery(db, () => router, elsewhere),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
     providerKeyFor: (name) => new Signer(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
@@ -111,7 +127,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const h = {
     home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
     /**
-     * An instance's row (host.db kind `agent`: not a mailbox instance), its
+     * An instance's row, its
      * genesis at first hydration (the owner's mailbox must exist first to be
      * named in it). Its identity key (hex).
      */
@@ -143,18 +159,33 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
       return c;
     },
     /**
-     * A key's hosted inbox: the host skein made if it is not yet (hostSkein), `key` registered there as
-     * `handle` — the registration a wallet makes (POST /account/register over its session, signed over
-     * `register <handle>@localhost`) — and its messagebox URL, what the handle resolves to (the host
-     * skein's messagebox app, `<host skein>/messagebox`). Read it with RawBox at that URL.
+     * `key` registered as `handle` at this host's host skein (made if it is not yet: hostSkein) — the
+     * registration a wallet makes (POST /account/register over its session, signed over `register
+     * <handle>@localhost`) — and its messagebox URL, what the handle resolves to (the host skein's
+     * messagebox app, `<host skein>/messagebox`).
      */
-    async inbox(key: PrivateKey, handle: string): Promise<string> {
+    async register(key: PrivateKey, handle: string): Promise<string> {
       if (!db.hostSkein()) await h.hostSkein();
       const { signature } = await new ProtoWallet(key).createSignature({ protocolID: REGISTER_PROTOCOL, keyID: handle, counterparty: "anyone", data: Utils.toArray(`register ${handle}@localhost`, "utf8") });
       const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: handle, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
       const a = await r.json() as { messagebox?: string; error?: string };
       if (r.status !== 200 || !a.messagebox) throw new Error(`register ${handle}: HTTP ${r.status} ${a.error ?? ""}`);
       return a.messagebox;
+    },
+    /** Host B (a second test host, the same store kind), the hosted inboxes' — made on first use. */
+    async inboxHost(): Promise<InboxHost> {
+      b ??= await testHost(t, { sqlite, ...(o.rocks ? { rocks: true } : {}), ...(o.lmdb ? { lmdb: true } : {}) });
+      return b;
+    },
+    /**
+     * A key's hosted inbox: `key` registered as `handle` at host B's host skein (B.register), this
+     * host's fake discovery answering `handle` with that messagebox URL (the handle's messagebox is
+     * elsewhere). Its URL; read it with RawBox there.
+     */
+    async inbox(key: PrivateKey, handle: string): Promise<string> {
+      const url = await (await h.inboxHost()).register(key, handle);
+      elsewhere.set(handle, { identityKey: key.toPublicKey().toString(), messagebox: url });
+      return url;
     },
     /**
      * The owner's hosted inbox (`inbox` with the owner's key, as `handle`), and the owner's messagebox

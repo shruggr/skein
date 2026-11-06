@@ -25,8 +25,8 @@
 //
 // Providers come from ~/.skein/infer.json: {"ripper": {"baseUrl": "http://…/v1", "apiKey": "…"}}.
 //
-// Two transports. Since #40 (`raw`): its mailbox is a mailbox instance at its
-// own origin, and it speaks raw BRC-33 on BRC-104 sessions — it lists its
+// Two transports. Since #40 (`raw`): its mailbox is a messagebox (its handle's,
+// at a host skein's messagebox app), and it speaks raw BRC-33 on BRC-104 sessions — it lists its
 // `infer` box there (a request's id is its messageId: the record the instance
 // keeps; the sender is the session's identity), and answers in the sender's
 // `completions` at the sender's own messagebox. Where that is comes from its
@@ -59,7 +59,7 @@ export interface MessageBox {
 
 /** The raw transport (#40): its own mailbox, a session per peer messagebox, its address book. */
 export interface RawTransport {
-  /** Its mailbox instance (a RawBox). */
+  /** Its mailbox (a RawBox at its messagebox URL). */
   inbox: { list(box: string): Promise<RawListed[]>; ack(ids: string[]): Promise<void> };
   /** A session with the messagebox at `url` (a RawBox). */
   outbox(url: string): { send(recipient: string, box: string, body: unknown): Promise<unknown> };
