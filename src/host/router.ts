@@ -275,7 +275,8 @@ export interface RouterOptions {
    */
   appEvent?(handle: string, record: Record<string, unknown>): void;
   /**
-   * An application host's reads (shruggr/open-exchange 0.11.0, the public read API): a GET for an
+   * An application host's requests (shruggr/open-exchange 0.11.0, the public read API; every method
+   * since 0.3.2, so the hook checks `req.method` itself): a request for an
    * instance (its hostname, `/@<handle>/`, or the root instance's hostname), asked AFTER the host's own
    * reads there (the instance card, `/<app>/.live/<topic>`) and BEFORE the request is forwarded to the
    * instance's program. `route` is the path at the instance (`/amm/pools`); `undefined`: not the host's,
@@ -303,7 +304,15 @@ interface Loaded {
 }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
-export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array; /** The instance whose `http` this is (none for a socket's). */ from?: string }
+export interface RouterRequest {
+  method: string; url: string; headers: Record<string, string>; body: Uint8Array;
+  /** The instance whose `http` this is (none for a socket's). */ from?: string;
+  /**
+   * 0.3.2: on a socket's request (Router.handler), aborted when the client's connection closes
+   * before the answer is written; never fired after the answer. In process: none.
+   */
+  signal?: AbortSignal;
+}
 export interface RouterResponse {
   status: number; headers: Record<string, string>; body: Uint8Array;
   /**
@@ -2181,8 +2190,8 @@ export class Router {
       if (live) return await this.held(this.liveRead(x.handle, x.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
       // #148: a stream, served on a socket only (handler).
       if (req.method === "GET" && EVENTS_ROUTE.test(x.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
-      // An application host's own reads (appRead): before the instance's program; undefined falls through.
-      if (req.method === "GET" && this.o.appRead) {
+      // An application host's own requests (appRead, every method since 0.3.2): before the instance's program; undefined falls through.
+      if (this.o.appRead) {
         const a = await this.o.appRead(x.handle, x.route, url, req);
         if (a) return a;
       }
@@ -2373,11 +2382,15 @@ export class Router {
         const m = t ? EVENTS_ROUTE.exec(t.route) : null;
         if (t && m) { void this.eventStream(t.handle, t.route, decodeURIComponent(m[1]!), url, req, res, cors); return; }
       }
+      // 0.3.2: the client's connection closing before the answer is written (the response's `close`
+      // with nothing ended: the request's own `close` also fires once its body is read) aborts req.signal.
+      const gone = new AbortController();
+      res.on("close", () => { if (!res.writableEnded) gone.abort(new Error("the client closed the connection")); });
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
         const url = `http://${req.headers.host ?? `127.0.0.1:${this.port}`}${req.url ?? "/"}`;
-        this.dispatch({ method: req.method ?? "GET", url, headers: headerMap(req.headers), body: new Uint8Array(Buffer.concat(chunks)) })
+        this.dispatch({ method: req.method ?? "GET", url, headers: headerMap(req.headers), body: new Uint8Array(Buffer.concat(chunks)), signal: gone.signal })
           .then((r) => {
             if (!r.stream) { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); return; }
             // A response held open (an appRead's event stream): written as it comes, until either side ends it.

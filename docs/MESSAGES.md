@@ -1581,7 +1581,9 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
 - **An application host's reads** (open-exchange 0.11.0). A host built on
   the Router as a library (its `appEvent` takes the events no stock wiring
   takes, #164) may also answer GETs at an instance itself: the Router option
-  `appRead(handle, route, url, req)` is asked for every GET at an instance
+  `appRead(handle, route, url, req)` is asked for every request at an instance
+  (every method since 0.3.2: it reads `req.method` itself; `req.signal`
+  aborts when the client's connection closes before the answer is written)
   (its hostname, `/@<handle>/`, or the root instance's hostname) after the
   host's own reads there (the instance card, `/<app>/.live/<topic>`) and
   before the request goes to the instance's program; it answers a response
