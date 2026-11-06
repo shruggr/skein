@@ -613,6 +613,7 @@ export class Router {
           dial: (h: string, peer: string, protocol: string, frames: Parameters<P2PHost["dial"]>[3]) => p2p.dial(h, peer, protocol, frames),
           send: (h: string, s: number, body: Uint8Array) => p2p.send(h, s, body),
           close: (h: string, s: number) => p2p.close(h, s),
+          call: (h: string, peer: string, protocol: string, body: Uint8Array) => p2p.call(h, peer, protocol, body),
         },
       } : {}),
       now: () => stampMs(this.now()),
@@ -875,7 +876,9 @@ export class Router {
    * on, once it comes to rest (#66). The front door verifies, routes, and
    * admits what an accept carries (the message's `p2p` event first); a
    * redelivered message it accepted before is `ignore`. Its thread failing,
-   * or not answering within the wait, is `ignore` (no penalty). A frame a
+   * or (a topic message) not answering within the wait, is `ignore` (no
+   * penalty); a stream frame's answer is waited for until its thread rests,
+   * however long (the stream stays open; nothing late is dropped). A frame a
    * route's filter answers at the door (a read, #143: nothing written) is
    * answered with the filter's body (#154: the overlay's sync protocol).
    */
@@ -914,7 +917,11 @@ export class Router {
       this.say(handle, `${source} from ${from}: ${verdict} (turned away at the door: ${reason})`);
       return { verdict, reason };
     }
-    const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
+    let a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
+    // A stream frame's answer is written whenever its thread rests (the swap relay's call, 2026-11-06):
+    // the stream is open the whole time, so the wait is waited again, never answered "ignore" and the
+    // late answer dropped. A topic message keeps the bound (GossipSub waits on its verdict).
+    while (call.topic === undefined && a.state !== "finished" && a.state !== "errored" && !this.stopped) a = await (await this.hydrate(handle)).kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
     this.settle(l);
     if (a.state !== "finished") {
       const why = a.state === "errored" ? `the front door failed: ${a.error}` : `not answered in time (${a.state})`;
@@ -1197,7 +1204,9 @@ export class Router {
       g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
-      await kernel.start();
+      // What the start hands over is its re-offer (providers.ts `starting`: a `call` no longer carried is answered so).
+      this.providers.starting(handle, true);
+      try { await kernel.start(); } finally { this.providers.starting(handle, false); }
       // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
       await this.chainBootstrap(handle, kernel);
       // #156: a serve kernel's own host chain still empty (born before the image held a chain): from the image chain now.

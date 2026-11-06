@@ -16,6 +16,10 @@
 //!                                          dial again (a frame read from the stream arrives as a
 //!                                          reply to the dial, in box `frame`: {stream, body}); the
 //!                                          frame → emit close {stream} → stdout "reply <text>"
+//!   {op: "call", peer, protocol, text}     emit the intention call {peer, protocol, body: text}
+//!                                          → await it; its answer (box `call`) {from, body} →
+//!                                          stdout "called <body> from <from hex>", {error} →
+//!                                          stdout "call error <error>" (the thread finishes)
 //!   Between steps the thread's state is its last stdout line:
 //!     "dial <dial cid hex> <text>"   waiting on the dial's answer
 //!     "stream <id> <dial cid hex>"   waiting on the frame (the send's answer, if it comes first, rests again)
@@ -23,6 +27,8 @@
 //!   topic    {transport, topic, from, key, seqno, signature, body} → {verdict}: a body
 //!            starting "bad" is reject, "skip" ignore, anything else accept
 //!   stream   {transport, protocol, from, key, body} → {body: "echo: " ‖ body}; "bye" closes
+//!   slow     body "slow <ms>": the first call sets a deadline at <ms> (epoch) and answers
+//!            {wait: true}; called again on the wake → {body: "slow: " ‖ body}
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -70,12 +76,28 @@ fn run(a: Allocator) !void {
             try m.put("verdict", cbor.string("accept"));
             try m.put("body", .{ .bytes = try std.fmt.allocPrint(a, "echo: {s}", .{body}) });
             if (eql(u8, body, "bye")) try m.put("close", .{ .bool = true });
-        } else return sk.report("unknown fn (topic, stream)");
+        } else if (eql(u8, func, "slow")) {
+            if (arg.get("woke") == null) {
+                const at = std.fmt.parseInt(i64, std.mem.trim(u8, body["slow ".len..], " "), 10) catch return sk.report("slow: want \"slow <ms>\"");
+                try sk.deadline(at);
+                try m.put("wait", .{ .bool = true });
+            } else {
+                try m.put("verdict", cbor.string("accept"));
+                try m.put("body", .{ .bytes = try std.fmt.allocPrint(a, "slow: {s}", .{body}) });
+            }
+        } else return sk.report("unknown fn (topic, stream, slow)");
         return sk.answer(a, m.value());
     }
 
     // A later step: the provider's answer, read with the state the last step left on stdout.
     if (try sk.replyOf(a, in)) |r| {
+        // The `call` intention's answer: the libp2p provider's {from, body} | {error}.
+        if (eql(u8, r.box, "call")) {
+            if (Value.str(r.body.get("error"))) |e| return out(try std.fmt.allocPrint(a, "call error {s}\n", .{e}));
+            const b = Value.bytesOf(r.body.get("body")) orelse return sk.report("call: no body");
+            const from = Value.bytesOf(r.body.get("from")) orelse return sk.report("call: no from");
+            return out(try std.fmt.allocPrint(a, "called {s} from {s}\n", .{ b, try sk.hex(a, from) }));
+        }
         const tip = Value.cidOf(in.get("tip")) orelse return sk.report("an answer, and no step before it");
         const u = try sk.get(a, tip);
         const res = u.get("result") orelse return sk.report("the tip has no result");
@@ -128,5 +150,13 @@ fn run(a: Allocator) !void {
         const dial = try ask(a, "dial", try map(a, &.{ .{ .key = "peer", .value = cbor.string(peer) }, .{ .key = "protocol", .value = cbor.string(protocol) } }));
         return out(try std.fmt.allocPrint(a, "dial {s} {s}\n", .{ try sk.hex(a, dial), text }));
     }
-    return sk.report("unknown op (publish, echo)");
+    if (eql(u8, op, "call")) {
+        const peer = Value.str(body.get("peer")) orelse return sk.report("call: no peer");
+        const protocol = Value.str(body.get("protocol")) orelse return sk.report("call: no protocol");
+        const ev = try cbor.encode(a, try map(a, &.{ .{ .key = "event", .value = cbor.string("call") }, .{ .key = "peer", .value = cbor.string(peer) }, .{ .key = "protocol", .value = cbor.string(protocol) }, .{ .key = "body", .value = .{ .bytes = text } } }));
+        const id = try sk.result(a, sk.raw.emit, .{ ev.ptr, @as(u32, @intCast(ev.len)) });
+        try sk.awaitRecord(id);
+        return out(try std.fmt.allocPrint(a, "call {s}\n", .{try sk.hex(a, id)}));
+    }
+    return sk.report("unknown op (publish, echo, call)");
 }
