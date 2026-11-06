@@ -42,7 +42,7 @@ export const CHAT_APP: PinnedApp = {
 /** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration (0.5.0: no instance, the handle's messagebox the configured one), BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "83feca56c255344cdac17d756a9e257e3acb3f68", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "f8a74a14794c8f77f9f26f3cd87cf7be9d7d3993", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
 /** shruggr/skein-messagebox: the hosted BRC-33 messagebox, installed in the host skein beside onboard: one mailbox per key onboard records (config.messagebox.index), under /messagebox/ (0.1.0). */

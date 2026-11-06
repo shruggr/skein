@@ -242,8 +242,8 @@ test("#142, #152: the host image (images/host over images/default) names skein-o
   const src = anyOf(merged, base.objects, own.objects);
   const s = await readSystemTree(src, await mergeImages(src, base.root, own.root, merged));
   assert.deepEqual(s.apps?.install, [
-    { url: "https://github.com/shruggr/skein-onboard/archive/83feca56c255344cdac17d756a9e257e3acb3f68.tar.gz", hash: "7f0c8010df4b57f319689f44d6b8b7f0cc23627c" },
-    { url: "https://github.com/shruggr/skein-messagebox/archive/8acc6e82c376fe7eb923d3fa18762d7c14d33469.tar.gz", hash: "a309121acb9a050a0d7c61ab7d65df24f2d1ab26" },
+    { url: "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.5.0.tar.gz", hash: "7f0c8010df4b57f319689f44d6b8b7f0cc23627c" },
+    { url: "https://github.com/shruggr/skein-messagebox/archive/refs/tags/v0.1.0.tar.gz", hash: "a309121acb9a050a0d7c61ab7d65df24f2d1ab26" },
   ]);
   assert.equal(s.apps?.routes, undefined, "no root route");
 });
