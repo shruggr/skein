@@ -22,7 +22,7 @@ gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. (There are no
-mailbox instances since 0.3.0: a wallet's mail is kept by the host skein's
+mailbox instances since 0.4.0: a wallet's mail is kept by the host skein's
 messagebox app, docs/MESSAGES.md "The messagebox".) **Every genesis that names an owner carries the owner's four admin
 rows** first (the kernel's `objects`, `head`, `dispatch`, `peers`
 operations): a bare genesis is the four tables and those rows; a bundle adds
@@ -98,12 +98,14 @@ the image's.
 
 The host skein is made from the **host image**: `images/host` merged over
 `images/default`. Images are starting trees that merge: `images/host` holds
-only what it adds — `etc/apps.json` naming shruggr/skein-onboard v0.4.0 by
-its release tarball:
+only what it adds — `etc/apps.json` naming shruggr/skein-onboard v0.5.0 and
+shruggr/skein-messagebox v0.1.0 by their release tarballs:
 
 ```json
-{ "install": [{ "url": "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.4.0.tar.gz",
-                "hash": "ba29f99adb0d2d1849aa7f0cf72ceeefde88c5ae" }] }
+{ "install": [{ "url": "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.5.0.tar.gz",
+                "hash": "7f0c8010df4b57f319689f44d6b8b7f0cc23627c" },
+              { "url": "https://github.com/shruggr/skein-messagebox/archive/refs/tags/v0.1.0.tar.gz",
+                "hash": "a309121acb9a050a0d7c61ab7d65df24f2d1ab26" }] }
 ```
 
 The merge (src/host/boot.ts `mergeImages`) adds every path of the host part
@@ -714,8 +716,8 @@ boot is written, and the process exits 0.
   same CIDs as an install by messages over the same tree; a tarball whose
   tree is not its hash, a missing tarball, a directory beside an image read
   from its tree alone and an app with a `start` refused; the host image
-  naming skein-onboard v0.4.0 by tarball; `skein-host add --image host`
-  booting unclaimed with the onboarding app, `--image default` with no app,
+  naming skein-onboard v0.5.0 and skein-messagebox v0.1.0 by tarball; `skein-host add --image host`
+  booting unclaimed with the onboarding app and the messagebox app, `--image default` with no app,
   another name refused.
 - `src/host/image-chain.test.ts` and `src/host/feeds.test.ts` (#141): the
   backfill — a skein whose tip lags the image's gets the headers it lacks,

@@ -7,7 +7,7 @@
 // A row is an instance with its own identity (#40). Mail for identities
 // outside the host is kept by a messagebox app (shruggr/skein-messagebox, in
 // the host skein: one mailbox per registered key), not by an instance per
-// identity: since 0.3.0 there are no mailbox instances (files made before keep
+// identity: since 0.4.0 there are no mailbox instances (files made before keep
 // their `kind` and `owner` columns, unread). Beside the rows, the **fuel ledger**: what
 // each caller's calls (#40: the front door's reads, which the log never sees)
 // cost, per instance and op. And the broadcaster's three (#58, #65, arc.ts):

@@ -562,7 +562,7 @@ sent to it, which the receiving skein could not verify. There is no mailbox
 pull path into a skein: the browser page reads its identity's mailbox with
 its wallet and shows what is there, and if the user wants their instance to
 act on something, the user sends the instance a message of their own, on
-their own session with it. (Before 0.3.0 a wallet's mail was kept by a
+their own session with it. (Before 0.4.0 a wallet's mail was kept by a
 **mailbox instance** per key; there are none now.)
 
 ## Registering a handle
