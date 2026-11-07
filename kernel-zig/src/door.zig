@@ -24,9 +24,10 @@
 //                   over the BEEF alone — every BUMP's root the header's at its
 //                   height in the chain app's state (the head `chain/state`,
 //                   read only), every transaction no BUMP proves spending only
-//                   transactions before it in the BEEF with its scripts
-//                   verified, no txid-only entry (nothing is known beside the
-//                   BEEF). Any error is a rejection (400 ERR_BEEF, the error's
+//                   transactions before it in the BEEF (or held) with its
+//                   scripts verified, a txid-only entry only for a transaction
+//                   the instance HOLDS (chain/state's `txs`, not rejected:
+//                   proven when it entered; 2026-11-07). Any error is a rejection (400 ERR_BEEF, the error's
 //                   name first), as is no chain state. Then each transaction is
 //                   stored as its `bitcoin-tx` block, each BUMP as the raw block
 //                   of its bytes and the merkle nodes it reveals; and the bytes
@@ -70,6 +71,10 @@ pub const BEEF = "kernel.beef";
 pub const Headers = struct {
     s: Store,
     root: ?[]const u8,
+    /// The chain state's `txs` (txid → its bitcoin-tx block) and `rejected` (txid → its settlement
+    /// record) maps: what the instance HOLDS, the one thing a BEEF may name by txid alone.
+    txs: ?[]const u8 = null,
+    rejected: ?[]const u8 = null,
     forest: mst.Forest,
 
     fn blockGet(ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8 {
@@ -85,9 +90,19 @@ pub const Headers = struct {
         if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", "chain-state")) return null;
         const maps = v.get("maps") orelse return null;
         const h = try a.create(Headers);
-        h.* = .{ .s = s, .root = Value.cidOf(maps.get("headers")), .forest = undefined };
+        h.* = .{ .s = s, .root = Value.cidOf(maps.get("headers")), .txs = Value.cidOf(maps.get("txs")), .rejected = Value.cidOf(maps.get("rejected")), .forest = undefined };
         h.forest = mst.Forest.init(a, .{ .ctx = h, .get = blockGet });
         return h;
+    }
+
+    /// A transaction the instance holds — the chain state holds it (proven, or unproven) and it is not
+    /// rejected — its raw bytes; null otherwise. The door's `knownRaw` (2026-11-07): a BEEF may name
+    /// such a transaction by txid alone; the instance proved it when it entered.
+    pub fn held(h: *Headers, a: std.mem.Allocator, txid: [32]u8) !?[]const u8 {
+        const v = (try h.forest.get(a, h.txs, &txid)) orelse return null;
+        if ((try h.forest.get(a, h.rejected, &txid)) != null) return null;
+        const c = Value.cidOf(v) orelse return null;
+        return (try h.s.bytes(a, c)) orelse null;
     }
 
     /// The header at `height`: its CID and its merkle root; null when the chain state has none there.
@@ -160,8 +175,8 @@ const Walk = struct {
         };
         // The BEEF proven, always (#121): skein-sdk's verifier over it alone — every BUMP's root the
         // header's at its height in chain/state, every transaction no BUMP proves spending only
-        // transactions before it in the BEEF with its scripts verified, a txid-only entry never (no
-        // transaction is known beside the BEEF). Any error is the refusal, named.
+        // transactions before it in the BEEF or held with its scripts verified, a txid-only entry
+        // only for a held transaction. Any error is the refusal, named.
         const proven = spv(a, h, b, d) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -213,8 +228,9 @@ const Walk = struct {
 };
 
 /// skein-sdk's SPV (chain/src/spv.zig `verify`) over the BEEF `b` (the kernel's parse `d` beside it):
-/// `rootAt` the merkle root of chain/state's header at a height, `knownRaw` none — the BEEF stands
-/// alone. Per transaction (wire order), whether a BUMP checked against the header proves it.
+/// `rootAt` the merkle root of chain/state's header at a height, `knownRaw` the transactions the
+/// instance holds (`Headers.held`: in chain/state's `txs`, not rejected) — a BEEF may name those by
+/// txid alone, and nothing else beside it. Per transaction (wire order), whether a BUMP checked against the header proves it.
 /// error.Disagree: the SDK's parse is not the kernel's (another transaction list or marks).
 fn spv(a: std.mem.Allocator, h: *Headers, b: []const u8, d: beef.Beef) ![]bool {
     const sb = chain.beef.parse(a, b) catch |e| switch (e) {
@@ -238,8 +254,9 @@ fn spv(a: std.mem.Allocator, h: *Headers, b: []const u8, d: beef.Beef) ![]bool {
             const c: *@This() = @ptrCast(@alignCast(ptr));
             return if (try c.h.at(c.a, height)) |x| x.root else null;
         }
-        fn knownRaw(_: *anyopaque, _: std.mem.Allocator, _: [32]u8) anyerror!?[]const u8 {
-            return null;
+        fn knownRaw(ptr: *anyopaque, _: std.mem.Allocator, txid: [32]u8) anyerror!?[]const u8 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            return c.h.held(c.a, txid);
         }
     };
     var ctx = Ctx{ .h = h, .a = a };
@@ -255,8 +272,8 @@ fn spvWhy(e: anyerror) []const u8 {
         error.UnknownHeader => "a BUMP's height has no header in chain/state",
         error.RootMismatch => "a BUMP's merkle root is not the header's at its height in chain/state",
         error.NotInBump => "a transaction marked with a BUMP is not in it",
-        error.MissingInput => "a transaction no BUMP proves spends an output of a transaction not before it in the BEEF",
-        error.UnknownTxidOnly => "a txid-only entry: the BEEF stands alone at the door, no transaction is known beside it",
+        error.MissingInput => "a transaction no BUMP proves spends an output of a transaction neither before it in the BEEF nor held here",
+        error.UnknownTxidOnly => "a txid-only entry for a transaction this instance does not hold (only a held one may be named by txid alone)",
         error.ScriptFailed => "an unlocking script of a transaction no BUMP proves does not verify",
         error.NotParentsFirst => "its transactions spend in a cycle: no order puts parents first",
         else => "the BEEF's check failed",

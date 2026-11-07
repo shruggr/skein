@@ -819,9 +819,11 @@ BRC-62/96/95/158/233). For each:
   the wallet call) over the BEEF alone — every BUMP's merkle root the
   header's at its height in the chain app's state (`chain/state`, read
   only), every transaction no BUMP proves spending only outputs of
-  transactions before it in the BEEF with every unlocking script verified,
-  and no txid-only entry (nothing is known beside the BEEF: no store, no
-  chain-held lookup). Any error is a refusal, 400 `ERR_BEEF`, its reason the
+  transactions before it in the BEEF (or held) with every unlocking script
+  verified, and a txid-only entry only for a transaction the instance HOLDS
+  (0.3.3, 2026-11-07: the verifier's `knownRaw` is the held set — in
+  `chain/state`'s `txs`, not in its `rejected`; the instance proved it when it
+  entered; any other txid-only entry is `UnknownTxidOnly`). Any error is a refusal, 400 `ERR_BEEF`, its reason the
   error's name first (`UnknownHeader`, `RootMismatch`, `NotInBump`,
   `MissingInput`, `UnknownTxidOnly`, `ScriptFailed`, `NotParentsFirst`); no
   `chain/state` (no chain app, or one that has seen no header) — a refusal,

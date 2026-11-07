@@ -1639,7 +1639,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   #143: no entry), and nothing runs. Then the route's filters (an overlay's
   `<topic>` route: `kernel.beef`, the body's BEEF decoded and replaced by its
   pointer record; a BEEF that does not prove (skein-sdk's verifier: a bad
-  BUMP, an input not in the BEEF, a script that fails, a txid-only entry) is `reject`; no chain state to check it by,
+  BUMP, an input neither in the BEEF nor held, a script that fails, a txid-only entry for a transaction the instance does not hold) is `reject`; no chain state to check it by,
   `ignore`).
   Then the handler (the route's program and fn, an in-VM call) gets the
   request plus `key` (the 33-byte key out of `from`) and `request` (the
