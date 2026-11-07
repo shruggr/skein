@@ -327,3 +327,130 @@ test "door: the BEEF proven, always (#121) — an unproven child of a proven par
     try std.testing.expectEqual(held, (try ss.allCids(a)).len);
     try std.testing.expect(!(try s.has(try beef.txCid(a, ltxid))));
 }
+
+/// A chain state with one header at `height` and the transactions it holds (`txs`: txid → its
+/// bitcoin-tx block), some of them `rejected` (txid → a settlement record) — the chain app's shape.
+fn chainStateHolding(a: std.mem.Allocator, s: Store, height: u32, header: []const u8, txs: []const []const u8, rejected: []const []const u8) !void {
+    const hc = try cidm.ofBitcoin(a, cidm.BITCOIN_BLOCK, header);
+    try s.putBlock(hc, header);
+    var sink = Sink{ .s = s };
+    var f = mst.Forest.init(a, .{ .ctx = &sink, .get = Sink.get });
+    var key: [4]u8 = undefined;
+    std.mem.writeInt(u32, &key, height, .big);
+    const hroot = try f.put(null, &key, cbor.cidv(hc));
+    try f.flush(hroot, .{ .ctx = &sink, .put = Sink.put });
+    var troot: ?[]const u8 = null;
+    for (txs) |raw| {
+        const txid = beef.txidOf(raw);
+        const c = try beef.txCid(a, txid);
+        try s.putBlock(c, raw);
+        troot = try f.put(troot, &txid, cbor.cidv(c));
+    }
+    if (troot) |r| try f.flush(r, .{ .ctx = &sink, .put = Sink.put });
+    var rroot: ?[]const u8 = null;
+    for (rejected) |raw| {
+        var rm = cbor.MapBuilder.init(a);
+        try rm.put("status", cbor.string("rejected"));
+        const rc = try s.put(a, rm.value());
+        rroot = try f.put(rroot, &beef.txidOf(raw), cbor.cidv(rc));
+    }
+    if (rroot) |r| try f.flush(r, .{ .ctx = &sink, .put = Sink.put });
+    var maps = cbor.MapBuilder.init(a);
+    try maps.put("headers", cbor.optCid(hroot) orelse .null);
+    try maps.put("txs", cbor.optCid(troot) orelse .null);
+    try maps.put("rejected", cbor.optCid(rroot) orelse .null);
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("chain-state"));
+    try m.put("network", cbor.string("main"));
+    try m.put("maps", maps.value());
+    const state = try s.put(a, m.value());
+    _ = try heads.advanceHead(a, s, door.CHAIN_STATE, state, .{ .thread = null, .input = state, .at = 0 });
+}
+
+test "door: a BEEF may name a transaction the instance holds by txid alone (2026-11-07) — held proven or unproven passes; unknown or rejected is refused, nothing stored" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try SqliteStore.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer ss.close();
+    const s = ss.store();
+
+    // Held: `mined` (proven when it entered), `pending` (unproven, admitted), `dropped` (rejected).
+    // `stranger` is not held. Each pays OP_TRUE at output 0.
+    const mined = try txOf(a, [_]u8{0x31} ** 32, 0, &.{}, &.{&.{0x51}});
+    const pending = try txOf(a, beef.txidOf(mined), 0, &.{}, &.{&.{0x51}});
+    const dropped = try txOf(a, [_]u8{0x32} ** 32, 0, &.{}, &.{&.{0x51}});
+    const stranger = try txOf(a, [_]u8{0x33} ** 32, 0, &.{}, &.{&.{0x51}});
+    const header = try a.alloc(u8, 80);
+    @memset(header, 0);
+    header[0] = 1;
+    try chainStateHolding(a, s, 200, header, &.{ mined, pending, dropped }, &.{dropped});
+
+    const v2With = struct {
+        /// V2: the parent txid-only, then the child raw.
+        fn f(al: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
+            return std.mem.concat(al, u8, &.{ &.{ 2, 0, 0xbe, 0xef, 0, 2, 2 }, &beef.txidOf(parent), &.{0}, child });
+        }
+    }.f;
+    const passes = struct {
+        fn f(al: std.mem.Allocator, st: Store, bytes: []const u8) !void {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("body", .{ .bytes = bytes });
+            const r = try door.filterBeef(al, st, m.value());
+            if (r.refused) |why| {
+                std.debug.print("refused: {s}\n", .{why});
+                return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqual(@as(usize, 1), r.beefs.len);
+            // Lossless: the txid-only entry goes back on the wire as it came.
+            try std.testing.expectEqualSlices(u8, bytes, Value.bytesOf((try door.restore(al, st, r.value, r.beefs)).get("body")).?);
+        }
+    }.f;
+    const refusedWith = struct {
+        fn f(al: std.mem.Allocator, st: Store, bytes: []const u8, name: []const u8) !void {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("body", .{ .bytes = bytes });
+            const r = try door.filterBeef(al, st, m.value());
+            try std.testing.expect(r.refused != null);
+            if (!std.mem.startsWith(u8, r.refused.?, name)) {
+                std.debug.print("refused: {s}, expected {s}\n", .{ r.refused.?, name });
+                return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqual(@as(usize, 0), r.beefs.len);
+        }
+    }.f;
+
+    // A child of the held, unproven transaction, the parent by txid: admitted; its record marks it "txid".
+    const c1 = try txOf(a, beef.txidOf(pending), 0, &.{}, &.{&.{ 0x51, 0x51 }});
+    try passes(a, s, try v2With(a, pending, c1));
+    {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("body", .{ .bytes = try v2With(a, pending, c1) });
+        const r = try door.filterBeef(a, s, m.value());
+        const rec = (try s.get(a, r.beefs[0])).?;
+        const marks = rec.get("marks").?.array;
+        try std.testing.expectEqualSlices(u8, "txid", Value.str(marks[0]).?);
+        try std.testing.expect(marks[1] == .null);
+        try std.testing.expect(try s.has(try beef.txCid(a, beef.txidOf(c1))));
+    }
+    // A child of the held, proven transaction, the parent by txid: admitted.
+    const c2 = try txOf(a, beef.txidOf(mined), 0, &.{}, &.{&.{ 0x51, 0x52 }});
+    try passes(a, s, try v2With(a, mined, c2));
+    // A held parent not named at all (an Atomic BEEF of the child alone): its source is held, admitted.
+    const c3 = try txOf(a, beef.txidOf(pending), 0, &.{}, &.{&.{ 0x51, 0x53 }});
+    const c3id = beef.txidOf(c3);
+    try passes(a, s, try std.mem.concat(a, u8, &.{ &.{ 1, 1, 1, 1 }, &c3id, &.{ 1, 0, 0xbe, 0xef, 0, 1 }, c3, &.{0} }));
+
+    const before = (try ss.allCids(a)).len;
+    // A txid-only entry for a transaction not held: UnknownTxidOnly.
+    const c4 = try txOf(a, beef.txidOf(stranger), 0, &.{}, &.{&.{ 0x51, 0x54 }});
+    try refusedWith(a, s, try v2With(a, stranger, c4), "UnknownTxidOnly");
+    // For a held but rejected one: UnknownTxidOnly too.
+    const c5 = try txOf(a, beef.txidOf(dropped), 0, &.{}, &.{&.{ 0x51, 0x55 }});
+    try refusedWith(a, s, try v2With(a, dropped, c5), "UnknownTxidOnly");
+    // A raw child of a stranger with no parent: MissingInput, as before.
+    const c4id = beef.txidOf(c4);
+    try refusedWith(a, s, try std.mem.concat(a, u8, &.{ &.{ 1, 1, 1, 1 }, &c4id, &.{ 1, 0, 0xbe, 0xef, 0, 1 }, c4, &.{0} }), "MissingInput");
+    try std.testing.expectEqual(before, (try ss.allCids(a)).len);
+    try std.testing.expect(!(try s.has(try beef.txCid(a, c4id))));
+}

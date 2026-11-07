@@ -9,7 +9,9 @@
 // at 200 whose merkle root a parent's BUMP gives (output 0 OP_TRUE): the parent with an unmined
 // child spending it, in one BEEF, admitted on event and http, marks [0, null], the BUMP proving the
 // parent only (the verifier's proven [true, false]); a child spending its OP_FALSE output:
-// "ScriptFailed". Replayed. On SQLite (serve) and, with SKEIN_EQUIV_STORE=rocksdb, on RocksDB.
+// "ScriptFailed". 2026-11-07: chain/state with a `txs` map holding [7]'s child: a V2 BEEF naming
+// it txid-only with its own child admitted on all three transports (marks ["txid", null]); a
+// txid-only parent not held, and the held one once `rejected` names it: "UnknownTxidOnly". Replayed. On SQLite (serve) and, with SKEIN_EQUIV_STORE=rocksdb, on RocksDB.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/door-spv.ts
 
@@ -187,6 +189,37 @@ try {
   out("\n[8] a child spending the parent's output 1 (OP_FALSE):");
   const fails = txOf(ptxid, 1, [[0x51]]);
   await refusal("script fails", "event", cat([1, 0, 0xbe, 0xef, 1], bump, [2], parent, [1, 0], fails, [0]), "ScriptFailed", [txCid(fails)]);
+
+  // 2026-11-07: a BEEF may name a transaction the instance HOLDS by txid alone (chain/state's `txs`,
+  // not `rejected`). Root sets chain/state to the header at 200 plus a `txs` map holding [7]'s
+  // event child (unproven, held); then that child's own child with the parent txid-only.
+  out("\n[9] a txid-only parent the instance holds (chain/state's txs, unproven), on all three transports:");
+  const heldChild = txOf(ptxid, 0, [[0x51]]); // [7]'s event child, now held
+  const hid = sha256d(heldChild);
+  const txsNode = encode([null, [[hid, txCid(heldChild), null]]]);
+  const state9 = encode({ kind: "chain-state", network: "main", maps: { headers: node.cid, txs: txsNode.cid } });
+  await admin("objects", { records: [txsNode, state9].map((b) => ({ cid: b.cid, bytes: b.bytes })) });
+  await admin("head", { name: "chain/state", tree: state9.cid });
+  check(((await k.call("head", "chain/state")) as CID | null)?.equals(state9.cid) === true, "root set chain/state (the header at 200 and a txs map holding the child)");
+  for (const [i, t] of (["event", "http", "mailbox"] as Via[]).entries()) {
+    const grand = txOf(hid, 0, [[0x51, 0x52, ...Array(i).fill(0x51)]]);
+    const p = await admitted("txid-only held parent + child", t, cat([2, 0, 0xbe, 0xef, 0, 2, 2], hid, [0], grand));
+    if (t === "mailbox") continue; // the message's record nests its envelope (admitted's reader looks at event/http only)
+    check(!!p && JSON.stringify(p.marks) === '["txid",null]' && p.bumps.length === 0, `[${t}] marks ["txid", null]: the held parent named by txid, nothing proves it here`);
+    check(!!p && p.txs[0]!.equals(txCid(heldChild)) && await k.hasBlock(txCid(grand)), `[${t}] the pointer names the held parent's block; the child held`);
+  }
+  const strangerParent = variant(0x0a);
+  const sGrand = txOf(sha256d(strangerParent), 0, [[0x51]]);
+  await refusal("txid-only parent not held", "event", cat([2, 0, 0xbe, 0xef, 0, 2, 2], sha256d(strangerParent), [0], sGrand), "UnknownTxidOnly", [txCid(sGrand)]);
+
+  out("\n[10] the same parent held but rejected (chain/state's rejected names it):");
+  const settle = encode({ status: "rejected", reason: "test" });
+  const rejNode = encode([null, [[hid, settle.cid, null]]]);
+  const state10 = encode({ kind: "chain-state", network: "main", maps: { headers: node.cid, txs: txsNode.cid, rejected: rejNode.cid } });
+  await admin("objects", { records: [settle, rejNode, state10].map((b) => ({ cid: b.cid, bytes: b.bytes })) });
+  await admin("head", { name: "chain/state", tree: state10.cid });
+  const rGrand = txOf(hid, 0, [[0x51, 0x53]]);
+  await refusal("txid-only parent rejected", "event", cat([2, 0, 0xbe, 0xef, 0, 2, 2], hid, [0], rGrand), "UnknownTxidOnly", [txCid(rGrand)]);
 } catch (err) {
   check(false, `the scenario ran: ${(err as Error).stack}`);
 } finally {
