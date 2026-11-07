@@ -2,20 +2,19 @@
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
 // with a scripted inference peer, and a host skein from the host image (#142)
-// with the onboarding app (images/host: skein-onboard by its release tarball). The page
+// with the onboarding app and the messagebox app (images/host: their release tarballs). The page
 // identity (a wallet in the tab over a test key here; Yours in use) registers
-// its mailbox instance through it, over its BRC-104 session with the host's
-// origin (#135);
+// its handle through it, over its BRC-104 session with the host's origin
+// (#135): its mailbox is the host skein's messagebox app;
 // the chat app is installed into the browser instance by the install client's
 // plan (src/host/install.ts planInstall, over a copy of the browser's store)
 // sent as the page identity, its owner, on the page wallet's BRC-104 session
 // with its instance (#126 step 4: the page is a client of its instance like
 // any other — `http` requests to its front door, plain BRC-33 messages); the
 // page chats its instance the same way; the instance's loop asks the
-// inference peer (its messagebox program's delivery thread, the kernel's
-// authfetch on a BRC-104 session signed through the page wallet, the bytes
-// moved by the page). The peer answers into the page identity's mailbox
-// instance — the user's, never the instance's inbox (#126 step 4: a skein
+// inference peer (its mail program's delivery thread, the deliver intention
+// the page carries on a BRC-104 session signed through the page wallet). The
+// peer answers into the page identity's hosted mailbox — the user's, never the instance's inbox (#126 step 4: a skein
 // receives mail only where it verifies the sender itself): the page shows the
 // answer and admits nothing into the instance. Then the store the browser
 // wrote (its records, read back from IndexedDB) is replayed by the native
@@ -76,24 +75,25 @@ const base = `http://127.0.0.1:${router.port}`;
 // The host skein (#113, #135, #142): from the host image, owned by the owner's key at birth, the onboarding app installed
 // with its config; the host's origin's BRC-169 requests and the page's registration (over its session with the host's
 // origin) are its app's.
-await router.createInstance("host", ownerKey.toPublicKey().toString(), { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base } } } });
+const hosted = `${router.originOf("host")}/messagebox`;
+await router.createInstance("host", ownerKey.toPublicKey().toString(), { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base, messagebox: hosted } } } });
 await router.hydrate("host");
 await router.settled();
-// The inference peer's mailbox instance, registered through the host skein as the page's is (#135: over its session).
+// The inference peer's handle, registered through the host skein as the page's is (#135: over its session): its mailbox the hosted one.
 const iw = ephemeralWallet(inferKey);
 {
   const { signature } = await new ProtoWallet(inferKey).createSignature({ protocolID: [2, "skein register"], keyID: "infer", counterparty: "anyone", data: Utils.toArray("register infer@localhost", "utf8") });
   const r = await new AuthFetch(iw).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "infer", identityKey: inferId, signature: Utils.toHex(signature) }) });
   if (r.status !== 200) throw new Error(`register infer: HTTP ${r.status} ${await r.text()}`);
 }
-// The peer answers the browser instance at the page identity's mailbox instance (its address book, below).
+// The peer answers the browser instance at the page identity's hosted mailbox (its address book, below).
 const peer = new InferPeer({
   log: () => {}, wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
   raw: {
-    inbox: new RawBox(iw, `${base}/@infer`),
+    inbox: new RawBox(iw, hosted),
     outbox: (url) => new RawBox(iw, url),
-    // Its address book (#40), configured: an identity with a mailbox instance there.
-    addressOf: (k) => { const r = db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? db.mailboxOf(k); return r && router.originOf(r.handle); },
+    // Its address book (#40), configured: the page identity at its hosted mailbox, an instance at its origin.
+    addressOf: (k) => { if (k === pageId) return hosted; const r = db.list().find((x) => x.identity === k); return r && router.originOf(r.handle); },
   },
   fetch: scripted([answer({ content: "The blue one is 5." })]),
 });
@@ -137,7 +137,7 @@ try {
   const kinds = evs.map((e) => `${e.kind}${e.box ? `:${String(e.box)}` : ""}`).join(" ");
   if (verbose) console.log(`  events: ${kinds}`);
   const http = (f: (u: string, m: string, s: number) => boolean) => evs.some((e) => e.kind === "http" && f(String(e.url), String(e.method), Number(e.status)));
-  check(http((u, m, st) => u.startsWith(router.originOf("infer")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance's loop delivered its inference request itself: its messagebox program's delivery thread, the kernel's authfetch on a BRC-104 session signed through the page wallet");
+  check(http((u, m, st) => u === `${hosted}/sendMessage` && m === "POST" && st === 200), "the browser instance's loop delivered its inference request itself, to the inference peer's hosted mailbox: its mail program's delivery thread on a BRC-104 session signed through the page wallet");
   const answered = evs.find((e) => e.kind === "message" && e.sender === inferId) as { box?: string; body?: { replyTo?: unknown; choices?: unknown } } | undefined;
   check(answered?.box === "completions", `the inference peer's answer is in the page identity's mailbox, shown by the page (${Date.now() - t0} ms)`);
   check(!evs.some((e) => e.kind === "admitted"), "and nothing from the mailbox was admitted into the instance: the mailbox is the user's (#126 step 4)");

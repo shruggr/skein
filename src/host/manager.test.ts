@@ -9,8 +9,7 @@
 // refused and nothing is published; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
 // unpublishes, `start` publishes again. #113: `create` records the domain it
-// is given; image `mailbox` makes a mailbox instance (what a registration
-// asks for), the same owner and handle again the same answer. GET /skeins?key=
+// is given. GET /skeins?key=
 // lists a key's skeins on the host from their grants. (kernel-zig/
 // equiv/host.ts runs the whole flow through the onboarding app.)
 
@@ -54,7 +53,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   const grants = await hk.store.get(await hk.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
   assert.deepEqual(grants.roles.root!.map((k) => hex(k)), [h.ownerId], "#143: the operator is root, from the genesis");
   assert.ok(hostRows.some((r) => r.address === "/explore" && r.fn === "explore"), "the explorer route (root's)");
-  assert.deepEqual([...new Set(hostRows.filter((r) => r.app).map((r) => r.app))], ["onboard"], "#152: the onboarding app, the one app installed at birth");
+  assert.deepEqual([...new Set(hostRows.filter((r) => r.app).map((r) => r.app))], ["onboard", "messagebox"], "#152: the onboarding app and the messagebox app, the apps installed at birth");
   const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
 
@@ -115,33 +114,19 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "create", { handle: "carol", owner: "nope" });
   assert.match(String(a[0]?.body.error), /owner: not an identity key/);
   a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /the default image and mailbox instances/);
+  assert.match(String(a[0]?.body.error), /this host has the default image/);
   assert.equal(h.db.get("carol"), undefined);
   a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
   assert.match(String(a[0]?.body.error), /domain .*a host name/);
 
-  // #113: the domain asked is the row's; image `mailbox` is a mailbox instance for the owner, published at once.
+  // #113: the domain asked is the row's.
   a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test", claim: await signClaim(ephemeralWallet(clientKey)) });
   assert.equal(h.db.get("dora")!.domain, "skein.test");
-  const mailer = PrivateKey.fromRandom().toPublicKey().toString();
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox", domain: "skein.test" });
-  assert.deepEqual([a[0]!.body.handle, a[0]!.body.url, hex(a[0]!.body.identity)], ["mel", h.origin("mel"), h.keyOf("mel").toPublicKey().toString()]);
-  const mel = h.db.get("mel")!;
-  assert.deepEqual([mel.kind, mel.owner, mel.domain, mel.status], ["mailbox", mailer, "skein.test", "enabled"]);
-  const mg = await (await h.router.hydrate("mel")).kernel.genesis() as { root?: unknown[] };
-  assert.deepEqual(mg.root?.map((x) => hex(x)), [mailer], "its genesis names its root (no claim)");
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
-  assert.equal(a[0]!.body.handle, "mel", "the same owner and handle again: the same answer");
-  a = await send("host", "create", { handle: "mel2", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
-  assert.match(String(a[0]?.body.error), /has a mailbox instance here already: mel/);
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(client, "hex")), image: "mailbox" });
-  assert.match(String(a[0]?.body.error), /handle mel is taken/);
 
-  // GET /skeins?key= at the host's origin: the skeins whose `grants` name the key root (#143), from the host; mailbox instances not listed.
+  // GET /skeins?key= at the host's origin: the skeins whose `grants` name the key root (#143), from the host.
   const held = async (key: string) => { const r = await fetch(`${h.base}/skeins?key=${key}`); return { status: r.status, body: await r.json() as Array<{ handle: string; identity: string; url: string }> }; };
   assert.deepEqual((await held(client)).body, ["alice", "dora"].map((x) => ({ handle: x, identity: h.keyOf(x).toPublicKey().toString(), url: h.origin(x) })), "the client's two claimed skeins");
   assert.deepEqual((await held(h.ownerId)).body.map((x) => x.handle), ["host"], "the operator's: the host skein");
-  assert.deepEqual((await held(mailer)).body, [], "a mailbox instance is not listed");
   assert.equal((await held("nope")).status, 400);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
@@ -187,13 +172,13 @@ test("#164: an owned create — an image instance born owned: root its owner's f
   assert.equal(await h.entries("tok"), 1, "no claim entry: the genesis only");
 
   // A root-gated call (the kernel's `dispatch` operation): another key's message is recorded and does nothing; the owner's runs.
-  const ack = rows.find((r) => r.transport === "event" && r.address === ":ack")!;
+  const explore = rows.find((r) => r.transport === "http" && r.address === "/explore")!;
   const send = async (key: PrivateKey) => {
-    const m = await signMessage(ephemeralWallet(key), { recipient: c.identity, box: "dispatch", body: dagCbor.encode({ op: "remove", row: ack }) });
+    const m = await signMessage(ephemeralWallet(key), { recipient: c.identity, box: "dispatch", body: dagCbor.encode({ op: "remove", row: explore }) });
     await h.router.messageLocal("tok", dagCbor.encode(m.message), m.body);
     await h.router.settled();
     await k.idle();
-    return ((await k.dispatch()).rows as Array<Record<string, unknown>>).some((r) => r.transport === "event" && r.address === ":ack");
+    return ((await k.dispatch()).rows as Array<Record<string, unknown>>).some((r) => r.transport === "http" && r.address === "/explore");
   };
   assert.equal(await send(PrivateKey.fromRandom()), true, "another key's dispatch message: refused by the gate (root's), the route stands");
   assert.equal(await send(ownerKey), false, "the owner's: it runs, the route removed");

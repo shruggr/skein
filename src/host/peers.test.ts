@@ -18,7 +18,7 @@ import { testHost, until } from "./testhost.ts";
 
 test("skein peers: add / remove as the owner's messages to the `peers` box, over the control socket and on a session; skein-host peers list reads them back", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.mailbox("david", h.ownerId);
+  await h.ownerInbox();
   h.instance("alpha");
   await h.router.start();
   await h.router.listenControl(join(h.home, "host.sock"));
@@ -59,7 +59,7 @@ test("skein peers: add / remove as the owner's messages to the `peers` box, over
   await h.router.settled();
   assert.equal((await list("alpha")).length, 0, "the gate: a stranger's peers message changes nothing");
 
-  // Wrong shapes, unknown rows, a mailbox instance, a key that is not one.
+  // Wrong shapes, unknown rows, a key that is not one.
   const bad = async (...argv: string[]) => await adminMain("peers", [...argv, "--instance", "alpha"], env);
   assert.equal(await bad("add", bob), 2);
   assert.equal(await bad("remove", bob, "https://x"), 1, "an origin and --instance: two places");
@@ -71,6 +71,4 @@ test("skein peers: add / remove as the owner's messages to the `peers` box, over
   assert.equal(await adminMain("peers", ["add", bob, "https://x"], env), 1, "no instance named");
   assert.equal(await main(["peers", "alpha", "add", bob, "https://x"], env), 2, "skein-host writes no address book");
   assert.equal(await main(["peers", "nobody", "list"], env), 1);
-  assert.equal(await main(["peers", "david", "list"], env), 1);
-  assert.match(err.at(-1)!, /mailbox instance/);
 });

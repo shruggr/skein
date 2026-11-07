@@ -96,18 +96,18 @@ test("parseReplLine", () => {
 
 // ---------------------------------------------------------------- on a host
 
-test("chat on a host (#40): out to the instance's front door, the reply read from David's mailbox instance, the next chat continues", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("chat on a host (#40): out to the instance's front door, the reply read from David's hosted mailbox, the next chat continues", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.mailbox("david", h.ownerId);
-  // The instance, played by hand: a mailbox instance for its key (its chat box kept for it).
+  const mailbox = await h.ownerInbox();
+  // The instance, played by hand: a key with a hosted mailbox (its chat box kept for it).
   const instKey = h.keyOf("inst-owner");
   const instId = instKey.toPublicKey().toString();
-  h.mailbox("inst", instId);
+  const instBox = await h.inbox(instKey, "inst");
   const { ephemeralWallet } = await import("../wallet.ts");
   const inst = ephemeralWallet(instKey);
   const cfg: ClientConfig = {
     home: tmp(), walletUrl: "unused", originator: "skein-client-test",
-    instanceUrl: h.origin("inst"), mailboxUrl: h.origin("david"),
+    instanceUrl: instBox, mailboxUrl: mailbox,
     instance: { identityKey: instId, handle: "inst", domain: "localhost" }, stateDir: join(tmp(), "client"),
   };
   const client = new SkeinClient(cfg, h.owner);
@@ -115,7 +115,7 @@ test("chat on a host (#40): out to the instance's front door, the reply read fro
   const first = await client.chat({ text: "hello", tree, model: "ripper/qwen38" });
   assert.equal(first.replyTo, undefined);
 
-  const mine = new RawBox(inst, h.origin("inst"));
+  const mine = new RawBox(inst, instBox);
   const got = await mine.list("chat");
   assert.equal(got.length, 1);
   assert.equal(got[0]!.messageId, first.cid, "the id the client keeps is the id the recipient lists");
@@ -127,7 +127,7 @@ test("chat on a host (#40): out to the instance's front door, the reply read fro
   await mine.ack([got[0]!.messageId]);
 
   const newTree = cid("tree2");
-  const { id: replyId } = await new RawBox(inst, h.origin("david")).send(h.ownerId, "chat", { text: "hi David", page: "# notes\n", tree: newTree, thread: cid("thread"), replyTo: CID.parse(first.cid) });
+  const { id: replyId } = await new RawBox(inst, mailbox).send(h.ownerId, "chat", { text: "hi David", page: "# notes\n", tree: newTree, thread: cid("thread"), replyTo: CID.parse(first.cid) });
 
   const seen: string[] = [];
   const hit = await client.waitFor([{ box: "chat", replyTo: first.cid }], { timeoutMs: 10_000, intervalMs: 200, onResult: (r) => seen.push(r.box) });

@@ -236,7 +236,7 @@ anything."
 
 | field | meaning |
 |---|---|
-| `name` | the app's name: its box (§4), the prefix of its paths and of every head it writes (`<name>/app` its root), and of its roles (`<name>.<role>`). Unique on the instance. Not a stock box, head, program or role (`objects`, `head`, `dispatch`, `peers`, `grant`, `grants`, `root`, `user`, `kernel`, `frontdoor`, `messagebox`, …) |
+| `name` | the app's name: its box (§4), the prefix of its paths and of every head it writes (`<name>/app` its root), and of its roles (`<name>.<role>`). Unique on the instance. Not a stock box, head, program or role (`objects`, `head`, `dispatch`, `peers`, `grant`, `grants`, `root`, `user`, `kernel`, `frontdoor`, `mail`, …) |
 | `version` | semver; shown by the site, compared by `requires` |
 | `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), a bare name: a program the instance already has by that name in its genesis, or a map `{code: "shell", modules, support?}`: a shell program whose modules are files of the tree (§6b; #83). Handlers and filters name these roles. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it |
 | `config` | per-program configuration the programs read from the app record (the overlay engine reads `config.overlay`, §6; the app's own program `config.<name>`). Changing it is a new manifest and a head advance (root), or a `writes: true` function the app offers (§4) |
@@ -432,13 +432,13 @@ messages: none of it is the host's (#124).
   `listCertificates`. #113: the host skein's onboarding app takes it now, and
   the signature covers the domain (`register <name>@<domain>`, the domain
   from `/.well-known/skein-host`): skein-site 0.5.2 signs `register <name>`
-  and is refused until it follows docs/MESSAGES.md "Mailbox instances".
+  and is refused until it follows docs/MESSAGES.md "Registering a handle".
 - **Profiles** (#104, skein-site 0.4.0): each handle's Profile form (a name,
   an avatar outpoint) signed by your wallet and written to your mailbox
   instance (`objects`, `head profile`); handles shown with their avatar or
   an identicon; "Find a handle" over the host's search endpoint. #113: the
   host serves the profile the onboarding app keeps, posted to
-  `/account/profile` (docs/MESSAGES.md "Mailbox instances"); the mailbox
+  `/account/profile` (docs/MESSAGES.md "Registering a handle"); the mailbox
   instance's head is read no more, so the form has to post there.
 - **One grouped permission request** (#97, skein-site 0.5.0; 0.5.2 without
   the spending allowance): the site's `manifest.json`, served at
@@ -822,7 +822,7 @@ under its default scope). kernel-zig/equiv/chain.ts does both.
 #143 manifests.)
 
 A skein has no userland of its own: the genesis wires the boundary
-programs (front door, messagebox, resolve) and nothing else. The shell and
+programs (front door, mail, resolve) and nothing else. The shell and
 the chat loop are two apps, each installed when an instance wants it: an
 agent's skein needs the chat loop and no shell, a developer's the shell and
 no chat loop, an overlay's neither.

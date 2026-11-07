@@ -13,7 +13,7 @@ export interface ClientConfig {
   originator: string;
   /** The instance's own URL (its front door): http://<handle>.localhost:8100 or http://127.0.0.1:8100/@<handle>. */
   instanceUrl: string;
-  /** David's mailbox: the mailbox instance his instances deliver to (#40). */
+  /** David's mailbox: the messagebox his instances deliver to (#40). */
   mailboxUrl: string;
   instance: { identityKey: string; handle: string; domain: string };
   /** Local client state: sent envelope cids. */

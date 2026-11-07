@@ -22,14 +22,14 @@ const link = (v: unknown) => (v as { "/": string })["/"];
 
 test("explore: the owner reads the log, threads, a thread, a head and a record; a stranger is refused; each read is an entry and moves nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.mailbox("david", h.ownerId);
+  const mailbox = await h.ownerInbox();
   h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]); // #83: the chat loop is an app
   const alpha = h.db.get("alpha")!.identity!;
-  // Something to look at: a chat, answered into david's mailbox.
+  // Something to look at: a chat, answered into david's mailbox (hosted in the host skein).
   await new RawBox(h.owner, h.origin("alpha")).send(alpha, "chat", { text: "hi" });
-  await until("the answer", async () => (await new RawBox(h.owner, h.origin("david")).list("chat"))[0]);
+  await until("the answer", async () => (await new RawBox(h.owner, mailbox).list("chat"))[0]);
   await h.router.settled();
 
   const af = new AuthFetch(h.owner);

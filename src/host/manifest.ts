@@ -8,7 +8,7 @@
 //   kind        "app"
 //   name        lower-case [a-z0-9][a-z0-9._-]*: the app's box, and the prefix of every head it
 //               writes (`<name>/app` its root); not a stock box, head or program name (objects,
-//               head, dispatch, peers, grant, grants, main, wallet, kernel, frontdoor, messagebox,
+//               head, dispatch, peers, grant, grants, main, wallet, kernel, frontdoor, mail,
 //               resolve, …)
 //   version     semver
 //   programs    role → "bin/<x>.wasm" | "bin/<x>.cid" (a file in the tree), a bare name: a
@@ -108,7 +108,7 @@ export class ManifestError extends Error {
   constructor(problems: string[]) { super(`etc/app.json:\n  ${problems.join("\n  ")}`); this.problems = problems; }
 }
 
-export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "grant", "grants", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve", "billing", "tick", "reads", "root", "user"];
+export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "grant", "grants", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "mail", "resolve", "billing", "tick", "reads", "root", "user"];
 /** The fields gone, refused: the form before #77 (#79), and #143's. */
 const GONE_FIELDS: Record<string, string> = {
   handler: "the form before #77 is gone (#79): name routes, and write only heads under the app's name",

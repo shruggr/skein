@@ -10,7 +10,7 @@ CID (CIDv1, raw, sha2-256) when it is installed.
 
 | module | source | what |
 |---|---|---|
-| `messagebox.wasm`, `frontdoor.wasm`, `resolve.wasm` | `programs/` | the boundary programs (#40) |
+| `mail.wasm`, `frontdoor.wasm`, `resolve.wasm` | `programs/` | the boundary programs (#40) |
 | `wallet.wasm` | `programs/wallet` | the wallet app's program (#29, #79), over the SDK's `wallet` and `chain` modules |
 | `wire-probe.wasm` | `programs/test/wire-probe` | a test program, not pinned |
 

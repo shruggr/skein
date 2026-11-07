@@ -5,19 +5,14 @@
 //   skein-host init [--handle host]   the first run's part alone: the host skein made (once), nothing served
 //   skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>]   a grant (#143)
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-//   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance (#40) for an identity outside the
-//                                     host: Router.createInstance with image `mailbox`, the instance manager's own create (#113)
 //   skein-host knows <handle> [a,b | --all | --none]
-//   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
+//   skein-host list                   handle, kind, status, identity, front-door key, store, tree, libp2p peer ID
 //   skein-host identity <handle> [--peer]   an instance's identity key (from the master secret); --peer: its libp2p peer ID
-//   skein-host mailboxes              the mailbox instances: handle, whose (owner), front-door key, status, store
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
 //   skein-host roster [--for <handle>]
 //   skein-host peers <handle> list    its address book, read from its store
-//   skein-host import-handles         the host.db mailbox instances the host skein's onboarding app has no record
-//                                     of (#113), each with the request that adopts it — for the owner's wallet to send
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>
@@ -101,7 +96,7 @@
 //                         URLs, the handle domain, the host's name and note are the onboarding app's config
 //                         (config.onboard), written at the host skein's birth from these settings
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
-//   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
+//   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses (unset: none)
 //   SKEIN_NETWORK         the network the whole host runs on: main | test | regtest, default main (any other value:
 //                         skein-host refuses to start). Every genesis the host makes has it as defaults.walletNetwork,
 //                         under a tree's own config; the chain app takes its network from that default, so
@@ -205,11 +200,9 @@ const USAGE = `usage:
                                                           a grant (#143; root by default) in the host skein (or <handle>):
                                                           the operator's message, to the running host
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-  skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
-  skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
+  skein-host list                                         handle, kind, status, identity, front-door key, store, tree, libp2p peer ID
   skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
-  skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host billing [handle]                             #130: each billed instance as the router last read it (tally, allocation, asleep since,
                                                           terms not served), its ticks' log records and its payments
@@ -219,8 +212,6 @@ const USAGE = `usage:
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host peers <handle> list                          its address book, from its store: key, transport, address, handle, source
-  skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of (#113), each with
-                                                          the owner's request that adopts it (onboard.adopt): \`1sat authfetch POST <origin>/onboard/call --body '…'\`
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -252,19 +243,11 @@ export async function main(argv: string[], given: Env): Promise<number> {
           options: {
             domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" },
             boot: { type: "string" }, from: { type: "string" }, packet: { type: "string" }, scope: { type: "string" }, proofs: { type: "string" }, image: { type: "string" },
-            mailbox: { type: "boolean" }, owner: { type: "string" },
           },
         });
         if (!handle) { env.err(USAGE); return 2; }
         const f: RowFields = { domain: v.domain, identity: v.identity, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
-        if (v.mailbox) {
-          // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner. #113: the instance
-          // manager's own create (image `mailbox`), through a router of this command's own — the one creation path.
-          if (!v.owner || !/^0[23][0-9a-f]{64}$/.test(v.owner)) { env.err("skein-host add --mailbox: --owner <identity key, hex>"); return 2; }
-          if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
-          return await mailboxCmd(db, handle, v.owner, v.domain, env);
-        } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) {
           const sqlite = sqliteStoreOf(env.vars, home);
           f.store ??= sqlite ? `sqlite:${sqlite}` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96, #158, the settled split
@@ -313,11 +296,6 @@ export async function main(argv: string[], given: Env): Promise<number> {
         env.out(flag ? peerIdOf(signer.peerKey(handle)).toString() : signer.identity(handle));
         return 0;
       }
-      case "mailboxes": {
-        const door = frontDoorKeys(env.vars, home);
-        for (const r of db.list().filter((x) => x.kind === "mailbox")) env.out([`${r.handle}@${r.domain}`, r.owner ?? "-", door(r), r.status, r.store].join("\t"));
-        return 0;
-      }
       case "ledger":
         for (const l of db.ledger(rest[0])) env.out([l.instance, l.caller || "-", l.op, String(l.calls), String(l.fuel), l.updated_at].join("\t"));
         return 0;
@@ -329,7 +307,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
         const door = frontDoorKeys(env.vars, home);
         const peer = peerIds(env.vars, home);
         const host = db.setting("host_skein");
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : "agent", r.status, r.identity ?? "-", door(r), r.store, r.tree ?? "-", peer(r)].join("\t"));
         return 0;
       }
       case "enable": case "disable": case "remove": {
@@ -350,8 +328,6 @@ export async function main(argv: string[], given: Env): Promise<number> {
         return await peersCmd(db, rest, env);
       case "event":
         return await eventCmd(db, rest, env);
-      case "import-handles":
-        return await importHandlesCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -392,7 +368,7 @@ const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean)
 /**
  * The key each row's front door signs its BRC-104 sessions with (#40): the
  * signer's, derived from the master secret with key ID = the handle — for an
- * agent and a mailbox instance alike, and before the row was ever hydrated.
+ * instance, before the row was ever hydrated.
  * The master secret is only read here, never made: with none, "-".
  */
 function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => string {
@@ -441,7 +417,6 @@ async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   if (!handle || more.length || op !== "list") { env.err(USAGE); return 2; }
   const row = db.get(handle);
   if (!row) { env.err(`skein-host peers: no instance ${handle}`); return 1; }
-  if (row.kind === "mailbox") { env.err(`skein-host peers: ${handle} is a mailbox instance: it keeps mail, it sends nothing`); return 1; }
   const s = openRow(row, env);
   try {
     for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
@@ -509,11 +484,16 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
 }
 
-/** The onboarding app's config at the host skein's birth (#142), from the settings: domain, origin, name, note. */
-export function onboardConfig(v: Env["vars"]): Record<string, Record<string, unknown>> {
+/**
+ * The onboarding app's config at the host skein's birth (#142), from the settings: domain, origin, name, note, and
+ * `messagebox` — every handle's messagebox URL: the host skein's own URL (the instance-origin template with its
+ * handle) plus the messagebox app's path, `/messagebox` (the app hosts the keys onboard records).
+ */
+export function onboardConfig(v: Env["vars"], handle: string): Record<string, Record<string, unknown>> {
   const port = v.SKEIN_ROUTER_PORT || "8100";
   const origin = (v.SKEIN_ROUTER_ORIGIN || "http://127.0.0.1:{port}").replace("{port}", port).replace(/\/+$/, "");
-  return { onboard: { onboard: { domain: v.SKEIN_HANDLE_DOMAIN || hostDomain(origin), origin, ...(v.SKEIN_HOST_NAME ? { name: v.SKEIN_HOST_NAME } : {}), ...(v.SKEIN_HOST_NOTE ? { note: v.SKEIN_HOST_NOTE } : {}) } } };
+  const messagebox = `${originOf(v, handle).replace(/\/+$/, "")}/messagebox`;
+  return { onboard: { onboard: { domain: v.SKEIN_HANDLE_DOMAIN || hostDomain(origin), origin, messagebox, ...(v.SKEIN_HOST_NAME ? { name: v.SKEIN_HOST_NAME } : {}), ...(v.SKEIN_HOST_NOTE ? { note: v.SKEIN_HOST_NOTE } : {}) } } };
 }
 
 /**
@@ -525,11 +505,11 @@ async function createHostSkein(router: Router, db: HostDb, handle: string, env: 
   const op = operatorKey(env.vars, { create: true });
   const owner = identityOf(op.key);
   const t0 = Date.now();
-  const config = onboardConfig(env.vars);
+  const config = onboardConfig(env.vars, handle);
   const c = await router.createInstance(handle, owner, { host: true, appConfig: config });
-  const cfg = config.onboard!.onboard as { domain: string; origin: string };
+  const cfg = config.onboard!.onboard as { domain: string; origin: string; messagebox: string };
   env.out(`skein-host: first run — the host skein ${c.handle} ${c.identity} at ${c.url}, owned by the operator's key ${owner} (${op.path}${op.made ? ", made now, mode 0600" : ""}) · ${Date.now() - t0} ms`);
-  env.out(`skein-host: apps chain, git, site, onboard installed at birth · handles @${cfg.domain} · registrations and BRC-169 at ${cfg.origin}/`);
+  env.out(`skein-host: apps onboard, messagebox installed at birth · handles @${cfg.domain} · registrations and BRC-169 at ${cfg.origin}/ · the handles' messagebox ${cfg.messagebox}`);
   env.out(`skein-host: to manage it from a browser wallet: skein-host grant <the wallet's identity key> --role root · the operator's own messages: skein install|routes|grant|… --instance ${c.handle}`);
   return db.get(handle)!;
 }
@@ -592,57 +572,8 @@ async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
 }
 
-/**
- * `skein-host add <handle> --mailbox --owner <hex> [--domain d]` (#40, #113):
- * Router.createInstance with image `mailbox` — what the instance manager does
- * for the onboarding app's registrations — through a router of this
- * command's own. The same owner and handle again: kept (printed).
- */
-async function mailboxCmd(db: HostDb, handle: string, owner: string, domain: string | undefined, env: Env): Promise<number> {
-  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
-  try {
-    const c = await router.createInstance(handle, owner, { image: "mailbox", ...(domain ? { domain } : {}) });
-    const r = db.get(handle)!;
-    env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store} · ${short(c.identity)} · mailbox instance for ${short(owner)} at ${c.url}`);
-    return 0;
-  } catch (e) {
-    env.err(`skein-host add --mailbox: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await router.close();
-  }
-}
-
 /** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
 const isOutpoint = (s: string) => /^[0-9a-f]{64}[_.:][0-9]+$/.test(s);
-
-/**
- * `skein-host import-handles` (#113): the mailbox instances host.db has and
- * the host skein's onboarding app does not (a registration before the app
- * took them; its public resolve says), each printed with the request that
- * adopts it: `{fn: "onboard.adopt", args: {handle, owner}}` POSTed to the
- * host skein's /onboard/call on the owner's session — the owner's wallet
- * sends it (#124: `1sat authfetch POST <origin>/onboard/call --body '…'`).
- * The app asks the instance manager (which answers for the existing row, at
- * the app's domain), issues the certificate and records it, so the handle
- * resolves. The running router serves the host skein.
- */
-async function importHandlesCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  if (rest.length) { env.err(USAGE); return 2; }
-  const host = db.hostSkein();
-  if (!host) { env.err("skein-host import-handles: no host skein (skein-host init)"); return 1; }
-  const local = `${(env.vars.SKEIN_HOST_URL || `http://127.0.0.1:${env.vars.SKEIN_ROUTER_PORT || 8100}`).replace(/\/+$/, "")}/@${host.handle}`;
-  const origin = originOf(env.vars, host.handle);
-  let n = 0;
-  for (const r of db.list().filter((x) => x.kind === "mailbox" && x.owner)) {
-    const known = await fetch(`${local}/onboard/resolve?handle=${encodeURIComponent(r.handle)}`).then((x) => x.json() as Promise<{ identityKey?: string }>).catch(() => ({ identityKey: undefined }));
-    if (known.identityKey === r.owner) continue;
-    n++;
-    env.out(`1sat authfetch POST ${origin}/onboard/call --body '${JSON.stringify({ fn: "onboard.adopt", args: { handle: r.handle, owner: r.owner } })}'`);
-  }
-  env.err(n ? `${n} mailbox instance${n === 1 ? "" : "s"} to adopt: the owner's wallet sends each line above` : "every mailbox instance is recorded");
-  return 0;
-}
 
 /** The URL of a router answering for this host (its /manifest.json), if one does. */
 async function routerAt(vars: Env["vars"]): Promise<string | undefined> {
@@ -1022,7 +953,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   env.out(`skein-host: network ${router.o.network} (SKEIN_NETWORK): every new genesis's defaults.walletNetwork, the chain app's network`);
   const omb = router.ownerMessagebox();
   if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
-  else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
+  else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no messagebox (SKEIN_OWNER_MESSAGEBOX is unset): a new agent's genesis names no owner messagebox, and its answers cannot be delivered`);
   if (router.arc) env.out(`skein-host: broadcaster: broadcast events → Arcade ${router.o.arc!.url}; proofs and statuses (the status provider) from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
   else env.out(`skein-host: no Arcade (SKEIN_ARC_URL ${(v.SKEIN_ARC_URL ?? "").toLowerCase() === "off" ? "off" : `unset, and network ${hostNetwork(v)} has none`}): a broadcast event is dropped; a new genesis names no status provider`);
   await router.start();
@@ -1043,7 +974,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
       store: r.store, tree: r.tree ?? "", pid: l?.kernel.pid, restarts: 0, origin: router.originOf(r.handle),
       wake: router.nextWake(r.handle),
     };
-  }), { router: messagebox !== undefined ? `http://127.0.0.1:${messagebox}` : undefined, originOf: (h) => router.originOf(h), mailboxes: db.list("enabled").filter((r) => r.kind === "mailbox") });
+  }), { router: messagebox !== undefined ? `http://127.0.0.1:${messagebox}` : undefined, originOf: (h) => router.originOf(h) });
   const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => openRow(row, env), live), "127.0.0.1", page)
     .then((s) => { env.out(`skein-host: host page at http://127.0.0.1:${(s.address() as { port: number }).port}/ · roster at /roster.json`); return s; }, (e: Error) => { env.err(`skein-host: host server: ${e.message}`); return undefined; });
   return {

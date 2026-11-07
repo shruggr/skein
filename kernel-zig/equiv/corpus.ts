@@ -11,9 +11,11 @@
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
 // script runtimes, the kernel's objects/head/dispatch operations (#77), the loop with bash and
 // message tools, replies, resolves (no claims, #40), delivery failures, inference
-// errors, two agents talking, the owner's mailbox instance, and a low
-// fuelPerStep. The owner speaks raw BRC-33 (src/client/raw.ts); the
-// inference peer answers from its own mailbox instance.
+// errors, two agents talking, the owner's mailbox, and a low fuelPerStep. The
+// owner speaks raw BRC-33 (src/client/raw.ts); the owner and the inference peer
+// read their mail at a hosted messagebox (a second router's host skein, the
+// inboxes' host — its store in the corpus too), which the agents' host's fake
+// discovery names for their handles.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/corpus.ts <out-dir>
 
@@ -33,8 +35,8 @@ import { DEFAULTS } from "../../src/runtime/log.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
-import { storeExists } from "../../src/host/stores.ts";
-import { LMDB_MODE, ROCKS_MODE, routerStore, storeFor } from "./backend.ts";
+import { LMDB_MODE, ROCKS_MODE, routerStore } from "./backend.ts";
+import { inboxes, type Inboxes } from "./inboxes.ts";
 
 type Json = Record<string, unknown>;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,10 +70,15 @@ const toolCall = (id: string, cmd: string) => ({ id, type: "function", function:
 const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 const answer = (message: Json) => ({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" });
 
+/** The inboxes' host (inboxes.ts): made once, its home out/gen-inbox (its host skein's store in the corpus). */
+let inboxHost: Inboxes | undefined;
+const ownInboxes = async () => (inboxHost ??= await inboxes(join(out, "gen-inbox"), { command: kernel, operator: key(), log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); } }));
+
 /**
  * One host: a router over its own host.db, its agents' stores written to
- * out/<name>.db, the owner's mailbox instance `david` (in the corpus as
- * out/<first agent>-david.db), on a script clock.
+ * out/<name>.db, on a script clock; the owner's mailbox at the inboxes' host
+ * (registered as `<first agent>-david`, the owner's messagebox setting), which
+ * this host's fake discovery names for the owner's handle `david`.
  */
 async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-kz-corpus-home-"));
@@ -81,10 +88,15 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   const handles = new Map<string, string>(); // key → handle
   const ownerKey = key();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
+  const ib = await ownInboxes();
+  // The handles whose messagebox is at the inboxes' host (the owner's, the inference peer's), as this host's fixture answers them.
+  const elsewhere = new Map<string, { identityKey: string; messagebox: string }>();
   const router: Router = new Router({
     db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
-    // No host skein here (#113): the handles resolve over host.db (a fixture).
-    discovery: fakeDiscovery(db, () => router),
+    // No host skein here (#113): the handles resolve over host.db (a fixture), and the inbox handles elsewhere.
+    discovery: fakeDiscovery(db, () => router, elsewhere),
+    // Deliveries to the inboxes' host go out for real; nothing else beyond this host.
+    http: (req) => ib.http(req),
     owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,
     fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } }, ...routerStore(home),
     log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); },
@@ -98,27 +110,27 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     if (!b) { b = new RawBox(w, `${base}/@${handle}`); boxes.set(k, b); }
     return b;
   };
-  /** A mailbox instance for identity `whose`: its row (a fixture's; its genesis at first hydration). */
-  const mailbox = (name: string, whose: string, store?: string) => {
-    keys.set(name, key());
-    db.add(name, { kind: "mailbox", owner: whose, store: store ?? storeFor(home, name), identity: keys.get(name)!.toPublicKey().toString() });
+  /** `k` registered at the inboxes' host as `<first agent>-<handle>`, and named for `handle` here: its messagebox URL. */
+  const inbox = async (k: PrivateKey, handle: string, as: string) => {
+    const url = await ib.register(k, as);
+    elsewhere.set(handle, { identityKey: k.toPublicKey().toString(), messagebox: url });
+    return url;
   };
   let first: string | undefined;
-  // #96, SKEIN_EQUIV_STORE=lmdb: the host's agents and the owner's mailbox are sets of one environment, out/<first agent>.lmdb.
+  let ownerBox: string | undefined;
+  // #96, SKEIN_EQUIV_STORE=lmdb: the host's agents are sets of one environment, out/<first agent>.lmdb.
   let env: string | undefined;
   const add = async (name: string) => {
     keys.set(name, key());
     await fs.rm(join(out, `${name}.db`), { force: true });
     if (!first) {
-      // The owner's mailbox before the first agent's genesis (which names it): in the corpus too.
+      // The owner's mailbox before the first agent's genesis (which names it): the owner's messagebox setting.
       first = name;
-      await fs.rm(join(out, `${name}-david.db`), { force: true });
       // #158, SKEIN_EQUIV_STORE=rocksdb: sets of one RocksDB database, out/<first agent>.rocksdb, in one `skein-kernel host`.
       if (LMDB_MODE) { env = join(out, `${name}.lmdb`); await fs.rm(env, { recursive: true, force: true }); }
       if (ROCKS_MODE) { env = join(out, `${name}.rocksdb`); await fs.rm(env, { recursive: true, force: true }); }
-      mailbox("david", ownerId, env ? `${scheme}${env}` : join(out, `${name}-david.db`));
-      mailboxes.push(`${name}-david`);
-      if (env) specs.set(`${name}-david`, `${scheme}${env}#david`);
+      ownerBox = await inbox(ownerKey, "david", `${name}-david`);
+      router.o.ownerMessagebox = ownerBox;
     }
     db.add(name, { store: env ? `${scheme}${env}` : join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
     if (env) specs.set(name, `${scheme}${env}#${name}`);
@@ -128,7 +140,9 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     return id;
   };
   const h = {
-    db, router, clock, owner, ownerKey, ownerId, add, mailbox, base,
+    db, router, clock, owner, ownerKey, ownerId, add, inbox, base,
+    /** The first agent's name (the inbox handles are named after it), once one is added. */
+    first: () => first,
     /** Let every kernel finish what it was given. */
     settle: () => router.settled(),
     /** Install apps into an agent as the owner (#83), by the owner's messages (`skein install`, #124). */
@@ -143,42 +157,37 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
       return r.id;
     },
     /** The owner's mailbox: a box's messages. */
-    list: (boxName: string) => boxOf(owner, ownerId, "david").list(boxName),
+    list: (boxName: string) => new RawBox(owner, ownerBox!).list(boxName),
     async done() {
       await router.settled();
-      // #158: a RocksDB set is read through the running kernel process: whether a mailbox has a store, asked before it stops.
-      if (ROCKS_MODE && env) for (const m of mailboxes) if (specs.get(m)?.startsWith(`rocksdb:${env}#`) && storeExists(specs.get(m)!)) present.add(m);
+      await ib.router.settled();
       await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true });
     },
   };
   return h;
 }
 
-/** The inference peer on its own mailbox instance `infer` (raw BRC-33), answering from a script. */
-function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: Array<Json | { status: number; text: string }>) {
+/** The inference peer, its mailbox at the inboxes' host (handle `infer` here; `<as>` there), answering from a script. */
+async function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, as: string, answers: Array<Json | { status: number; text: string }>) {
   const w = ephemeralWallet(k);
-  h.mailbox("infer", k.toPublicKey().toString());
+  const box = await h.inbox(k, "infer", as);
   const outs = new Map<string, RawBox>();
   return new InferPeer({
     log: () => {}, wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: scripted(answers),
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, box),
       outbox: (url) => { let b = outs.get(url); if (!b) { b = new RawBox(w, url); outs.set(url, b); } return b; },
       // Its address book (#40), configured: every row's key at its origin.
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? h.db.mailboxOf(k); return r && h.router.originOf(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.router.originOf(r.handle); },
     },
   });
 }
 
 const made: string[] = [];
 const scheme = ROCKS_MODE ? "rocksdb:" : "lmdb:";
-/** #158: the mailboxes with a store, in RocksDB mode (asked while their host ran). */
-const present = new Set<string>();
 /** #96: a store's name → its LMDB set (lmdb:<env>#<handle>), in LMDB mode. */
 const specs = new Map<string, string>();
 const specOf = (n: string) => specs.get(n) ?? join(out, `${n}.db`);
-/** The owners' mailbox instances: in the corpus if anything was delivered there (it has a store). */
-const mailboxes: string[] = [];
 
 // The in-step clock is the Zig kernel's (issue #38: entry stamp + fuel ×
 // 1 ns). The scripts below print only clock invariants (orderings, elapsed ≥
@@ -276,7 +285,7 @@ const mailboxes: string[] = [];
 {
   const inferKey = key();
   const h = await host({ infer: inferKey });
-  const peer = inferPeer(h, inferKey, [
+  const peer = await inferPeer(h, inferKey, "gen-chat-infer", [
     answer({ content: "", tool_calls: [toolCall("call-1", "ls | head -3; cat README")] }),
     answer({ content: "README and src.", reasoning_content: "short" }),
     answer({ content: "", tool_calls: [toolCall("call-2", "echo more > more.txt; ls"), toolCall("call-3", "sleep 1; date +%s")] }),
@@ -319,7 +328,7 @@ const mailboxes: string[] = [];
   const inferKey = key();
   const h = await host({ infer: inferKey });
   // One inference peer serves both; each agent's requests in turn (martha's first, as the conversation goes).
-  const peer = inferPeer(h, inferKey, [
+  const peer = await inferPeer(h, inferKey, "gen-martha-infer", [
     answer({ content: "", tool_calls: [messageCall("m1", "@gen-kurt@localhost", "What does the blue one cost?")] }), // martha
     answer({ content: "", tool_calls: [messageCall("k1", "@gen-martha@localhost", "Which size?")] }), // kurt
     answer({ content: "", tool_calls: [messageCall("m2", "@gen-kurt@localhost", "The large one."), toolCall("c1", "echo noted")] }), // martha
@@ -341,7 +350,7 @@ const mailboxes: string[] = [];
   const inferKey = key();
   const bob = key().toPublicKey().toString();
   const h = await host({ infer: inferKey });
-  const peer = inferPeer(h, inferKey, [
+  const peer = await inferPeer(h, inferKey, "gen-outcome-infer", [
     answer({ content: "", tool_calls: [messageCall("m1", "@bob@localhost", "hi bob")] }),
     answer({ content: "Bob cannot be reached." }),
   ]);
@@ -366,7 +375,7 @@ const mailboxes: string[] = [];
   // A stranger in no address book chats the agent's open box (#40): admitted and inferred; the answer has no route.
   const inferKey = key();
   const h = await host({ infer: inferKey });
-  const peer = inferPeer(h, inferKey, [answer({ content: "Hello, stranger." })]);
+  const peer = await inferPeer(h, inferKey, "gen-stranger-infer", [answer({ content: "Hello, stranger." })]);
   const i = await h.add("gen-stranger");
   await h.install("gen-stranger", [CHAT_APP]);
   const sk = key();
@@ -397,5 +406,7 @@ const mailboxes: string[] = [];
   made.push("gen-fuel");
 }
 
-for (const m of mailboxes) if (ROCKS_MODE ? present.has(m) : storeExists(specOf(m))) made.push(m);
+// The inboxes' host: stopped. Its host skein is born from the host image (its tree and chain the image's, not in its
+// own set), which the corpus's browser replay cannot take; its replay is serve.ts's and wasm-host.ts's.
+if (inboxHost) await inboxHost.stop();
 process.stdout.write(made.map(specOf).join("\n") + "\n");

@@ -42,15 +42,14 @@
 //      signs `register <name>@<domain>` (/.well-known/skein-host for the
 //      domain) and posts it to /account/register over your wallet's
 //      BRC-104 session with the host's origin (#135): the host skein's app
-//      has the instance manager create your mailbox instance and answers the
-//      handle certificate its record holds, which the wallet in the tab keeps
+//      answers the handle certificate its record holds (no instance: your
+//      mailbox is the host skein's messagebox app), which the wallet in the tab keeps
 //      (acquireCertificate, direct: encrypted fields, your keyring);
 //      listCertificates returns it, its serial the one resolve answers;
 //      "Your handles" shows you@localhost and the messagebox it resolves to;
 //      your profile (#104): the OpNS profile record, signed by the wallet in
 //      the tab ([1, "metanet handles profile"]) and posted to the host's
-//      /account/profile (#113: the app keeps it; the page's Profile form still
-//      writes your mailbox instance); resolve carries it (verified here
+//      /account/profile (#113: the app keeps it); resolve carries it (verified here
 //      against your key) with displayName (no avatarURL: the app's ordfs is
 //      empty); the manifest names the host (the app's config) and its search
 //      endpoint, and Find a handle on the page finds you by that name;
@@ -271,11 +270,12 @@ try {
   // avatarURL (nothing fetched from a public ORDFS gateway) — a config the settings do not carry, so the owner
   // installs the same tree again with it (`skein install <dir> --config`, over the host's control socket).
   const cfg = join(home, "onboard.json");
-  await fs.writeFile(cfg, JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } }));
+  const hosted = `${router.originOf("host")}/messagebox`;
+  await fs.writeFile(cfg, JSON.stringify({ onboard: { domain: "localhost", origin: base, messagebox: hosted, name: "Test host", ordfs: "" } }));
   const io: string[] = [];
   const ic = await adminMain("install", [appCheckout(ONBOARD_APP), "--instance", "host", "--config", cfg], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { io.push(l); out(l); }, err: (l) => { io.push(l); out(l); } });
   await router.settled();
-  check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.4.0 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
+  check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.5.0 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
   /** #152: chain, git and site into `handle` by your messages, then root's read route `/` to the site (`skein routes add`, over the control socket). */
   const baseApps = async (handle: string) => {
     for (const a of CHAIN_GIT_SITE) {
@@ -446,9 +446,8 @@ try {
   await page.click("#register button[type=submit]");
   const reg = await (await page.waitForFunction(() => (window as unknown as { regStatus?: { ok: boolean; text: string } }).regStatus, null, { timeout: 120_000 })).jsonValue() as { ok: boolean; text: string };
   const regStatus = reg.text;
-  check(reg.ok && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && regStatus.includes(`${base}/@you`),
-    `the page's Register form: signed over register you@localhost by the wallet in the tab, the host skein's app had the instance manager create your mailbox instance you@localhost (${regStatus.replace(/\s+/g, " ").slice(0, 160)})`);
-  stores.push(db.get("you")!.store);
+  check(reg.ok && db.get("you") === undefined && regStatus.includes(hosted),
+    `the page's Register form: signed over register you@localhost by the wallet in the tab, the host skein's app certified you@localhost, your mailbox the host skein's messagebox app, no instance made (${regStatus.replace(/\s+/g, " ").slice(0, 160)})`);
   const held = await page.evaluate(async ([c, type]) => {
     const w = (window as unknown as { site: { wallet: { listCertificates(a: unknown): Promise<{ certificates: Array<Record<string, unknown>> }> } } }).site.wallet;
     return (await w.listCertificates({ certifiers: [c], types: [type] })).certificates;
@@ -482,11 +481,10 @@ try {
   await ready();
   await page.waitForSelector('[data-handle="you@localhost"]', { timeout: 60_000 });
   const handles = await page.locator("#handles").innerText();
-  check(handles.includes("you@localhost") && handles.includes(`${base}/@you`), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
+  check(handles.includes("you@localhost") && handles.includes(hosted), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
 
   // ------------------------------------------------ your profile (#104, #113: kept by the host skein's app)
-  // The page's Profile form (skein-site 0.5.2) writes to your mailbox instance, which the host no longer reads; what it
-  // sends once skein-site follows: the same signed record posted to the host's /account/profile.
+  // What the page's Profile form sends (skein-site follows #113): the signed record posted to the host's /account/profile.
   const avatar = `${"cd".repeat(32)}.0`;
   const posted = await page.evaluate(async ([origin, avatarBytes]) => {
     const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }> } } }).site.wallet;
@@ -520,11 +518,11 @@ try {
   await page.goto(`${sitePage}${search}#/inbox`);
   await ready();
   await page.waitForSelector("#inbox-from", { timeout: 60_000 });
-  check(await page.locator("#inbox input[name=url]").inputValue() === `${base}/@you` && (await page.locator("#inbox-from").innerText()).includes("you@localhost"),
+  check(await page.locator("#inbox input[name=url]").inputValue() === hosted && (await page.locator("#inbox-from").innerText()).includes("you@localhost"),
     `the Inbox's mailbox URL is prefilled from your handle (${await page.locator("#inbox input[name=url]").inputValue()})`);
   await page.waitForFunction(() => !/^listing/.test(document.getElementById("inbox-status")?.textContent ?? ""), null, { timeout: 120_000 });
-  // The mailbox's own origin (the router's <handle>.localhost form): the stock client shakes hands at <origin>/.well-known/auth.
-  const mailbox = `http://you.localhost:${port}`;
+  // Your mailbox: the host skein's messagebox app (the stock client shakes hands with the host skein at its origin).
+  const mailbox = hosted;
   // A BRC-169 §7.3 envelope in DAG-CBOR (1sat-sdk's actions/src/mandala/envelope.ts layout): `payment` the
   // BRC-29 delivery, `content` a BRC-78 message of a MIME entity, signed by the sender under
   // [2, "metanet handles envelope"], key ID "send", counterparty anyone, over the map without content and signature.
@@ -539,10 +537,9 @@ try {
   };
   const { signature: envSig } = await new ProtoWallet(payer).createSignature({ data: Array.from(dagCbor.encode(unsigned)), protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone" });
   const envelope = dagCbor.encode({ ...unsigned, content: Uint8Array.from(EncryptedMessage.encrypt(Array.from(mime), payer, youKey.toPublicKey())), signature: Uint8Array.from(envSig) });
-  const sent = await new RawBox(ephemeralWallet(payer), `${base}/@you`).send(you, "metanet_inbox", envelope);
-  check(!!sent.id, `a sender delivers a payment to your mailbox instance, box metanet_inbox (BRC-231 on its session): ${sent.id}`);
+  const sent = await new RawBox(ephemeralWallet(payer), mailbox).send(you, "metanet_inbox", envelope);
+  check(!!sent.id, `a sender delivers a payment to your hosted mailbox, box metanet_inbox (BRC-231 on its session): ${sent.id}`);
 
-  // The stock client shakes hands at the URL's origin, so for it the dev form above is not the mailbox: its <handle>.localhost origin is.
   await page.fill("#inbox input[name=url]", mailbox);
   check(await page.locator("#inbox input[name=box]").inputValue() === "metanet_inbox", "the Inbox's box defaults to metanet_inbox");
   await page.click("#inbox button[type=submit]");

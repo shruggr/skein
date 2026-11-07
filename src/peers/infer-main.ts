@@ -2,7 +2,7 @@
 // `skein-infer`: the inference peer process (infer.ts). Its environment
 // (bin/skein-infer fills it from ~/.skein):
 //   SKEIN_INFER_WALLET_URL  its BRC-100 wallet, default http://127.0.0.1:3323 (`1sat serve wallet-api`), origin "skein-infer"
-//   SKEIN_MAILBOX_URL       its mailbox instance (#40), e.g. http://infer.localhost:8100 or http://127.0.0.1:8100/@infer
+//   SKEIN_MAILBOX_URL       its mailbox (#40): the messagebox its handle resolves to, e.g. http://host.localhost:8100/messagebox
 //   SKEIN_INFER_PEERS       its address book (#40): {"<identity key hex>": "<messagebox URL>", …}, default
 //                           $SKEIN_HOME/infer-peers.json (scripts/host/up.sh writes every agent's); read again
 //                           when it changes. A request from a key not in it has nowhere to go: dropped, one line.
@@ -26,7 +26,7 @@ const die = (msg: string): never => { process.stderr.write(`skein-infer: ${msg}\
 const providersFile = env.SKEIN_INFER_PROVIDERS || `${home}/infer.json`;
 let providers: Record<string, Provider>;
 try { providers = JSON.parse(readFileSync(providersFile, "utf8")); } catch (e) { die(`${providersFile}: ${(e as Error).message}`); }
-if (!env.SKEIN_MAILBOX_URL) die("SKEIN_MAILBOX_URL is not set (its mailbox instance: skein-host add infer --mailbox --owner <its key>)");
+if (!env.SKEIN_MAILBOX_URL) die("SKEIN_MAILBOX_URL is not set (its messagebox: the URL its handle resolves to, e.g. a host skein's <origin>/messagebox)");
 const wallet = await connectWallet({ kind: "remote", url: env.SKEIN_INFER_WALLET_URL || "http://127.0.0.1:3323", originator: "skein-infer" });
 const { publicKey } = await wallet.getPublicKey({ identityKey: true });
 const cache = env.SKEIN_INFER_CACHE ?? `${home}/infer-cache`;

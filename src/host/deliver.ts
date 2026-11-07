@@ -8,8 +8,10 @@
 // and awaits it. The host makes the exchange the kernel's authfetch used to
 // make in the step (kernel-zig/src/authfetch.zig before #157):
 //
-//   1. BRC-103's handshake at <url>/.well-known/auth, the session kept per
-//      (instance, base URL) in memory — made again when the server answers
+//   1. BRC-103's handshake at <base>/.well-known/auth — the base the skein
+//      the URL is for (src/session-base.ts: the origin, plus a leading
+//      `/@<handle>`; the rest of the path is a route in it) — the session kept per
+//      (instance, base) in memory — made again when the server answers
 //      401 (it forgot the session) — its answer's signature checked;
 //   2. the BRC-104 request: POST <url>/sendMessage, BRC-231 CBOR {message:
 //      {recipient, messageBox, body, subject?, nonce}} (the BRC-33 message and
@@ -33,6 +35,7 @@ import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import type { HttpRequest, HttpResponse, MailRecord } from "./providers.ts";
+import { sessionBase } from "../session-base.ts";
 
 export const AUTH_PROTOCOL: [2, string] = [2, "auth message signature"];
 const VERSION = "0.1";
@@ -127,7 +130,7 @@ export interface DelivererOptions {
 
 export class Deliverer {
   readonly o: DelivererOptions;
-  /** BRC-103 sessions, per instance and server base URL, in memory. */
+  /** BRC-103 sessions, per instance and session base (sessionBase: the skein the URL is for), in memory. */
   private sessions = new Map<string, Session>();
 
   constructor(o: DelivererOptions) { this.o = o; }
@@ -141,7 +144,8 @@ export class Deliverer {
     if (!(ev.nonce instanceof Uint8Array) || ev.nonce.length !== 32) throw new Error("deliver: the event has no 32-byte nonce");
     const base = ev.url.replace(/\/+$/, "");
     const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey;
-    const key = `${handle} ${base}`;
+    const at = sessionBase(base);
+    const key = `${handle} ${at}`;
     const message: Record<string, unknown> = { recipient: mail.recipient, messageBox: mail.box, body, nonce: mail.nonce };
     if (mail.subject) message.subject = mail.subject;
     const reqBody = dagCbor.encode({ message });
@@ -149,7 +153,7 @@ export class Deliverer {
       let s = this.sessions.get(key);
       const held = !!s && !fresh;
       if (!s || fresh) {
-        s = await this.handshake(handle, wallet, identity, base);
+        s = await this.handshake(handle, wallet, identity, at);
         if (!s) return undefined;
         this.sessions.set(key, s);
       }
@@ -168,7 +172,7 @@ export class Deliverer {
     }
   }
 
-  /** BRC-103: our nonce to <base>/.well-known/auth; the answer's signature over both nonces checked. */
+  /** BRC-103: our nonce to <base>/.well-known/auth (`base`: the session base, sessionBase); the answer's signature over both nonces checked. */
   private async handshake(handle: string, wallet: WalletInterface, identity: string, base: string): Promise<Session | undefined> {
     const first = globalThis.crypto.getRandomValues(new Uint8Array(16)).map((b) => 33 + (b % 94)); // printable: the keyID reads the same as UTF-8 on every side
     const { hmac } = await wallet.createHmac({ protocolID: [2, "server hmac"], keyID: new TextDecoder().decode(first), data: [...first], counterparty: "self" });

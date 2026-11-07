@@ -21,7 +21,7 @@
 //   GET  /.well-known/metanet-handles/resolve    → /onboard/resolve         BRC-169 §5.2
 //   GET  /.well-known/metanet-handles/search     → /onboard/search          BRC-169 §5.6
 //   POST /.well-known/auth                       → /.well-known/auth        the BRC-103 handshake (#135: a registration is signed)
-//   POST /account/register                       → /onboard/register        a mailbox instance and its certificate (signed)
+//   POST /account/register                       → /onboard/register        a handle's certificate (signed; no instance: its messagebox is the host skein's messagebox app)
 //   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
 //   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
 //   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
@@ -82,8 +82,7 @@
 // instance's own (p2p.ts); the instance manager (#90) creates, starts and
 // stops instances for the host skein alone (host.db `host_settings`:
 // `skein-host init` made it; createInstance claims a new instance before
-// its row is enabled, which publishes its hostname; image `mailbox`, #113, a
-// mailbox instance for a registration); the certifier (#113) signs handle
+// its row is enabled, which publishes its hostname); the certifier (#113) signs handle
 // certificates for the host skein alone. Each genesis it writes names the providers' keys
 // in its address book (`addressBook`). A kernel's broadcast events go to the
 // broadcaster (#65).
@@ -190,7 +189,7 @@ export interface RouterOptions {
   idleMs?: number;
   /** How long a synchronous client waits on its request's thread (#66) before 503 + Retry-After (ms); default SKEIN_ANSWER_WAIT_MS, else two minutes. */
   answerWaitMs?: number;
-  /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
+  /** Where a new instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
   /** SKEIN_STORE (#96): the host's LMDB environment (a directory); a new instance's store is then its set there (host.db `lmdb:<dir>`, the set its handle). Unset: a file, <home>/instances/<handle>/runtime.db. */
   lmdbStore?: string;
@@ -212,7 +211,7 @@ export interface RouterOptions {
   origin?: string;
   /** The port it serves on, for origins named before it listens (a boot, `skein-host add`); listening sets it. */
   port?: number;
-  /** The owner's messagebox URL for a new agent's genesis; default the owner's mailbox instance here, if there is one. */
+  /** The owner's messagebox URL for a new agent's genesis (SKEIN_OWNER_MESSAGEBOX): wherever the owner's mail is kept, this host's own messagebox app included. Unset: none. */
   ownerMessagebox?: string;
   /** The network the whole host runs on (SKEIN_NETWORK): every genesis it makes has it as `defaults.walletNetwork`. */
   network?: string;
@@ -362,7 +361,7 @@ export const domainOf = (hostname: string): string => {
 /**
  * The BRC-169 domain of this host (H4): its public origin's host name
  * (SKEIN_ROUTER_ORIGIN, default the loopback: `localhost`). What a created
- * instance, a claim and a mailbox instance record when nothing names one,
+ * instance and a claim record when nothing names one,
  * and what /.well-known/skein-host answers.
  */
 export const hostDomain = (origin: string): string => {
@@ -406,7 +405,7 @@ export function noOwnerMessagebox(genesis: Record<string, unknown> | null | unde
   const d = genesis?.defaults as Record<string, unknown> | undefined;
   if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
   return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
-    "Create the owner's mailbox instance (skein-host add <name> --mailbox --owner <key>) or set SKEIN_OWNER_MESSAGEBOX, then re-genesis it (a new store)";
+    "Set SKEIN_OWNER_MESSAGEBOX (the owner's messagebox URL), then re-genesis it (a new store)";
 }
 
 /** A sendMessage request's box and recipient, for the delivery log line ("" if the body is neither CBOR nor JSON). */
@@ -1248,7 +1247,7 @@ export class Router {
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
-      if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
+      { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
     } catch (e) {
       await kernel.stop(1000);
@@ -1309,11 +1308,9 @@ export class Router {
     return b;
   }
 
-  /** The owner's messagebox: configured, else its mailbox instance here. */
+  /** The owner's messagebox: the configured one (SKEIN_OWNER_MESSAGEBOX), or none. */
   ownerMessagebox(): string | undefined {
-    if (this.o.ownerMessagebox) return this.o.ownerMessagebox;
-    const mb = this.o.owner ? this.o.db.mailboxOf(this.o.owner) : undefined;
-    return mb ? this.originOf(mb.handle) : undefined;
+    return this.o.ownerMessagebox || undefined;
   }
 
   /**
@@ -1363,13 +1360,13 @@ export class Router {
   private async namedImage(name: string | undefined, host: boolean | undefined): Promise<BootSource> {
     if (host || name === undefined || name === "default") return await this.image.source({ host, ...(name ? { image: name } : {}) });
     const dir = this.imageDir(name);
-    if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image, mailbox instances${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
+    if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
     return isOverlayImage(dir) ? await this.image.source({ overlay: dir }) : await imageSource(dir);
   }
 
   /** #162: an image by name: its directory under imagesDir (resolved), or undefined. */
   private imageDir(name: string): string | undefined {
-    if (!this.o.imagesDir || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name === "host" || name === "mailbox") return undefined;
+    if (!this.o.imagesDir || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name === "host") return undefined;
     try {
       const d = realpathSync(join(this.o.imagesDir, name));
       return statSync(d).isDirectory() ? d : undefined;
@@ -1411,21 +1408,13 @@ export class Router {
    * the image's claim route is not seeded), no instance manager or
    * certifier in its address book (those stay the host skein's and
    * SKEIN_MANAGER_FOR's).
-   *
-   * Image `mailbox` (#113): a mailbox instance for `owner` — the front door
-   * and the messagebox, its owner in its genesis (no claim) — published at
-   * once (`publish`). The same owner and handle again: the same answer (it
-   * exists, enabled again if it was not, at `domain` if given); a key with
-   * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
-   * registrations) and `skein-host add --mailbox` both come here.
    */
   async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; owned?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!validHandle(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox" && !this.imageDir(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image${this.o.imagesDir ? `, the images in ${this.o.imagesDir}` : ""} and mailbox instances`);
+    if (o.image !== undefined && o.image !== "default" && !this.imageDir(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
-    if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
     // #164: an owned image instance is born owned as the host skein is: no claim.
     if (o.owned && (o.claim !== undefined || o.needsClaim)) throw new Error("an owned instance is born owned (#164): no claim");
@@ -1487,29 +1476,6 @@ export class Router {
     if (this.o.sqliteStore) return `sqlite:${this.o.sqliteStore}`; // the settled split: the wasm kernel
     if (this.o.rocksStore) return `rocksdb:${this.o.rocksStore}`; // #158
     return this.o.lmdbStore ? `lmdb:${this.o.lmdbStore}` : join(this.o.home ?? ".", "instances", handle, "runtime.db");
-  }
-
-  /** createInstance's image `mailbox` (#113). */
-  private async createMailbox(handle: string, owner: string, o: { publish?: boolean; domain?: string }): Promise<{ handle: string; identity: string; url: string }> {
-    const had = this.o.db.get(handle);
-    if (had) {
-      if (had.kind !== "mailbox" || had.owner !== owner) throw new Error(`handle ${handle} is taken`);
-      // The handle's domain is the asker's (a row registered before #113 took the request's host name).
-      if (o.domain && had.domain !== o.domain) this.o.db.add(handle, { domain: o.domain });
-      if (o.publish !== false && had.status !== "enabled") this.o.db.setStatus(handle, "enabled");
-      const identity = had.identity ?? await rootIdentity(await this.o.walletFor(had));
-      return { handle, identity, url: this.originOf(handle) };
-    }
-    const mine = this.o.db.list().find((r) => r.kind === "mailbox" && r.owner === owner);
-    if (mine) throw new Error(`${short(owner)} has a mailbox instance here already: ${mine.handle}`);
-    const store = this.newStore(handle);
-    if (storeExists(storeSpec({ store, handle }))) throw new Error(`handle ${handle}: a store is at ${storeSpec({ store, handle })} already`);
-    this.o.db.add(handle, { store, status: "disabled", kind: "mailbox", owner, ...(o.domain ? { domain: o.domain } : {}) });
-    await this.bootRow(handle, { kind: "code" });
-    const identity = this.o.db.get(handle)!.identity!;
-    if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
-    this.say("router", `created mailbox instance ${handle}@${this.o.db.get(handle)!.domain} (${short(identity)}) for ${short(owner)}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}`);
-    return { handle, identity, url: this.originOf(handle) };
   }
 
   /**
@@ -1587,11 +1553,7 @@ export class Router {
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */
-  genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
-    if (row.kind === "mailbox") {
-      if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
-      return { identity, root: [row.owner], handle: row.handle, domain: row.domain, mailbox: true, network: this.o.network };
-    }
+  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const genesisDefaults = this.o.genesis?.defaults;
     const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
@@ -1885,7 +1847,7 @@ export class Router {
    * The host's headers feed (#102) for an instance whose dispatch table is
    * `rows`: subscribed (box `chain`) while it is enabled and a row takes
    * events in box `chain` by name (the chain app's `event` row; dispatch.zig
-   * forEvent) — a catch-all `*` row (a mailbox instance's) is not one —
+   * forEvent) — a catch-all `*` row is not one —
    * else not. One line when that changes.
    */
   private followHeaders(handle: string, rows: DispatchRow[]): void {
@@ -2276,13 +2238,13 @@ export class Router {
    * GET /skeins?key=<hex> at the host's own origin: the skeins on this host whose head `grants`
    * (#143) names `key` among root's holders — each enabled agent row's store file read read-only,
    * no kernel — as JSON [{handle, identity, url}]. A key's skeins are the host's to say (no token
-   * in a wallet tracks them). Unsigned, anyone; mailbox instances are not listed.
+   * in a wallet tracks them). Unsigned, anyone.
    */
   private async skeinsHeldBy(key: string): Promise<RouterResponse> {
     if (!/^0[23][0-9a-f]{64}$/.test(key)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "key: an identity key (33 bytes, hex)" });
     const out: Array<{ handle: string; identity: string; url: string }> = [];
     for (const row of this.o.db.list("enabled")) {
-      if (row.kind === "mailbox" || !row.identity) continue;
+      if (!row.identity) continue;
       if ((await this.rootsOf(row)).includes(key)) out.push({ handle: row.handle, identity: row.identity, url: this.originOf(row.handle) });
     }
     return json(200, out);

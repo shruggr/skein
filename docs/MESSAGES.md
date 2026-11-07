@@ -385,9 +385,9 @@ A request's thread steps on `callFuelLimit` (the budget the front door had
 as a call, default 10^10), not `fuelPerStep`; a thread it launches steps on
 `fuelPerStep` like any other.
 
-The **default routes**: the BRC-33 messagebox (`/sendMessage`,
-`/listMessages`, `/acknowledgeMessage`, at the root and under `/messagebox`)
-and the explorer (`/explore…`, read op `explore`: the log, threads, a thread,
+The **default routes**: the skein's own mail (`/sendMessage` → the mail
+program; a messagebox for other keys is the messagebox app's, under
+`/messagebox/`, "The messagebox", below) and the explorer (`/explore…`, read op `explore`: the log, threads, a thread,
 a head, a record, what points at a record (`/explore/edges/<cid>?rel=`, #92),
 as DAG-JSON; `programs/frontdoor/explore.zig`). The management site (an
 app, shruggr/skein-site: `/site/`, and `/` by the owner's row, #125; not in
@@ -484,7 +484,7 @@ has the shapes).
 - **Events** (no sender, self-validating) come only through the host's
   specific wiring, never an open box: its feeds (#29: headers), its
   broadcaster's proofs (#65: `{kind: "proof", subject, txid, path, …}` in box
-  `chain`), and what a front door's step routes (`:ack`; #51: an accepted
+  `chain`), and what a front door's step routes (#51: an accepted
   libp2p message, `p2p` in `libp2p:<topic>`, below) — or a record the door
   validates on the way in (#121, #164): when the box's `event` route names
   `kernel.beef`, the host sends the record beside the entry and the door
@@ -504,9 +504,13 @@ has the shapes).
 
 ## The messagebox
 
-`programs/messagebox` (Zig) is the BRC-33 messagebox inside the instance,
-called by the front door's routes. Bodies are JSON read as DAG-JSON
-(`{"/": "<cid>"}` a link, `{"/": {"bytes": "<base64>"}}` bytes), or BRC-231
+Two programs carry mail, one per side of the line between a skein's own mail
+and mail it keeps for others.
+
+**The mail program** (`programs/mail`, Zig, every genesis) is the skein's
+own mail: its route `/sendMessage` (behind `kernel.brc104`) takes a message
+for **this instance** only. Bodies are JSON read as DAG-JSON (`{"/":
+"<cid>"}` a link, `{"/": {"bytes": "<base64>"}}` bytes), or BRC-231
 (`Content-Type: application/cbor`: `recipient` 33 bytes, `body` dag-cbor
 bytes); the answer is in the form asked.
 
@@ -516,125 +520,111 @@ bytes); the answer is in the form asked.
   BRC-231 message that names `nonce` (and `subject?`), another instance's
   emit delivered on its own session, kept as the record it emitted (#126
   step 4). A message carrying a `signature` is refused (400): the session is
-  the proof. Accepted when something takes it: for this instance's
-  own boxes, a dispatch row on `(sender, box)` — the kernel's own, or a
-  program's — or a reply to a message this instance sent that sender; for
-  the identity it keeps a mailbox for (its owner), a row whose program is
-  the messagebox. Refused, only the request is recorded. The answer carries `id` (the record's CID) and
-  `results` echoing the client's `messageId`.
-- **listMessages** is a read: the caller's list in that box, `{messageId,
-  sender, body, …}` with `messageId` the mail record's CID (JSON: the body as
-  DAG-JSON text). Its request is the only record.
-- **acknowledgeMessage** → one event to admit: `{kind: "ack", reader, ids,
-  session}` in `:ack`, which the messagebox, stepped, applies: the reader's
-  pointer moves. The records stay in the log.
+  the proof. Accepted when a route takes its box (the kernel's own, or a
+  program's), or it replies to a message this instance sent that sender;
+  else 403 `ERR_NOT_SUBSCRIBED`. Any other recipient: 403
+  `ERR_ACCOUNT_REQUIRED` — a skein keeps no mail for another key. The answer
+  carries `id` (the record's CID) and `results` echoing the client's
+  `messageId`.
 
-State: the head `mailbox` names `{kind: "mailbox", lists: [{recipient, box,
-list}]}`, each `{kind: "mail-list", recipient, box, acked, messages: [{id,
-at}]}` — the unacknowledged messages in arrival order. An instance's own
-routed boxes keep no list: admission is the acknowledgement, the log is
-the queue. **A mailbox exists only where a row to the messagebox
-exists**: a message no row sends the messagebox is refused (`403`).
+The instance's own routed boxes keep no list: admission is the
+acknowledgement, the log is the queue. A skein has no `/listMessages` or
+`/acknowledgeMessage` of its own. Delivery out is the mail program's
+delivery thread, which emits the `deliver` intention (#70, #157: no step has
+an http import; the host carries it — "Delivery to a messagebox", below).
 
-Delivery out is the messagebox's delivery thread, which emits the
-`deliver` intention (#70, #157: no step has an http import; the host carries
-it — "Delivery to a messagebox", below).
+**The messagebox app** (shruggr/skein-messagebox, installed in the host
+skein beside onboard by the host image) is the BRC-33 messagebox for the keys
+it hosts — the keys of `config.messagebox.index` (`onboard/index`: every
+registered handle's): one mailbox per key, boxes inside it, under its own
+path. A handle's messagebox URL is `<the host skein's URL>/messagebox`; a
+client shakes hands with the skein at the top of the domain (BRC-104), and
+posts under the URL.
 
-## Mailbox instances
+- `POST /messagebox/sendMessage` — `kernel.brc104`, then the app's filter
+  `hosted`: the recipient a hosted key (not the skein's own), else 403
+  `ERR_ACCOUNT_REQUIRED` and nothing logged; the handler `send` stores the
+  message (the mail record, as above) and adds it to `{recipient, box}`'s
+  list in the request's own step.
+- `POST /messagebox/acknowledgeMessage` — `kernel.brc104`; the handler
+  `acknowledge` removes the ids from the caller's own lists, in its step.
+- `POST /messagebox/listMessages` — `kernel.brc104`, then the filter `list`:
+  a read route, the caller's box answered by the filter; nothing is logged.
 
-A mailbox instance is a **wallet's** messagebox, never a skein's (#126 step
-4): a skein receives mail only at its own front door (or over libp2p), where
-it verifies the sender itself; a messagebox someone else keeps can only hand
-on what was sent to it, which the receiving skein could not verify. There is
-no mailbox pull path into a skein: the browser page reads its identity's
-mailbox with its wallet and shows what is there, and if the user wants their
-instance to act on something, the user sends the instance a message of
-their own, on their own session with it.
+State: the head `messagebox/mailbox` names `{kind: "mailbox", lists:
+[{recipient, box, list}]}`, each `{kind: "mail-list", recipient, box, acked,
+messages: [{id, at}]}` — the unacknowledged messages in arrival order.
 
-An identity outside the host — David's wallet, the inference peer, a browser
-tab — gets its mail kept by a **mailbox instance**: an instance with only the
-front door and the messagebox, whose dispatch rows send `:ack` and every
-message from anyone in any box (`*`) to the messagebox, for its owner. Its
-sessions are records like any instance's (#68). It has an identity of its own (its signer's key;
-the BRC-104 counterparty), and keeps the owner's mail as the owner's.
+A mailbox is a **wallet's**, never a skein's (#126 step 4): a skein receives
+mail only at its own front door (or over libp2p), where it verifies the
+sender itself; a messagebox someone else keeps can only hand on what was
+sent to it, which the receiving skein could not verify. There is no mailbox
+pull path into a skein: the browser page reads its identity's mailbox with
+its wallet and shows what is there, and if the user wants their instance to
+act on something, the user sends the instance a message of their own, on
+their own session with it. (Before 0.4.1 a wallet's mail was kept by a
+**mailbox instance** per key; there are none now.)
 
-Every mailbox instance is made by the instance manager's `create` with image
-`mailbox` (#113, `Router.createInstance`; "The providers", below): the row
-`kind: mailbox`, its owner and domain, the store booted with the owner in its
-genesis (no claim), published at once. The same owner and handle again
-answers for the row that is there; a key with another mailbox here is
-refused. Two callers:
+## Registering a handle
 
-- **A registration** (#103, #113), the user's path. The host's own origin
-  carries it into the host skein, where the onboarding app
-  (shruggr/skein-onboard ≥ 0.2.0) takes it. The contract, exactly:
+**A registration** (#103, #113): the host's own origin carries it into
+the host skein, where the onboarding app (shruggr/skein-onboard ≥ 0.5.0)
+takes it. The contract, exactly:
 
-  1. `GET <host>/.well-known/skein-host` → `{origin, domain}`: the router's
-     origin and the **handle domain** — the onboarding app's
-     `config.onboard.domain`, the one setting every handle on the host is at
-     (`skein.nexus` in production: `handle@skein.nexus`). Answered at every
-     host name, an instance's origin too, so a page an instance serves finds
-     it on its own origin.
-  2. The wallet signs the UTF-8 text `register <username>@<domain>` (the
-     domain from step 1, lower case) with `createSignature({protocolID: [2,
-     "skein register"], keyID: <username>, counterparty: "anyone", data})`.
-     The domain is in the text, so a signature for one host is not good at
-     another.
-  3. `POST <origin>/account/register` over the wallet's BRC-104 session
-     with the host's origin (#135: a registration is a write, so a signed
-     request; the stock AuthFetch, its handshake at `<origin>/.well-known/auth`
-     the host skein's), body JSON `{username, identityKey,
-     signature}`: the registrant is the session's identity — no session
-     401, an `identityKey` that is not the session's 403 (skein-onboard
-     ≥ 0.3.3); `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
-     starting or ending with `-`), `identityKey` the key (hex, 33 bytes),
-     `signature` hex DER. The router appends it to the host skein as a
-     request entry (route `/onboard/register`); nothing in the router
-     checks it.
-  4. The answer, when the app's thread has asked the instance manager for
-     the mailbox and the certifier for the certificate and recorded both:
-     `200 {handle, domain, identityKey, messagebox: <the mailbox's origin>,
-     certificate, keyringForSubject}` — the handle certificate for the key's
-     wallet to keep (`acquireCertificate`, `acquisitionProtocol: "direct"`,
-     `keyringRevealer: "certifier"`; "BRC-169 is discovery", below).
-     Refusals are `{error}`: 400 not JSON, not the three fields, not a
-     label; 401 the signature does not verify for that key over that text;
-     409 the name is reserved (`id`, `host`), is another key's (a handle
-     here or an instance's), or the key holds another handle here (one key,
-     one handle); 500 the thread failed.
+1. `GET <host>/.well-known/skein-host` → `{origin, domain}`: the router's
+   origin and the **handle domain** — the onboarding app's
+   `config.onboard.domain`, the one setting every handle on the host is at
+   (`skein.nexus` in production: `handle@skein.nexus`). Answered at every
+   host name, an instance's origin too, so a page an instance serves finds
+   it on its own origin.
+2. The wallet signs the UTF-8 text `register <username>@<domain>` (the
+   domain from step 1, lower case) with `createSignature({protocolID: [2,
+   "skein register"], keyID: <username>, counterparty: "anyone", data})`.
+   The domain is in the text, so a signature for one host is not good at
+   another.
+3. `POST <origin>/account/register` over the wallet's BRC-104 session
+   with the host's origin (#135: a registration is a write, so a signed
+   request; the stock AuthFetch, its handshake at `<origin>/.well-known/auth`
+   the host skein's), body JSON `{username, identityKey,
+   signature}`: the registrant is the session's identity — no session
+   401, an `identityKey` that is not the session's 403 (skein-onboard
+   ≥ 0.3.3); `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
+   starting or ending with `-`), `identityKey` the key (hex, 33 bytes),
+   `signature` hex DER. The router appends it to the host skein as a
+   request entry (route `/onboard/register`); nothing in the router
+   checks it.
+4. The answer, when the app's thread has asked the certifier for the
+   certificate and recorded it (no instance is made, skein-onboard ≥ 0.5.0):
+   `200 {handle, domain, identityKey, messagebox: <config.onboard.messagebox:
+   the host skein's URL + /messagebox>, certificate, keyringForSubject}` — the handle certificate for the key's
+   wallet to keep (`acquireCertificate`, `acquisitionProtocol: "direct"`,
+   `keyringRevealer: "certifier"`; "BRC-169 is discovery", below).
+   Refusals are `{error}`: 400 not JSON, not the three fields, not a
+   label; 401 the signature does not verify for that key over that text;
+   409 the name is reserved (`id`, `host`), is another key's, or the key
+   holds another handle here (one key, one handle); 503 the app has no
+   `config.onboard.messagebox`; 500 the thread failed.
 
-  **The same key and name again** registers nothing new: the mailbox stands,
-  and a new certificate is issued under a **new serial number** (each issue
-  has its own: the hash of its issuance record), so a wallet that removed the
-  earlier one (`relinquishCertificate`, which the toolbox keeps as a deleted
-  row unique on type, certifier and serial) can acquire it again. The earlier
-  certificate stays in the host skein's records, the trail revocation will
-  use.
+**The same key and name again** registers nothing new: the handle keeps
+the messagebox its certificate names, and a new certificate is issued under a **new serial number** (each issue
+has its own: the hash of its issuance record), so a wallet that removed the
+earlier one (`relinquishCertificate`, which the toolbox keeps as a deleted
+row unique on type, certifier and serial) can acquire it again. The earlier
+certificate stays in the host skein's records, the trail revocation will
+use.
 
-  **The profile** (#104) goes to the same app: `POST <origin>/account/profile`,
-  body JSON `{handle, record: <base64 of the DAG-CBOR profile bytes>,
-  signature: <hex DER>}` — the record `{domain, name?, avatar?}`
-  (`@1sat/utils` `encodeProfile`), its `domain` the handle domain, signed by
-  the handle's key with `createSignature({protocolID: [1, "metanet handles
-  profile"], keyID: "1", counterparty: "anyone", data: <the bytes>})` →
-  `200 {handle, profile, displayName?, avatarURL?}`; 401 another key's
-  signature, 400 another domain or shape, 404 no such handle. The app keeps
-  it (`onboard/profiles/<handle>`); resolve and search serve it. (Before
-  #113 the page wrote it to the mailbox instance's head `profile`; the host
-  reads that no more.)
-- **The operator**, out of band: `skein-host add <handle> --mailbox --owner
-  <key> [--domain d]` calls the same `createInstance` through a router of
-  its own — for a host with no host skein (a dev host, `up.sh`'s `david` and
-  `infer`). Such a mailbox has no record in the onboarding app, so it is not
-  certified and does not resolve until it is adopted: `skein-host
-  import-handles` sends `{fn: "onboard.adopt", args: {handle, owner}}` to
-  `/onboard/call` as the host skein's owner for each mailbox row the app has
-  no record of (registrations made before #113 too); the app records and
-  certifies it at its domain as a registration would. `skein-host mailboxes`
-  lists them.
+**The profile** (#104) goes to the same app: `POST <origin>/account/profile`,
+body JSON `{handle, record: <base64 of the DAG-CBOR profile bytes>,
+signature: <hex DER>}` — the record `{domain, name?, avatar?}`
+(`@1sat/utils` `encodeProfile`), its `domain` the handle domain, signed by
+the handle's key with `createSignature({protocolID: [1, "metanet handles
+profile"], keyID: "1", counterparty: "anyone", data: <the bytes>})` →
+`200 {handle, profile, displayName?, avatarURL?}`; 401 another key's
+signature, 400 another domain or shape, 404 no such handle. The app keeps
+it (`onboard/profiles/<handle>`); resolve and search serve it.
 
-The host's resolve endpoint answers a mailbox instance's handle with its
-owner's key and the instance's origin.
+The host's resolve endpoint answers a registered handle with its key and
+the messagebox its certificate names.
 
 ## Outbound: emit, the address book and the providers
 
@@ -891,7 +881,7 @@ message routes by `replyTo` to the thread awaiting it.
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `chain/status` (#65, #128, below) |
-| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}, topics?: [text]}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`). `topics` (#137): the overlay names (gossip topics and lookup services alike) the host routes to the instance at the bare host, recorded with the row — non-empty text, no duplicates |
+| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}, topics?: [text]}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below). `domain`: the handle's domain, recorded with the row (default `localhost`). `topics` (#137): the overlay names (gossip topics and lookup services alike) the host routes to the instance at the bare host, recorded with the row — non-empty text, no duplicates |
 | | `start` | `{handle, topics?: [text]}` | `{handle, started: true, url}`: published and started; `topics` replaces the row's (absent: kept) |
 | | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
 | `certifier` | `issue` | `{handle, domain, subject: bytes(33), serialNumber, issuance?}` | `{certificate, holder: {certificate, keyringForSubject}, serialNumber, issuance?}`: the handle certificate for handle@domain → subject under that serial, signed by the certifier key — the resolver's copy and the holder's (#113; "BRC-169 is discovery", below). Records nothing |
@@ -1122,9 +1112,9 @@ mailbox's `cron` box and answers, and ticks, at the sender's messagebox
 ### Delivery to a messagebox: the `deliver` intention (#70, #157)
 
 A `mailbox` recipient's message is delivered by the instance's own
-**delivery thread** — the kernel launches the messagebox program for it
-(origin `{program: messagebox, args: {message, transport: "mailbox"}}`) —
-and carried by the **host** (`programs/messagebox/deliver.zig`; docs/VM.md,
+**delivery thread** — the kernel launches the mail program for it
+(origin `{program: mail, args: {message, transport: "mailbox"}}`) —
+and carried by the **host** (`programs/mail/deliver.zig`; docs/VM.md,
 "Delivery to a messagebox"):
 
 ```
@@ -1143,17 +1133,20 @@ step 2   200 and the same CID in the answer → finished {delivered: <cid>, url}
 ```
 
 - **The session is the host's** (#157: a step never waits on the outside
-  world), kept per base URL, made again when the server answers 401;
+  world), kept per session base — the skein the URL is for: its origin,
+  plus a leading `/@<handle>` (src/session-base.ts; the rest of the path, a
+  messagebox app's `/messagebox` for one, is a route in it; the handshake at
+  `<base>/.well-known/auth`) — made again when the server answers 401;
   `server` is the identity that answered the handshake — the recipient's
-  own, or a mailbox instance's for a mailbox kept for someone. The request
+  own, or the skein's that keeps a mailbox for it. The request
   is signed by the instance's key through the host's key holder (the same
   signer the kernel asks), outside any step. Sending never tells the peer
   who we are beyond the session (no claim, no registration, #40).
 - **The session is the proof** (#126 step 4): the recipient's front door
   verifies the BRC-104 request and keeps the record with `sender` the
-  session's identity; nothing in the message is signed. A mailbox instance
+  session's identity; nothing in the message is signed. A messagebox
   keeping mail for a wallet keeps it for that wallet to read; it is never
-  forwarded into a skein ("Mailbox instances", above).
+  forwarded into a skein ("The messagebox", above).
 - **The answer is the proof back**: the server's BRC-104 signature over it
   (status, signed headers, body, for the request id the instance made),
   checked at the door through the signer; a forged or misdirected answer is
@@ -1209,7 +1202,7 @@ appended as a request entry, the app's route handler answering:
 | `GET /.well-known/metanet-handles/search` | `/onboard/search` |
 | `GET /bsvalias/id/<handle>[@<domain>]` | `/onboard/bsvalias/id/…` (a prefix row) |
 | `POST /.well-known/auth` | `/.well-known/auth` (the BRC-103 handshake: the host skein's session, #135) |
-| `POST /account/register` | `/onboard/register` ("Mailbox instances", above; signed, #135) |
+| `POST /account/register` | `/onboard/register` ("Registering a handle", above; signed, #135) |
 | `POST /account/profile` | `/onboard/profile` |
 
 A host with no host skein answers them 404. The app's configuration
@@ -1287,8 +1280,9 @@ without a domain, the handle domain) → `{metanetHandles: "1.0", handle,
 domain, identityKey, certificate, messagebox, ttl: 300, revoked: false}` from
 the handle's current certificate record: `certificate` the resolver's copy
 as issued (not signed again per request), `identityKey` its subject — a
-mailbox instance's owner, or an onboarded skein's own identity — and
-`messagebox` the instance's origin. Errors are §5.3's (`400
+registered wallet's key, or an onboarded skein's own identity — and
+`messagebox` the one its certificate names (the host skein's messagebox app
+for a registration, the instance's origin for an onboarded skein). Errors are §5.3's (`400
 malformed-handle`; `404 handle-not-found`, another domain included). With
 a kept profile (#104) the answer adds (§5.1 item 3: clients ignore fields
 they do not know)
@@ -1810,8 +1804,7 @@ message {to: "@handle@domain", text}
   wins, over the rows as they stand when the entry is processed
   (docs/VM.md, "The dispatch table"), seeded by the genesis and changed
   only by the kernel's `dispatch` operation on the owner's (or a
-  delegate's) messages. A row may admit anyone (`*`) and take any box (`*`;
-  the mailbox instance's catch-all). The program is the **box's program**:
+  delegate's) messages. A row may admit anyone (`*`) and take any box (`*`). The program is the **box's program**:
   `(owner, run) → run-handler` (the shell app's row, #83); a kernel row is the kernel's own operation.
 - **The handler** knows the box's message shape; its arguments name the
   message record and the body; it reads the body and launches the next thread.
@@ -1831,9 +1824,9 @@ Between the loop (shruggr/skein-chat `programs/loop`) and the inference peer (`s
 `bin/skein-infer`), as decided in issue #12. The peer is **stateful**: it
 holds each sender's conversation graph; the engine behind it (an
 OpenAI-compatible endpoint) is not. Requests go in the peer's `infer` box (its
-mailbox instance), replies come back in the instance's `completions` box with
+hosted mailbox), replies come back in the instance's `completions` box with
 `replyTo` = the request's id, as for any reply. Both bodies are dag-cbor
-records. The peer reads its mailbox instance with raw BRC-33
+records. The peer reads its mailbox with raw BRC-33
 (`SKEIN_MAILBOX_URL`) and answers a sender at the messagebox its own address
 book names for it (`SKEIN_INFER_PEERS`, default `~/.skein/infer-peers.json`:
 `{"<key hex>": "<messagebox URL>"}`, which `scripts/host/up.sh` writes for

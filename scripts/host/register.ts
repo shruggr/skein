@@ -1,13 +1,13 @@
-// A mailbox instance for an identity outside the host (#40, #113): the signed
+// A handle for an identity outside the host (#113, skein-onboard 0.5.0): the signed
 // registration at POST /account/register {username, identityKey, signature} over the identity's session (#135),
 // which the router carries into the host skein, where the onboarding app
-// (shruggr/skein-onboard) checks it, asks the instance manager for the
-// mailbox and the certifier for the handle certificate. The signature is by
-// the identity's own wallet-api over "register <username>@<domain>"
-// (protocol [2, "skein register"], keyID the username, counterparty anyone);
-// the domain is the host's handle domain, read from /.well-known/skein-host.
-// Prints the mailbox's URL; the same name again is a new certificate for the
-// same mailbox (409: the name is another key's, or this key has another).
+// (shruggr/skein-onboard) checks it and asks the certifier for the handle
+// certificate; no instance is made: the handle's mailbox is the host skein's
+// messagebox app. The signature is by the identity's own wallet-api over
+// "register <username>@<domain>" (protocol [2, "skein register"], keyID the
+// username, counterparty anyone); the domain is the host's handle domain, read
+// from /.well-known/skein-host. Prints the messagebox URL; the same name again
+// is a new certificate (409: the name is another key's, or this key has another).
 //   node scripts/host/register.ts <wallet-url> <originator> <username> [host-url]
 import { AuthFetch, HTTPWalletJSON, Utils } from "@bsv/sdk";
 

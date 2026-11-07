@@ -127,7 +127,7 @@ const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) }, { genesis: { defaults: { walletNetwork: "regtest" } } });
 let store = "";
 try {
-  h.mailbox("david", h.ownerId);
+  const mailbox = await h.ownerInbox();
   await h.router.start();
   const handle = "col";
   const booted = await h.image(handle);
@@ -141,7 +141,7 @@ try {
   const origin = h.origin(handle);
 
   // ------------------------------------------------ the claim; the chain app and the collection app by message
-  await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, handle, planClaim(identity, { messagebox: h.origin("david") }));
+  await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, handle, planClaim(identity, { messagebox: mailbox }));
   const root = new RawBox(h.owner, `${h.base}/@${handle}`);
   const host = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
   for (const a of [CHAIN_APP, COLLECTION_APP]) {

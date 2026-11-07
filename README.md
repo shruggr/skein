@@ -130,8 +130,9 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   skein's onboarding app (shruggr/skein-onboard, #113): the router carries
   `/manifest.json`, `/.well-known/metanet-handles/resolve` and `/search`,
   `/bsvalias/id/…`, `POST /account/register` and `POST /account/profile`
-  into the host skein. The app registers handles (a mailbox instance from
-  the instance manager, signed over `register <name>@<domain>`), has the
+  into the host skein. The app registers handles (signed over `register
+  <name>@<domain>`; no instance: each handle's mailbox is the host skein's
+  messagebox app, shruggr/skein-messagebox, at `<host skein>/messagebox`), has the
   host's certifier (a child of `master.key`, never in an instance) sign each
   handle certificate under a serial of its own, records every issue, and
   answers resolve, search and the manifest from those records. The handle
@@ -145,8 +146,8 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   It has no shell and no chat loop: those are apps, installed next. `skein-host add <h> --boot <dir>` boots
   from a system tree instead (docs/BOOTSTRAP.md). A new log format means a
   new store: move `runtime.db` aside and start again.
-- The full dev stack (owner and inference wallets, mailbox instances, address
-  books, the inference peer) is `scripts/host/up.sh`; see
+- The full dev stack (owner and inference wallets, their handles and hosted
+  mailboxes, address books, the inference peer) is `scripts/host/up.sh`; see
   `scripts/host/README.md`.
 - The host page is http://127.0.0.1:4600 (every instance, a link to its
   origin). A skein from the default image serves its management page, the
@@ -238,15 +239,15 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   asks the host for `<name>@<domain>` for your key (the domain is the
   router's host name, `id.skein.nexus` in production; the page finds the
   router through `/.well-known/skein-host`, which the router answers at every
-  skein's origin): your wallet signs the request, the host creates your
-  mailbox instance and answers with the BRC-52 handle certificate, and your
+  skein's origin): your wallet signs the request, and the host answers with
+  the BRC-52 handle certificate (your mailbox: the host skein's messagebox app), and your
   wallet keeps it (`acquireCertificate`). "Your handles" lists those
   certificates (`listCertificates`) and the mailbox each resolves to. The
-  labels `id` and `host` and every instance's handle are refused.
+  labels `id` and `host` are refused.
 - **Your profile** (#104). Each of your handles has a Profile form: a name
   and an avatar (an image inscription, by outpoint). Your wallet signs the
   profile record (the OpNS one: DAG-CBOR `{domain, name?, avatar?}`), and
-  the page writes it to your mailbox instance as its owner. The host serves
+  the page posts it to the host (`/account/profile`). The host serves
   it with the handle when it is resolved or found; the page shows it as
   signed by the handle's key. "Find a handle" searches the host by handle
   or name.
@@ -365,7 +366,7 @@ bin/skein install chat --instance martha        # the chat app: box chat
 bin/skein whoami
 bin/skein import ~/some/dir                      # tree objects into the kernel's objects operation; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'     # box shell/run (the shell app: the shell over a tree)
-bin/skein inbox --wait                           # the answer, from your mailbox instance
+bin/skein inbox --wait                           # the answer, from your mailbox
 bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs the inference peer, bin/skein-infer)
 ```
 
@@ -375,14 +376,14 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
   signed by your wallet. Its Inbox lists a box of any mailbox you give it
   (by default the mailbox your handle certificate resolves to) and syncs its
   `metanet_inbox` into that wallet with `@1sat/actions`' `syncMetanetInbox`.
-- Messages are BRC-33 (`/sendMessage`, `/listMessages`,
-  `/acknowledgeMessage`) on a BRC-104 session, bodies dag-cbor
-  (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its
-  record; an answer names it in `replyTo`.
-- What an instance sends you goes to your mailbox instance (an instance with
-  only the front door and the messagebox): a registration makes one (#113),
-  or `skein-host add <h> --mailbox --owner <key>` on a host with no host
-  skein.
+- Messages are BRC-33 on a BRC-104 session, bodies dag-cbor
+  (`application/cbor`, BRC-231) or JSON: a skein takes its own mail at
+  `/sendMessage`; a messagebox for other keys (`/sendMessage`,
+  `/listMessages`, `/acknowledgeMessage` under its URL) is the messagebox
+  app's. A message's id is the CID of its record; an answer names it in `replyTo`.
+- What an instance sends you goes to your mailbox — the messagebox your
+  handle resolves to (a registration at a host skein: its messagebox app), as
+  the host's `SKEIN_OWNER_MESSAGEBOX` names it for the owner.
 - libp2p: an instance with libp2p rows gets a node in the host; topic
   messages and stream frames go through the same front door.
 - App routes live under `/<app>/` (an overlay's `/<app>/submit`,

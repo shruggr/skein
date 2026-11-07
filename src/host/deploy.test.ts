@@ -67,15 +67,15 @@ async function agentDir(t: { after(fn: () => unknown): void }): Promise<string> 
 const answer = (content: string) => ({ choices: [{ message: { role: "assistant", content } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "qwen38" });
 
 /**
- * A test host with the owner's and the inference peer's mailboxes and the
+ * A test host with the owner's and the inference peer's hosted mailboxes (the host skein) and the
  * agents `handles`, started; the owner's sessions with each front door; an
  * infer peer answering from a script; each agent's store file, read-only.
  */
 async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId });
-  h.mailbox("david", h.ownerId);
-  h.mailbox("infer", inferId);
+  const mailbox = await h.ownerInbox();
+  const inferBox = await h.inbox(inferKey, "infer");
   for (const x of handles) h.instance(x);
   await h.router.start();
   const requests: Json[] = [];
@@ -87,9 +87,9 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
   const peer = new InferPeer({
     wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: f, log: (l) => h.lines.push(`[infer] ${l}`),
     raw: {
-      inbox: new RawBox(w, `${h.base}/@infer`),
+      inbox: new RawBox(w, inferBox),
       outbox: (url) => new RawBox(w, url),
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
     },
   });
   const owner = { wallet: h.owner, box: (row: { handle: string }) => new RawBox(h.owner, `${h.base}/@${row.handle}`) };
@@ -339,7 +339,7 @@ test("skein-host knows / roster --for: each agent's ROSTER.md from host.db and t
   const e = env();
   const cli = (...argv: string[]) => main(argv, e.env);
   const rosterOf = async (handle: string) => { const s = await store(handle); return new TextDecoder().decode(await readFile(s, (await headTree(s, MAIN))!, "ROSTER.md")); };
-  // Not --all: the host's mailbox instances (david, infer) are rows too.
+  // Not --all: the host skein (the owner's and the inference peer's mailboxes) is a row too.
   assert.equal(await cli("knows", "martha", "kurt"), 0);
   assert.equal(e.out.at(-1), "martha knows kurt");
   assert.equal(await cli("knows", "kurt", "martha"), 0);

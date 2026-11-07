@@ -2,7 +2,7 @@
 // issue #33) drives it — frames on its stdin/stdout, hydrated on demand,
 // stopped when idle — each instance an HTTP server (its front door, #40),
 // the owner and the inference peer speaking raw BRC-33 on BRC-104 sessions,
-// each with its mailbox instance on the same router. The shell and the chat
+// each with its mailbox at a hosted messagebox (the inboxes' host, inboxes.ts). The shell and the chat
 // loop are apps (#83): each instance that runs them has the shell app and/or
 // the chat app installed first (the owner's messages, `skein install`, #124; src/testapps.ts).
 // Checks a run and a chat answered end to end, a sleep woken by the
@@ -37,6 +37,7 @@ import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/test
 import { bundlesOf } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { BACKEND, routerStore, specFor, storeFor } from "./backend.ts";
+import { inboxes } from "./inboxes.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
@@ -56,36 +57,39 @@ const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 
 const db = new HostDb(join(home, "host.db"));
 db.add("zigtest", { store: storeFor(home, "zigtest") });
-const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), crontest: key("9999"), david: key("7777"), infer: key("8888") };
+const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), crontest: key("9999") };
 const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
+// The owner's and the inference peer's mailboxes: hosted at the inboxes' host (a registration each), named here for their handles.
+const ib = await inboxes(join(home, "inboxes"), { command: kernel, log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); } });
+const ownerBox = await ib.register(key(KEYS.owner), "david");
+const inferBox = await ib.register(key(KEYS.infer), "infer");
+const elsewhere = new Map([["david", { identityKey: ownerId, messagebox: ownerBox }], ["infer", { identityKey: inferId, messagebox: inferBox }]]);
+check(ownerBox === inferBox && ownerBox.endsWith("/messagebox"), `the owner and the inference peer registered at the inboxes' host: one messagebox (${ownerBox})`);
 const make = (fuel?: string): Router => new Router({
   db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
-  // No host skein here (#113): the handles resolve over host.db (a fixture).
-  discovery: fakeDiscovery(db, () => router),
+  // No host skein here (#113): the handles resolve over host.db (a fixture), the inbox handles at the inboxes' host.
+  discovery: fakeDiscovery(db, () => router, elsewhere),
+  http: (req) => ib.http(req), ownerMessagebox: ownerBox,
   owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } }, ...routerStore(home),
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 let router = make();
 let base = "";
 let port = 0;
-// The router comes back on the same port: an agent's genesis names its owner's mailbox by URL.
+// The router comes back on the same port (its instances' origins are in their address books).
 const listen = async (r: Router) => { await r.listen(port); port = r.port; base = `http://127.0.0.1:${port}`; };
 await listen(router);
-// The owner's and the inference peer's mailboxes: mailbox instances, by the instance manager's create (#113: image
-// `mailbox`, what a registration through the host skein asks for; this host has no host skein).
-const mb = async (id: string, name: string) => (await router.createInstance(name, id, { image: "mailbox" })).url === router.originOf(name);
-check(await mb(ownerId, "david"), "the owner's mailbox instance (the manager's create, image mailbox)");
-check(await mb(inferId, "infer"), "the inference peer's mailbox instance");
 await router.start();
 const zig = db.get("zigtest")!.identity!;
 
 const boxes = new Map<string, RawBox>();
 const boxFor = (handle: string) => { const k = `${base}/${handle}`; let b = boxes.get(k); if (!b) { b = new RawBox(owner, `${base}/@${handle}`); boxes.set(k, b); } return b; };
 const sendTo = async (to: string, handle: string, b: string, body: unknown) => { await boxFor(handle).send(to, b, body); };
-const box = { ack: (ids: string[]) => boxFor("david").ack(ids) };
-const inbox = async (b: string) => (await boxFor("david").list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
+const mine = new RawBox(owner, ownerBox);
+const box = { ack: (ids: string[]) => mine.ack(ids) };
+const inbox = async (b: string) => (await mine.list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
 let waited: { exitCode?: number; stdout?: string } | undefined;
 /** Install apps into an instance as the owner (#83). */
 const install = async (handle: string, apps: PinnedApp[]) => { await router.hydrate(handle); await installApps({ home, port, owner, settled: () => router.settled() }, handle, apps); };
@@ -108,10 +112,10 @@ try {
   const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
     fetch: (async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "It holds README and src." } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
     raw: {
-      inbox: new RawBox(iw, `${base}/@infer`),
+      inbox: new RawBox(iw, inferBox),
       outbox: (url) => new RawBox(iw, url),
       // Its address book (#40), configured: every row's key at its origin.
-      addressOf: (k) => { const r = db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? db.mailboxOf(k); return r && router.originOf(r.handle); },
+      addressOf: (k) => { const r = db.list().find((x) => x.identity === k); return r && router.originOf(r.handle); },
     } });
   await sendTo(zig, "zigtest", "chat", { text: "What is here?", tree: root });
   const [a] = await until("the chat answer", async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });
@@ -135,7 +139,7 @@ try {
   router = make();
   await listen(router);
   await router.start();
-  // The owner's mail is its mailbox instance's records (the messagebox program): kept across the restart.
+  // The owner's mail is the inboxes' host skein's records (the messagebox app): this router's restart does not touch it.
   const [r3] = await results(1, "results", 20_000);
   check(text(r3!.body.stdout) === "again\n", "a router restart mid-sleep: hydrated at start, the wake still fires");
   await box.ack([r3!.id]);
@@ -182,8 +186,8 @@ try {
   await fs.mkdir(join(tree, "bin"));
   await fs.mkdir(join(tree, "etc"));
   await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/test/cron-demo/cron-demo.wasm")));
-  await fs.writeFile(join(tree, "bin/messagebox.wasm"), readFileSync(join(here, "../../wasm/messagebox.wasm")));
-  await fs.writeFile(join(tree, "etc/dispatch.json"), JSON.stringify([{ address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" }, { transport: "event", address: ":ack", program: "messagebox" }]));
+  await fs.writeFile(join(tree, "bin/mail.wasm"), readFileSync(join(here, "../../wasm/mail.wasm")));
+  await fs.writeFile(join(tree, "etc/dispatch.json"), JSON.stringify([{ address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" }]));
   db.add("crontest", { store: storeFor(home, "crontest") });
   const src = await dirSource(tree);
   await router.bootRow("crontest", { kind: "tree", root: src.root, objects: src.objects });
@@ -207,6 +211,7 @@ try {
   await router.stop();
 }
 db.close();
+await ib.stop();
 
 const fuelDb = specFor(home, "fueltest");
 const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
@@ -223,9 +228,9 @@ const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
 const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
 check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), specFor(home, "zigtest"), fuelDb, clockDb, specFor(home, "crontest")], { encoding: "utf8" });
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), specFor(home, "zigtest"), fuelDb, clockDb, specFor(home, "crontest"), ib.spec], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 4, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 5, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve (${BACKEND}): ${failures} FAILED\n` : `serve (${BACKEND}): all ok\n`);

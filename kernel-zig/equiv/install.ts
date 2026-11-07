@@ -54,14 +54,14 @@ const h = await testHost({ after: (f) => afters.push(f) });
 const work = mkdtempSync(join(tmpdir(), "skein-kz-install-"));
 let store = "";
 try {
-  // The caller: an identity with a mailbox instance here, in the instance's address book.
+  // The caller: an identity with a hosted mailbox here (the host skein's), in the instance's address book.
   const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
   const caller = ephemeralWallet(callerKey);
-  h.mailbox("caller", callerId);
+  const callerMailbox = await h.inbox(callerKey, "caller");
   const inst = h.instance("inst");
   await h.router.start();
   const owner = new RawBox(h.owner, `${h.base}/@inst`);
-  await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
+  await owner.send(inst, "peers", { op: "add", key: callerId, url: callerMailbox });
   await h.router.settled();
   store = h.db.get("inst")!.store;
 
@@ -130,7 +130,7 @@ try {
 
   // Calls by message: answered in the caller's mailbox.
   const callerBox = new RawBox(caller, `${h.base}/@inst`);
-  const mine = new RawBox(caller, h.origin("caller"));
+  const mine = new RawBox(caller, callerMailbox);
   const ask = async (body: Record<string, unknown>) => {
     const id = (await callerBox.send(inst, "app-demo", body)).id.toString();
     const m = await until(`the answer to ${JSON.stringify(body)}`, async () => {

@@ -1051,11 +1051,11 @@ messages (the messagebox's delivery threads, a BRC-104 client through the
 the page wallet's BRC-104 session with its instance — `http` requests to its
 front door, `frontFetch`, #126 step 4; K2: `admit` takes no mail entry), the
 providers' signed answers (`local` requests), and a timer for wakes. The
-page polls this identity's mailbox instance on the host (registered by the
-page; `listMessages` on a BRC-104 session) and shows every message there —
+page polls this identity's mailbox on the host (its handle registered by the
+page: the host skein's messagebox app; `listMessages` on a BRC-104 session) and shows every message there —
 what the instance sends its owner, a peer's mail to the user — and admits
 none into the instance: the mailbox is the user's (#126 step 4). An intermittent host: nothing runs while the tab is closed; inbound
-waits in the mailbox instance, wakes fire late at the next open.
+waits in the mailbox, wakes fire late at the next open.
 
 **Proof** (`equiv/run.sh`; `SKEIN_EQUIV_BROWSER=0` skips the Chrome parts):
 `equiv/browser.ts` replays every corpus store in headless Chrome (Playwright,
@@ -1067,8 +1067,8 @@ native replay — 12/12 identical (entries, updates with fuel, state CID; about
 above `SKEIN_BROWSER_MAX_MB` (256) a tab crashes holding the bundle, the blocks
 and the kernel's memory at once, so the shell in the browser build is no
 longer replayed (native and instrumented replays still cover them). `equiv/browser-live.ts` runs the page against a
-host on a scratch port with a scripted inference peer (on its own mailbox
-instance): the page registers its identity's mailbox instance; the chat app
+host on a scratch port with a scripted inference peer (its handle at the host
+skein, its mailbox the messagebox app): the page registers its identity's handle; the chat app
 is installed and the page chats, both on the page wallet's session with its
 instance; its instance asks inference through its delivery thread (the
 kernel's authfetch, the page moving the bytes); the peer's answer lands in
@@ -1114,7 +1114,7 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | RocksDB, one process (#158) | every store `replays.ts` checks also replayed into a set of a fresh RocksDB database (the same report, state CID and dump) and, a Zig one, migrated into one (the same dump; its replay the same state); the corpus, `serve.ts`, `chain.ts`, `overlay.ts`, `sync.ts`, `claim.ts`, `host.ts` and `git-clone.ts` run again with every host's instances sets of one database inside one `skein-kernel host` (`SKEIN_EQUIV_STORE=rocksdb`), their sets replayed after it stopped | all identical |
 | `equiv/pool.ts` (#158) | 8 instances × 500 entries submitted interleaved: each final state CID equals a serial run's and SQLite's; the same with `SKEIN_WORKERS=1`; a `call` on an instance whose step waits on a `wallet` request answered late comes back before the step ends, with the state as committed (the entry pending); a block only bob put is absent for alice (her kernel, her call, the host's reader), a block in `host/chain` readable by both; each set replayed after the process stopped, the same state CID; timings (1 vs N workers, commit cost on RocksDB and SQLite) | all ok; timings printed |
 | `equiv/lmdb.ts` (#96, #133) | two instances in one environment: a record and a program only bob put are absent for alice (her kernel's `has`/`get`, her `call` of the program; the host's lmdb-js reader too); a block both put in both sets; a block under `host/chain` (written straight into the environment, `equiv/lmdb-env.ts`) readable by both kernels and the reader; each set's size the sum of its own members' bytes; 8 instances on one router writing N entries and N blocks each at once, SQLite against LMDB (`SKEIN_EQUIV_BENCH_DIR` for a disk) | all ok; the timing printed |
-| `equiv/serve.ts` | `serve` as the host drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their mailbox instances: genesis, the shell app and the chat app installed (#83), a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a host restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
+| `equiv/serve.ts` | `serve` as the host drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their hosted mailboxes (the inboxes' host, equiv/inboxes.ts): genesis, the shell app and the chat app installed (#83), a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a host restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
 A replay comparison (`equiv/replays.ts`) requires z1 and z2 to be the
 same in: the replay reports (the runtime's log lines, the log tip, the final state record — which covers every index

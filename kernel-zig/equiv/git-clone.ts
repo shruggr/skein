@@ -173,20 +173,23 @@ const liarUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/liar
 // ---------------------------------------------------------------- the host: the fetch provider's network is real
 
 const asked: HttpRequest[] = [];
-const network = async (r: HttpRequest) => { asked.push(r); return await fetchHttp(r); };
+// The owner's mailbox is at the inboxes' host (testhost.ts inbox): its deliveries go out too, and are not the git app's fetches.
+let inboxPort = "";
+const network = async (r: HttpRequest) => { if (new URL(r.url).port !== inboxPort) asked.push(r); return await fetchHttp(r); };
 // The ov-dyn record's routes (#143): the manifest's three, then the derived own box, /submit and the read /lookup.
 const OV_ROUTES = "mailbox register overlay, mailbox submit [kernel.beef] overlay, event  overlay, mailbox ov-dyn overlay, http /submit [kernel.beef] overlay.submit, http /lookup [ov-dyn.lookup] (read)";
 const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) }, { http: network, rocks: ROCKS_MODE });
 let store = "";
 try {
-  h.mailbox("david", h.ownerId);
+  const mailbox = await h.ownerInbox();
+  inboxPort = String((await h.inboxHost()).router.port);
   const inst = h.instance("inst");
   await h.router.start();
   await h.install("inst", [GIT_APP]);
   store = storeSpec(h.db.get("inst")!);
   const owner = new RawBox(h.owner, `${h.base}/@inst`);
-  const mine = new RawBox(h.owner, h.origin("david"));
+  const mine = new RawBox(h.owner, mailbox);
   const k = async () => (await h.router.hydrate("inst")).kernel;
   const record = async (name: string) => {
     const kk = await k();

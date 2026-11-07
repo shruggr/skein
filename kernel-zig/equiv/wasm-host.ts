@@ -9,7 +9,7 @@
 //       of tm_color_T0 from T0 between two hosts — its stores replayed natively;
 //   (b) the overlay sync between two hosts on one topic (equiv/sync.ts, wasm) — replayed natively;
 //   (c) #157, a messagebox delivery as an emit: alpha (the chat app) answers the owner into the
-//       owner's mailbox instance — its delivery thread emits `deliver`, the host carries the
+//       owner's hosted mailbox — its delivery thread emits `deliver`, the host carries the
 //       BRC-104 exchange, the server's signed answer is an entry in box `deliver` (status 200),
 //       the delivery thread finished; then a FORGED answer (the same record, its status changed),
 //       one naming no deliver event, and one with a bad signature: each refused at the door
@@ -98,8 +98,8 @@ if (!ONLY || ONLY === "c") {
   try {
     const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
     const h = await testHost(t, { infer: inferId, sqlite: true });
-    h.mailbox("david", h.ownerId);
-    h.mailbox("infer", inferId);
+    const mailbox = await h.ownerInbox();
+    const inferBox = await h.inbox(inferKey, "infer");
     const alpha = h.instance("alpha");
     await h.router.start();
     await h.install("alpha", [CHAT_APP]);
@@ -108,13 +108,13 @@ if (!ONLY || ONLY === "c") {
     const peer = new InferPeer({
       wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, log: (l) => h.lines.push(`[infer] ${l}`),
       fetch: (async () => new Response(JSON.stringify(reply), { status: 200 })) as unknown as typeof fetch,
-      raw: { inbox: new RawBox(w, `${h.base}/@infer`), outbox: (url) => new RawBox(w, url), addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); } },
+      raw: { inbox: new RawBox(w, inferBox), outbox: (url) => new RawBox(w, url), addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); } },
     });
     await new RawBox(h.owner, `${h.base}/@alpha`).send(alpha, "chat", { text: "hi" });
-    const mine = new RawBox(h.owner, `${h.base}/@david`);
+    const mine = new RawBox(h.owner, mailbox);
     const got = await until("alpha's answer in the owner's mailbox", async () => { await peer.poll(); return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text === "hello from alpha"); }, 60_000);
     await h.router.settled();
-    check(got.sender === alpha, "(c) alpha's answer reached the owner's mailbox instance: sent by alpha (its delivery carried by the host)");
+    check(got.sender === alpha, "(c) alpha's answer reached the owner's hosted mailbox: sent by alpha (its delivery carried by the host)");
     check(h.lines.some((l) => l.includes("wasm kernel, worker")), "(c) the instances ran on the wasm kernel (a worker each)");
     const spec = storeSpec(h.db.get("alpha")!);
     const s = openStoreFile(spec, { readOnly: true });
@@ -147,7 +147,10 @@ if (!ONLY || ONLY === "c") {
     await refused({ ...ans!, signature: Uint8Array.from((ans!.signature as Uint8Array).map((b, i) => (i === 10 ? b ^ 1 : b))) }, "a bad signature");
     await refused({ ...ans!, replyTo: encode({ kind: "event", event: "fetch" }).cid }, "an answer naming no deliver event of alpha's");
     await h.router.close();
-    for (const hh of ["alpha", "david", "infer"]) replayNative(storeSpec(h.db.get(hh)!), `(d) ${hh}`);
+    const inboxes = await h.inboxHost();
+    await inboxes.router.close();
+    replayNative(storeSpec(h.db.get("alpha")!), "(d) alpha");
+    replayNative(storeSpec(inboxes.db.get("host")!), "(d) host (the inboxes' host skein)");
   } finally { await t.done(); }
 }
 

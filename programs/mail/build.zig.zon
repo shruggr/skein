@@ -1,8 +1,8 @@
 .{
-    .name = .skein_messagebox,
+    .name = .skein_mail,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0xf3fafef0057cc875,
+    .fingerprint = 0x5e38ab198c7411d3,
     .dependencies = .{
         .skein_sdk = .{
             .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.7.2.tar.gz",

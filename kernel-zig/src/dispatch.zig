@@ -5,8 +5,8 @@
 // function is the grants' (grants.zig: roles, the gate).
 //
 //   route {transport: "mailbox" | "event" | "http" | "libp2p" | "local",
-//          address: text,          mailbox/event: a box ("*": any box — a genesis-only catch-all,
-//                                  a mailbox instance's); http: a path; libp2p: a topic, or
+//          address: text,          mailbox/event: a box ("*": any box — a genesis-only catch-all);
+//                                  http: a path; libp2p: a topic, or
 //                                  "/<protocol>"; local: a provider's name (no route fires)
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix); a libp2p route is exact (#119)

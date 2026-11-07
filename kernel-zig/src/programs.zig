@@ -9,7 +9,7 @@ const Value = cbor.Value;
 pub const Module = struct { name: []const u8, cid: []const u8 };
 
 /// MODULES, in declaration order (install order). Since #71 skein's own
-/// sources build only the messagebox, the front door, resolve and the wallet
+/// sources build only the mail program, the front door, resolve and the wallet
 /// (programs/, over the SDK, shruggr/skein-sdk, #75); the install handlers
 /// (objects, head, subscribe) went with #77: those are the kernel's own
 /// operations on admin messages (scheduler.zig kernelOp). Since #83 nothing
@@ -21,8 +21,8 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreifmo2fz45wn3vukhcf226bpnfh6klu7w5m43of76mx6olgghnzqkq" },
-    // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreihbdgqextmp444phd4h6vpngwkekmefo3m3pqa43sos765oltbgae" },
+    // The skein's own mail in and out (issues #33, #40): Zig, wasm32-wasi (programs/mail).
+    .{ .name = "mail", .cid = "bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreidsab4vl7wecca56g5idca6nnk7ikd6o6rptbbb5rmkunm6qicxni" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
@@ -54,16 +54,16 @@ const call_inputs = [_]cbor.Entry{
 const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 // A description is part of its record, and so of the CID every store pins.
-// The messagebox's was corrected when it was re-pinned for #157 (its delivery
-// thread emits the `deliver` intention).
+// The mail program's (the stock messagebox until 0.4.1, which kept mail for
+// other keys) says what it carries now: the skein's own mail.
 const handlers = [_]Handler{
-    .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); launched as a message's delivery thread (#70), emits the `deliver` intention (#157), which the host carries over BRC-103/104, and is stepped by its answer." },
+    .{ .name = "mail", .services = &.{}, .inputs = &call_inputs, .description = "The skein's own mail (#40): the front door's sendMessage (one `mail` entry for this instance, routed by its box; any other recipient refused — a messagebox for other keys is an app of its own); launched as a message's delivery thread (#70), emits the `deliver` intention (#157), which the host carries over BRC-103/104, and is stepped by its answer." },
     .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that keeps the handle's record under its own head (`resolve/peers`, #87) and finishes with the record's CID; the messagebox's delivery reads it for a key the address book does not name. A `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The address book is written only by the kernel's `peers` operation, on an owner-signed message (#77, #87)." },
     .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68, #143): the instance's middleware, stepped on every request the kernel's door admitted (its route matched, the route's filters run, the gate passed): the BRC-103 handshake (sessions under head frontdoor/sessions, which kernel.brc104 reads), the route's handler an in-VM call with the door's principal as its caller, the answer signed on the request's session. Called: verify (libp2p's and a carried message's own check), read (a route whose answer is a read of live state), respond (what the door answered without an entry, signed)." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "messagebox", "frontdoor", "resolve" };
+pub const program_names = [_][]const u8{ "mail", "frontdoor", "resolve" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {

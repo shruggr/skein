@@ -5,11 +5,6 @@
     "fn": "claim"
   },
   {
-    "transport": "event",
-    "address": ":ack",
-    "program": "messagebox"
-  },
-  {
     "transport": "http",
     "address": "/.well-known/auth",
     "program": "frontdoor",
@@ -21,53 +16,8 @@
     "filters": [
       "kernel.brc104"
     ],
-    "program": "messagebox",
+    "program": "mail",
     "fn": "sendMessage"
-  },
-  {
-    "transport": "http",
-    "address": "/listMessages",
-    "filters": [
-      "kernel.brc104"
-    ],
-    "program": "messagebox",
-    "fn": "listMessages"
-  },
-  {
-    "transport": "http",
-    "address": "/acknowledgeMessage",
-    "filters": [
-      "kernel.brc104"
-    ],
-    "program": "messagebox",
-    "fn": "acknowledgeMessage"
-  },
-  {
-    "transport": "http",
-    "address": "/messagebox/sendMessage",
-    "filters": [
-      "kernel.brc104"
-    ],
-    "program": "messagebox",
-    "fn": "sendMessage"
-  },
-  {
-    "transport": "http",
-    "address": "/messagebox/listMessages",
-    "filters": [
-      "kernel.brc104"
-    ],
-    "program": "messagebox",
-    "fn": "listMessages"
-  },
-  {
-    "transport": "http",
-    "address": "/messagebox/acknowledgeMessage",
-    "filters": [
-      "kernel.brc104"
-    ],
-    "program": "messagebox",
-    "fn": "acknowledgeMessage"
   },
   {
     "transport": "http",

@@ -11,14 +11,14 @@ forwards into it — and the claim route is removed. **It has no apps**
 "Reconfiguration"). Nothing is served at `/` until root routes it.
 docs/BOOTSTRAP.md, "The default image".
 
-- `bin/frontdoor.cid`, `bin/messagebox.cid`: the kernel's pinned modules
+- `bin/frontdoor.cid`, `bin/mail.cid`: the kernel's pinned modules
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
 - `bin/wallet.cid`, `bin/wallet.json` (#116, #130): the wallet — core, in
   every skein — the same program record as src/runtime/programs.ts
   `WALLET`: a skein made from the image pays its host from it (docs/VM.md
   "Billing").
-- `etc/dispatch.json` (#143: routes, no senders): the claim route, `:ack`
-  (an event route), the handshake route, the messagebox's http routes and
+- `etc/dispatch.json` (#143: routes, no senders): the claim route, the
+  handshake route, the skein's own `/sendMessage` (the mail program) and
   the explorer behind `kernel.brc104` (the explorer gated by root: every
   genesis's `roles`). No route to the wallet: root funds the skein by the
   wallet's `internalize` message on a route of its own (docs/WALLET.md).

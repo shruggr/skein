@@ -1,0 +1,8 @@
+{
+  "inputs": {
+    "box": "string?",
+    "event": "cid?"
+  },
+  "services": [],
+  "description": "The skein's own mail (#40): the front door's sendMessage (one `mail` entry for this instance, routed by its box; any other recipient refused \u2014 a messagebox for other keys is an app of its own); launched as a message's delivery thread (#70), emits the `deliver` intention (#157), which the host carries over BRC-103/104, and is stepped by its answer."
+}

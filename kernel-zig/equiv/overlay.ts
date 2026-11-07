@@ -140,9 +140,9 @@ for (const p of ["overlay", "topic-demo", "lookup-demo"]) copyFileSync(join(over
 copyFileSync(join(process.env.SKEIN_CHAIN_DIR ?? clone(CHAIN_REPO, CHAIN_REV, join(home, "skein-chain")), "bin/chain.wasm"), join(sys, "bin/chain.wasm"));
 copyFileSync(join(here, "../../wasm/frontdoor.wasm"), join(sys, "bin/frontdoor.wasm"));
 writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: {}, description: "The front door." }));
-// skein-overlay 0.7.3 (#112): submissions by message arrive through the messagebox's /sendMessage (a BRC-104 session).
-copyFileSync(join(here, "../../wasm/messagebox.wasm"), join(sys, "bin/messagebox.wasm"));
-copyFileSync(join(here, "../../images/default/bin/messagebox.json"), join(sys, "bin/messagebox.json"));
+// skein-overlay 0.7.3 (#112): submissions by message arrive through the mail program's /sendMessage (a BRC-104 session).
+copyFileSync(join(here, "../../wasm/mail.wasm"), join(sys, "bin/mail.wasm"));
+copyFileSync(join(here, "../../images/default/bin/mail.json"), join(sys, "bin/mail.json"));
 writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: { event: "cid", box: "string" }, description: "The overlay engine: BRC-22 submit, BRC-24 lookup." }));
 writeFileSync(join(sys, "bin/chain.json"), JSON.stringify({ inputs: {}, description: "The chain module: the instance's one chain state." }));
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));
@@ -162,7 +162,7 @@ const ROWS = [
   { address: "overlay", program: "overlay" },
   // skein-overlay 0.7.6 (#112, #128): a submission is a message into the box overlay/submit, from anyone (the BEEF through the door's filter).
   { address: "overlay/submit", program: "overlay", filters: ["kernel.beef"] },
-  { transport: "http", address: "/sendMessage", filters: ["kernel.brc104"], program: "messagebox", fn: "sendMessage" },
+  { transport: "http", address: "/sendMessage", filters: ["kernel.brc104"], program: "mail", fn: "sendMessage" },
   // The overlay-express wire contract: /submit validated by kernel.beef (signed or not, #135); the lookup, listings
   // and documentation are read routes (addReads).
   // #121, #146: the submit routes name kernel.beef: the handler gets the BEEF's envelope, never its bytes.

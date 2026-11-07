@@ -4,8 +4,8 @@ David's side: it signs through his wallet-api and speaks raw BRC-33 on a
 BRC-104 session (#40; src/client/raw.ts). It sends to the instance's own front
 door — the instance is an HTTP server, at `SKEIN_INSTANCE_URL` (default
 `$SKEIN_HOST_URL/@<handle>`, or its host name `http://<handle>.localhost:8100`)
-— and reads David's boxes from his mailbox: the mailbox instance his instances
-deliver to (`skein-host add david --mailbox --owner <his key>`; the client finds
+— and reads David's boxes from his mailbox: the messagebox his instances
+deliver to (his handle's, at a host skein's messagebox app; the client finds
 it at `SKEIN_MAILBOX_URL`, `~/.skein/mailbox.url`, else `$SKEIN_HOST_URL/@david`).
 Bodies are dag-cbor (an `application/cbor` request, BRC-231). There is no
 envelope: the session proves who sends, and a message's id is the CID of its

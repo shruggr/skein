@@ -1,8 +1,0 @@
-{
-  "inputs": {
-    "box": "string?",
-    "event": "cid?"
-  },
-  "services": [],
-  "description": "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); launched as a message's delivery thread (#70), emits the `deliver` intention (#157), which the host carries over BRC-103/104, and is stepped by its answer."
-}

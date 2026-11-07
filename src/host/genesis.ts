@@ -100,8 +100,6 @@ export interface Genesis2Config {
   libp2p?: Libp2pSpec;
   /** Write scopes of genesis-wired programs beyond STOCK_SCOPES (#77): program name → head names (a prefix ends in `/`). */
   scopes?: Record<string, string[]>;
-  /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for its root from anyone. */
-  mailbox?: boolean;
   /** The root holder's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
   ownerMessagebox?: string;
   /** Where the instance's own domain resolves (`defaults.resolveOrigin`): the host's origin in dev. */
@@ -171,15 +169,14 @@ export const CLAIM_ROW: DispatchSpec = { address: "claim", program: "kernel", fn
 export const HANDSHAKE_ROW: DispatchSpec = { transport: "http", address: "/.well-known/auth", program: "frontdoor", fn: "handshake" };
 
 /**
- * The stock HTTP routes (#40, #143): the BRC-33 messagebox, at the root and under /messagebox (where
- * older clients were pointed), behind kernel.brc104 (a session: the caller is its key); the
- * explorer's route (the front door's `explore`: log, threads, heads, records as JSON), behind
- * kernel.brc104 and gated by root (STOCK_ROLES); the handshake.
+ * The stock HTTP routes (#40, #143): the skein's own mail, `/sendMessage` → the mail program, behind
+ * kernel.brc104 (a session: the caller is its key) — a messagebox for other keys is an app of its own
+ * (shruggr/skein-messagebox, at `/messagebox/`); the explorer's route (the front door's `explore`: log,
+ * threads, heads, records as JSON), behind kernel.brc104 and gated by root (STOCK_ROLES); the handshake.
  */
 export const STOCK_HTTP: DispatchSpec[] = [
   HANDSHAKE_ROW,
-  ...["", "/messagebox"].flatMap((p) => ["sendMessage", "listMessages", "acknowledgeMessage"].map((fn): DispatchSpec => (
-    { transport: "http", address: `${p}/${fn}`, filters: ["kernel.brc104"], program: "messagebox", fn }))),
+  { transport: "http", address: "/sendMessage", filters: ["kernel.brc104"], program: "mail", fn: "sendMessage" },
   { transport: "http", address: "/explore", prefix: true, filters: ["kernel.brc104"], program: "frontdoor", fn: "explore" },
 ];
 
@@ -187,39 +184,23 @@ export const STOCK_HTTP: DispatchSpec[] = [
 export const STOCK_ROLES: Record<string, string[]> = { root: ["frontdoor.explore"] };
 
 /**
- * The stock seed (#77), after the admin routes: the reserved box the host admits events into, `:ack`
- * (the messagebox moves a reader's pointer: an event, #143); and the stock HTTP routes. No `run`, no
- * `chat` (#83): the shell and the chat loop are apps. No `register` box (#40): registration is
- * application wiring.
+ * The stock seed (#77), after the admin routes: the stock HTTP routes. No `run`, no `chat` (#83): the
+ * shell and the chat loop are apps. No `register` box (#40): registration is application wiring.
  */
-export const STOCK_DISPATCH: DispatchSpec[] = [
-  { transport: "event", address: ":ack", program: "messagebox" },
-  ...STOCK_HTTP,
-];
-
-/**
- * A mailbox instance's seed (#40): the messagebox's acknowledgements, and every message in any box to
- * the messagebox (kept for its root; a mailbox exists only where such a route does).
- */
-export const MAILBOX_DISPATCH: DispatchSpec[] = [
-  { transport: "event", address: ":ack", program: "messagebox" },
-  { address: "*", program: "messagebox" },
-  ...STOCK_HTTP,
-];
+export const STOCK_DISPATCH: DispatchSpec[] = [...STOCK_HTTP];
 
 /**
  * The write scopes of the stock genesis-wired programs (#77): the heads each
- * may advance, by program name. The front door's sessions; the messagebox's
- * lists (#126: its outbound sessions are the kernel's, authfetch); the wallet's records (#79: `wallet/…`, its
+ * may advance, by program name. The front door's sessions (the mail program
+ * keeps none: its delivery's sessions are the host's, #157); the wallet's records (#79: `wallet/…`, its
  * coins, actions, drafts and outputs — the chain is the chain app's). The
  * resolve program's records (#87: `resolve/peers`, what a BRC-169 lookup
  * found — never the address book, which only root's `peers` messages
- * change; the messagebox's delivery reads them for a key the address book
+ * change; the mail program's delivery reads them for a key the address book
  * does not name).
  */
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
-  messagebox: ["mailbox"],
   resolve: ["resolve/"],
   wallet: ["wallet/"],
   // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:
@@ -439,12 +420,6 @@ function hostFacts(c: Pick<Genesis2Config, "ownerMessagebox" | "resolveOrigin">)
 /** The stock system in code: the kernel's pinned programs (its `programs` frame) and the stock seed. */
 export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): System {
   const known = (s: DispatchSpec) => s.program === undefined || s.program === "kernel" || !!programs[s.program];
-  if (c.mailbox) {
-    // A mailbox instance: the front door and the messagebox, nothing else.
-    const mine: Record<string, CID> = { frontdoor: programs.frontdoor!, messagebox: programs.messagebox! };
-    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, { peers: {}, names: [] }, undefined, MAILBOX_DISPATCH);
-    return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...networkDefault(c), ...c.defaults, ...c.overrides } };
-  }
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
   return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, {}, undefined, STOCK_DISPATCH.filter(known)), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...networkDefault(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }

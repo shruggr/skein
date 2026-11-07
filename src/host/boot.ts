@@ -259,7 +259,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   }
   // A tree takes from the kernel only the front door, unless its bin/ has one (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them). No shell (#83): the shell is an app.
   if (src.kind === "code") {
-    const kernelPrograms = await k.call("programs", c.mailbox ? ["frontdoor", "messagebox"] : undefined) as Record<string, CID>;
+    const kernelPrograms = await k.call("programs") as Record<string, CID>;
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
   }
@@ -274,7 +274,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   // The front door is the kernel's when the tree brings none; every handler comes from bin/
   const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  // A tree that names no http route takes the stock ones (the handshake, the messagebox's, the explorer), as a tree
+  // A tree that names no http route takes the stock ones (the handshake, the mail program's /sendMessage, the explorer), as a tree
   // with no etc/routes.json did before #143; each is dropped when the tree lacks its program.
   // The handshake route is the transport's own: a tree that names http routes of its own gets it too.
   const specs = t.dispatch.some((r) => r.transport === "http")

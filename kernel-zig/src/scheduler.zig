@@ -1245,11 +1245,11 @@ pub const Runtime = struct {
 
     /// The outbound middleware of the `mailbox` transport (#70): the program
     /// the kernel launches as a message's delivery thread — the genesis's
-    /// `middleware.mailbox`, else its messagebox program.
+    /// `middleware.mailbox`, else its mail program.
     pub fn deliveryOf(g: Value) ?[]const u8 {
         if (g.get("middleware")) |m| if (m == .map) if (Value.cidOf(m.get("mailbox"))) |c| return c;
         const progs = g.get("programs") orelse return null;
-        return Value.cidOf(progs.get("messagebox"));
+        return Value.cidOf(progs.get("mail"));
     }
 
     /// A message's delivery thread (#70), from the message alone: the mailbox
@@ -1599,9 +1599,7 @@ pub const Runtime = struct {
     /// awaiting that record steps with it; else routed by its box's route
     /// (#143: through the gate, its principal the sender — or, for a message
     /// carried in whole, who the door's filters said), and the handler
-    /// launched with {message, body, box, sender, fn?}. A message for an
-    /// identity this instance keeps mail for (in a mailbox instance) is never
-    /// a reply here: it is routed.
+    /// launched with {message, body, box, sender, fn?}.
     fn processMail(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, mc: []const u8, at: i64) !void {
         const m = rt.store.getOpt(a, mc) orelse return error.NotFound;
         const sender = Value.bytesOf(m.get("sender")).?;
