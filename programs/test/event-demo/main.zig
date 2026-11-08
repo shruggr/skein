@@ -1,17 +1,25 @@
-//! event-demo (skein 0.5.0): a test program for the kernel's event index. kernel-zig/equiv/
-//! event-index.ts installs this module as two apps (`evx`, `evy`). Its steps, by what drives them:
+//! event-demo (skein 0.5.0, 0.5.2): a test program for the kernel's event index and its
+//! subscriptions. kernel-zig/equiv/event-index.ts installs this module as two apps (`evx`, `evy`),
+//! kernel-zig/equiv/on-off.ts as three (`evx`, `evy`, `evz`). Its steps, by what drives them:
 //!
-//!   a message {kind: "event-demo-emit", names: [<name>…], value} in the app's box: emits the
-//!                  fact {event: <name>, value} for each name (the kernel refuses a name not under
-//!                  the app's own); finishes "emitted <n>"
+//!   a message {kind: "event-demo-emit", names: [<name>…], value, spin?} in the app's box, or a
+//!                  host's event of that shape in a box an event route of the app takes: emits
+//!                  the fact {event: <name>, value, spin?} for each name (the kernel refuses a name
+//!                  not under the app's own); finishes "emitted <n>"
 //!   a message {kind: "event-demo-read", query: {name | prefix, after?, limit?, latest?}}: reads
-//!                  the event index in the step (the `events` import) and moves `<app>/read` to
-//!                  {kind: "event-demo-read", answer: <the import's dag-cbor bytes>}
-//!   an event route's delivery (args {event, box, place, fn?}): moves `<app>/heard` to
-//!                  {kind: "event-demo-heard", box, event, place, prev} — every fact heard, newest
-//!                  first, chained by `prev`
+//!                  the event index in the step (`sk.events`) and moves `<app>/read` to
+//!                  {kind: "event-demo-read", answer: <the read's dag-cbor bytes>}
+//!   a message {kind: "event-demo-on", name, fn}: subscribes (`sk.on`, skein 0.5.2) — the step
+//!                  errors with the kernel's refusal; finishes "on <name>"
+//!   a message {kind: "event-demo-off", name}: ends the app's subscriptions to `name` (`sk.off`);
+//!                  finishes "off <name>"
+//!   a subscription's delivery (args {event, box, fn, place}): moves `<app>/heard` to
+//!                  {kind: "event-demo-heard", box, fn, event, place, prev} — every fact heard,
+//!                  newest first, chained by `prev`. With fn "slow", first it hashes the fact's
+//!                  `spin` times (a step that takes a while: equiv/on-off.ts stops the kernel in it)
 //!
-//! `<app>` is the app of the thread's program record (the install names it).
+//! `<app>` is the app of the thread's program record (the install names it). The imports are
+//! skein-sdk 0.17.0's (`sk.events`, `sk.on`, `sk.off`).
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -19,9 +27,6 @@ const sk = @import("sk");
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
-
-/// skein 0.5.0's read of the event index (kernel-zig/src/program.zig `events`).
-extern "skein" fn events(q: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
 
 pub fn main() u8 {
     return sk.main("event-demo", run);
@@ -44,11 +49,27 @@ fn run(a: Allocator) !void {
     const args = in.get("args") orelse return sk.report("no args");
     const app = try appOf(a, in);
     if (args.get("place") != null) return heard(a, app, args);
+    // A host's event in the app's box (an event route, the host's wiring): its record is the message.
+    if (args.get("body") == null) if (Value.cidOf(args.get("event"))) |ec| {
+        const rec = try sk.get(a, ec);
+        if (eql(u8, Value.str(rec.get("kind")) orelse "", "event-demo-emit")) return emitAll(a, rec);
+        return sk.report("event-demo: an event wants {kind: \"event-demo-emit\", names, value}");
+    };
     const body = try sk.get(a, Value.cidOf(args.get("body")) orelse return sk.report("not a message (no body)"));
     const kind = Value.str(body.get("kind")) orelse "";
     if (eql(u8, kind, "event-demo-emit")) return emitAll(a, body);
     if (eql(u8, kind, "event-demo-read")) return read(a, app, body);
-    return sk.report("event-demo: want event-demo-emit or event-demo-read");
+    if (eql(u8, kind, "event-demo-on")) {
+        const name = Value.str(body.get("name")) orelse return sk.report("event-demo-on wants {name, fn}");
+        sk.on(name, Value.str(body.get("fn")) orelse return sk.report("event-demo-on wants {name, fn}")) catch return sk.report(sk.lastError());
+        return out(a, "on {s}", .{name});
+    }
+    if (eql(u8, kind, "event-demo-off")) {
+        const name = Value.str(body.get("name")) orelse return sk.report("event-demo-off wants {name}");
+        sk.off(name) catch return sk.report(sk.lastError());
+        return out(a, "off {s}", .{name});
+    }
+    return sk.report("event-demo: want event-demo-emit, -read, -on or -off");
 }
 
 fn emitAll(a: Allocator, body: Value) !void {
@@ -58,6 +79,7 @@ fn emitAll(a: Allocator, body: Value) !void {
         var m = cbor.MapBuilder.init(a);
         try m.put("event", n);
         try m.put("value", body.get("value") orelse .null);
+        if (body.get("spin")) |s| try m.put("spin", s);
         const bytes = try cbor.encode(a, m.value());
         _ = sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) }) catch return sk.report(sk.lastError());
     }
@@ -65,20 +87,26 @@ fn emitAll(a: Allocator, body: Value) !void {
 }
 
 fn read(a: Allocator, app: []const u8, body: Value) !void {
-    const q = try cbor.encode(a, body.get("query") orelse return sk.report("event-demo-read wants {query}"));
-    const answer = sk.result(a, events, .{ q.ptr, @as(u32, @intCast(q.len)) }) catch return sk.report(sk.lastError());
+    const answer = sk.events(a, body.get("query") orelse return sk.report("event-demo-read wants {query}")) catch return sk.report(sk.lastError());
     var m = cbor.MapBuilder.init(a);
     try m.put("kind", cbor.string("event-demo-read"));
-    try m.put("answer", .{ .bytes = answer });
+    try m.put("answer", .{ .bytes = try cbor.encode(a, answer) });
     try sk.advance(try std.fmt.allocPrint(a, "{s}/read", .{app}), try sk.put(a, m.value()));
     return out(a, "read", .{});
 }
 
 fn heard(a: Allocator, app: []const u8, args: Value) !void {
+    if (eql(u8, Value.str(args.get("fn")) orelse "", "slow")) {
+        const ev = try sk.get(a, Value.cidOf(args.get("event")) orelse return sk.report("a delivery names no event"));
+        var h: [32]u8 = @splat(0);
+        var i: i128 = Value.intOf(ev.get("spin")) orelse 0;
+        while (i > 0) : (i -= 1) std.crypto.hash.sha2.Sha256.hash(&h, &h, .{});
+    }
     const head = try std.fmt.allocPrint(a, "{s}/heard", .{app});
     var m = cbor.MapBuilder.init(a);
     try m.put("kind", cbor.string("event-demo-heard"));
     try m.put("box", args.get("box") orelse .null);
+    try m.put("fn", args.get("fn") orelse .null);
     try m.put("event", args.get("event") orelse .null);
     try m.put("place", args.get("place") orelse .null);
     try m.put("prev", if (try sk.head(a, head)) |p| cbor.cidv(p) else .null);

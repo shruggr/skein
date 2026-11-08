@@ -198,6 +198,11 @@ echo "== the event index (skein 0.5.0): one router, two apps (programs/test/even
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-index.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/event-index.ts" || status=1
 
+echo "== subscriptions (skein 0.5.2): one router, three apps (programs/test/event-demo's module); on/off in a step, refused for a name that is no fact's or a role the app has not; two apps on one name stepped in the order made, another name not stepped, an on after a fact does not hear it, off stops delivery; a kernel killed in the middle of a delivery commits nothing of the entry and, restarted, steps each subscription once; index-store.ts derives the on map; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/on-off.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/on-off.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/on-off.ts" || status=1
+
 echo "== liveness (#138): two routers; an app on the second emits liveness for a topic an app on the first beacons on; the second's node subscribes it without admitting; GET /<app>/.live/<topic> (served by the host) shows the first's beat within a beat and the second's own; a bad signature never shows; the window drops a silent sender; unliveness and uninstall end it; replayed"
 "${node[@]}" "$kz/equiv/liveness.ts" || status=1
 
