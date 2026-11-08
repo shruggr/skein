@@ -1,4 +1,4 @@
-// Libp2p rows, events and beacons end to end: two routers with libp2p. On A, one
+// Subscriptions (#119) end to end: two routers with libp2p. On A, one
 // instance (`ev`, the stock system, no libp2p in its genesis) gets two apps
 // by the owner's messages (`skein install`, #124), both the module
 // programs/test/app-demo under other names: `evt-a` (no libp2p row) and
@@ -10,14 +10,25 @@
 // publisher.
 //
 //   - installed: the node subscribes evt-b's row's topic, nothing else;
-//   - 0.5.1: a `subscribe` emit is refused (no intention any more: a libp2p
-//     subscription is a libp2p route); a message on demo_mine is evt-b's, by
-//     its row;
+//   - a subscribe the kernel refuses as it is emitted (no program or fn, a
+//     program not the app's, a /protocol, an unsubscribe of nothing the app
+//     has): the step errors with the kernel's reason; nothing is listed;
+//   - evt-a emits `subscribe {topic: demo_abc, program: "demo", fn: "topic"}`:
+//     the step's update lists {kind: "event", event: "subscribe", app:
+//     "evt-a", topic, program, fn}; A's node subscribes demo_abc; B publishes
+//     on it: the kernel delivers it by the subscription to evt-a's `topic`
+//     (evt-a/seen moves), no row consulted;
+//   - evt-b's subscribe of demo_abc is its own: the next message is still
+//     evt-a's; evt-a unsubscribes: the node keeps the topic (evt-b's) and the
+//     next message is evt-b's; evt-b unsubscribes: the node leaves it; a second
+//     unsubscribe is refused (an app unsubscribes only its own);
+//   - a row wins: evt-a subscribes demo_mine (evt-b's row's topic); a message
+//     there is evt-b's, by the row;
 //   - an event nobody wires (`evt-a/made-up`: 0.5.0, a fact is named under its app): listed on the update, a record in the
 //     store, a log line; nothing else;
 //   - A restarted (a new router on the same host db): the node subscribes the
-//     same topics, read from the dispatch table; nothing is re-emitted; the row
-//     delivers.
+//     same topics, read from the log (p2p.ts subscriptionsOf); nothing is
+//     re-emitted; the new kernel delivers by the subscription it folds.
 //
 //   - beacons (#126): a beacon faster than a second is refused as it is
 //     emitted; evt-a's `beacon {topic: demo_beat, every: 1000, body}` is
@@ -55,7 +66,7 @@ import { main } from "../../src/host/cli.ts";
 import { ownerCli } from "../../src/testapps.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
-import { beaconBeat, MESSAGE_PROTOCOL, peerIdOf, type InboundAnswer, type InboundCall } from "../../src/host/p2p.ts";
+import { beaconBeat, MESSAGE_PROTOCOL, peerIdOf, subscriptionsOf, type InboundAnswer, type InboundCall } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -152,6 +163,7 @@ try {
     await rA.settled();
     return sent;
   };
+  const sub = (topic: string) => ({ event: "subscribe", topic, program: "demo", fn: "topic" });
   /** Every event record the instance's steps emitted (kind "event"), read from its store with the update listing it. */
   const events = async () => {
     const s = openStoreFile(store, { readOnly: true });
@@ -171,6 +183,7 @@ try {
       return found;
     } finally { s.close(); }
   };
+  const folded = async () => { const s = openStoreFile(store, { readOnly: true }); try { return (await subscriptionsOf(s)).map((x) => `${x.app} ${x.topic} ${x.program}.${x.fn}`).join("; "); } finally { s.close(); } };
   /** `<app>/seen`: the last libp2p message the app's fn `topic` was delivered. */
   const seen = async (app: string) => {
     const k = (await rA.hydrate("ev")).kernel;
@@ -201,19 +214,62 @@ try {
   let topics = await until("the node subscribes evt-b's row", () => served().length ? served() : undefined).catch(() => served());
   check(topics.join(",") === "demo_mine", `the node subscribes the row's topic: ${topics.join(", ")}`);
 
-  // ------------------------------------------------ 0.5.1: no gossip subscription by emit — a subscription is a libp2p route
+  // ------------------------------------------------ the kernel's checks, as the event is emitted
   const n0 = (await events()).length;
-  await emit("evt-a", { event: "subscribe", topic: "demo_abc", program: "demo", fn: "topic" });
-  check(refused(/emit: event "subscribe": an app emits under its own name/), "a `subscribe` emit is refused (0.5.1: no intention; a fact under no app's name)");
-  check((await events()).length === n0 && served().join(",") === "demo_mine", "nothing listed, nothing subscribed");
-  let got = await deliver("demo_mine", ["evt-a", "evt-b"]);
-  check(got === "evt-b" && (await seen("evt-b"))?.topic === "demo_mine", `a message on demo_mine is evt-b's, by its row (${got || "nothing delivered"})`);
+  await emit("evt-a", { event: "subscribe", topic: "demo_abc" });
+  check(refused(/emit: subscribe names its program/), "a subscribe with no program: the emit refused, the step errors");
+  await emit("evt-a", { event: "subscribe", topic: "demo_abc", program: "nope", fn: "topic" });
+  check(refused(/emit: subscribe: "nope" is not a program of app evt-a/), "a program not the app's: refused");
+  await emit("evt-a", { event: "subscribe", topic: "demo_abc", program: "demo" });
+  check(refused(/emit: subscribe names the function delivered to/), "no fn: refused");
+  await emit("evt-a", { ...sub("/demo/1") });
+  check(refused(/emit: subscribe: topic "\/demo\/1" is not a topic/), "a /protocol: refused");
+  await emit("evt-a", { event: "unsubscribe", topic: "demo_abc" });
+  check(refused(/emit: unsubscribe: app evt-a has no subscription to demo_abc/), "an unsubscribe of nothing the app has: refused");
+  check((await events()).length === n0 && served().join(",") === "demo_mine", "nothing refused is listed, and nothing subscribed");
+
+  // ------------------------------------------------ evt-a: subscribe demo_abc → its fn `topic`
+  await emit("evt-a", sub("demo_abc"));
+  const ev1 = (await events()).find((r) => r.event === "subscribe" && r.topic === "demo_abc");
+  check(!!ev1 && ev1.app === "evt-a" && ev1.program === "demo" && ev1.fn === "topic" && Object.keys(ev1).sort().join(",") === "app,event,fn,kind,program,topic", `the step's update lists the subscription, the app named by the kernel: ${JSON.stringify(ev1)}`);
+  topics = await until("the node subscribes demo_abc", () => served().includes("demo_abc") ? served() : undefined).catch(() => served());
+  check(topics.join(",") === "demo_abc,demo_mine", `evt-a's subscribe: the node subscribes demo_abc, live (${topics.join(", ")})`);
+  let got = await deliver("demo_abc", ["evt-a", "evt-b"]);
+  const s1 = await seen("evt-a");
+  check(got === "evt-a" && s1?.topic === "demo_abc" && s1?.app === "evt-a", `a message B publishes on demo_abc: delivered by the subscription to evt-a's fn topic, no row (${got || "nothing delivered"}; ${JSON.stringify(s1 && { app: s1.app, topic: s1.topic })})`);
+
+  // ------------------------------------------------ another app's subscription is its own
+  await emit("evt-b", sub("demo_abc"));
+  got = await deliver("demo_abc", ["evt-a", "evt-b"]);
+  check(got === "evt-a" && (await seen("evt-b")) === undefined, `evt-b's subscribe of demo_abc is its own: the next message is still evt-a's (${got || "nothing delivered"})`);
+  await emit("evt-a", { event: "unsubscribe", topic: "demo_abc" });
+  check(served().includes("demo_abc"), "evt-a unsubscribes: the node keeps demo_abc (evt-b's)");
+  got = await deliver("demo_abc", ["evt-a", "evt-b"]);
+  check(got === "evt-b" && (await seen("evt-b"))?.topic === "demo_abc", `the next message is evt-b's: evt-a's unsubscribe stopped its delivery (${got || "nothing delivered"})`);
+  await emit("evt-b", { event: "unsubscribe", topic: "demo_abc" });
+  topics = await until("the node leaves demo_abc", () => !served().includes("demo_abc") ? served() : undefined).catch(() => served());
+  check(topics.join(",") === "demo_mine", `evt-b unsubscribes too: the node leaves demo_abc (${topics.join(", ")})`);
+  const before = lines.length;
+  await emit("evt-b", { event: "unsubscribe", topic: "demo_abc" });
+  check(lines.slice(before).some((l) => /emit: unsubscribe: app evt-b has no subscription to demo_abc/.test(l)), "evt-b's second unsubscribe: refused (an app unsubscribes only its own)");
+
+  // ------------------------------------------------ a row wins
+  await emit("evt-a", sub("demo_mine"));
+  got = await deliver("demo_mine", ["evt-a", "evt-b"]);
+  check(got === "evt-b" && (await seen("evt-b"))?.topic === "demo_mine", `evt-a subscribes demo_mine, evt-b's row's topic: a message there is evt-b's, by the row (${got || "nothing delivered"})`);
 
   // ------------------------------------------------ an event nobody wires
   const was = served().join(",");
   await emit("evt-a", { event: "evt-a/made-up", n: 7 });
   const ev2 = (await events()).find((r) => r.event === "evt-a/made-up");
   check(!!ev2 && ev2.app === "evt-a" && ev2.n === 7 && served().join(",") === was && lines.some((l) => /an event evt-a\/made-up this host has no wiring for: ignored/.test(l)), `an event nobody wires: a record on the update (${JSON.stringify(ev2)}), a log line, nothing else`);
+
+  // ------------------------------------------------ the subscriptions as the log folds them
+  await emit("evt-a", sub("demo_def"));
+  topics = await until("the node subscribes demo_def", () => served().includes("demo_def") ? served() : undefined).catch(() => served());
+  check(topics.join(",") === "demo_def,demo_mine", `evt-a's subscribe demo_def (${topics.join(", ")})`);
+  const f = await folded();
+  check(f === "evt-a demo_mine demo.topic; evt-a demo_def demo.topic", `the subscriptions as the log folds them: ${f}`);
 
   // ------------------------------------------------ beacons (#126): declared once, beaten by the node, nothing logged per beat
   // What B's node takes on demo_beat from A's node, as its validator sees each message (B has no row there: it ignores them, one line each).
@@ -258,11 +314,11 @@ try {
   await rA.hydrate("ev");
   await rA.settled();
   topics = served();
-  check(topics.join(",") === "demo_mine", `a new router on the same host: the node subscribes the same topics, read from the dispatch table (${topics.join(", ")})`);
+  check(topics.join(",") === "demo_def,demo_mine", `a new router on the same host: the node subscribes the same topics, read from the log (${topics.join(", ")})`);
   check((await events()).length === emittedBefore, "nothing re-emitted at the restart (the host read the events)");
-  const before2 = reqOf(await seen("evt-b"));
-  got = await deliver("demo_mine", ["evt-a", "evt-b"], 20_000);
-  check(got === "evt-b" && reqOf(await seen("evt-b")) !== before2, `after the restart a message on demo_mine is delivered by the row (${got || "nothing delivered"})`);
+  const before2 = reqOf(await seen("evt-a"));
+  got = await deliver("demo_def", ["evt-a", "evt-b"], 20_000);
+  check(got === "evt-a" && reqOf(await seen("evt-a")) !== before2 && (await seen("evt-a"))?.topic === "demo_def", `after the restart a message on demo_def is delivered by the subscription the new kernel folds from the log (${got || "nothing delivered"})`);
   const afterRestart = beats.length;
   await until("the beacon beats after the restart", () => beats.length > afterRestart + 1 || undefined, 10_000).catch(() => undefined);
   check(beats.length > afterRestart + 1, `after the restart the node beats the beacon it folds from the log (${beats.length - afterRestart} beats)`);

@@ -10,7 +10,7 @@
 // order: a route's key is (transport, address, prefix); `add` replaces the
 // route with that key in place, else appends; `remove` deletes it.
 //
-//   route  {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true (any transport, 0.5.1), dynamic?: true (0.5.1: an allowance),
+//   route  {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true (http and, 0.5.0, event),
 //           filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"], program?: <cid> | "kernel", fn?, app?, price?,
 //           …settings}
 //
@@ -34,7 +34,7 @@ export type DispatchOrigin = { kind: "dispatch" };
 export type Op = "add" | "remove";
 export type Transport = "mailbox" | "event" | "http" | "libp2p" | "local";
 /** A route as the kernel holds it; `program` a program record's CID, "kernel" (an admin operation named by `fn`), or absent (a read route). */
-export type DispatchRow = { transport: Transport; address: string; prefix?: boolean; dynamic?: boolean; filters?: string[]; program?: CID | "kernel"; fn?: string; app?: string; [setting: string]: unknown };
+export type DispatchRow = { transport: Transport; address: string; prefix?: boolean; filters?: string[]; program?: CID | "kernel"; fn?: string; app?: string; [setting: string]: unknown };
 export type DispatchUpdate = { op: Op; row: DispatchRow; origin: CID; prev: CID; seq: number; thread?: CID; input: CID; at: Ms };
 
 const ORIGIN: DispatchOrigin = { kind: "dispatch" };
@@ -50,7 +50,7 @@ export const dispatchOrigin = (): CID => encode(ORIGIN).cid;
  * prefix route. No address has a space, so the texts of two keys are equal only when the keys are
  * (dispatch.zig `sameKey`).
  */
-export const rowKey = (r: { transport: string; address: string; prefix?: boolean; dynamic?: boolean }): string => `${r.transport} ${r.address}${r.prefix === true ? " prefix" : ""}${r.dynamic === true ? " dynamic" : ""}`;
+export const rowKey = (r: { transport: string; address: string; prefix?: boolean }): string => `${r.transport} ${r.address}${r.prefix === true ? " prefix" : ""}`;
 
 const isCid = (x: unknown): boolean => CID.asCID(x) !== null;
 
@@ -111,38 +111,43 @@ export async function currentDispatch(store: Store): Promise<DispatchRow[] | und
 // ---------------------------------------------------------------- the match (dispatch.zig, the same rules)
 
 const found = (rows: DispatchRow[], i: number): { i: number; row: DispatchRow } | undefined => i < 0 ? undefined : { i, row: rows[i]! };
+const atBox = (r: DispatchRow, box: string) => r.address === "*" || r.address === box;
 
-/** Whether `p` is one of `address`'s path-segment prefixes (dispatch.zig `prefixes`): the whole address, or before or after a `/`. */
-export const atSegment = (address: string, p: string): boolean => p.length > 0 && address.startsWith(p) && (p.length === address.length || address[p.length] === "/" || p.endsWith("/"));
+/** Whether a mailbox route takes a message in `box` (dispatch.zig forMail). */
+export const takesMail = (r: DispatchRow, box: string): boolean => r.transport === "mailbox" && atBox(r, box);
 
-/**
- * The route `transport`/`address` takes (dispatch.zig forRows, 0.5.1 — the one rule): the exact
- * address first (for a box, `mailbox` and `event`, then `*`), then the longest prefix at a path
- * segment; an allowance (`dynamic`) takes nothing.
- */
-export function forRows(rows: DispatchRow[], transport: string, address: string): { i: number; row: DispatchRow } | undefined {
-  const live = (r: DispatchRow) => r.transport === transport && r.dynamic !== true;
-  const exact = rows.findIndex((r) => live(r) && r.prefix !== true && r.address === address);
+/** Whether an event route takes an event in `box` exactly (dispatch.zig forEvent's first rule; 0.5.0: or a prefix route the name starts with). */
+export const takesEvent = (r: DispatchRow, box: string): boolean => r.transport === "event" && (r.prefix === true ? box.startsWith(r.address) : atBox(r, box));
+
+/** The first route a message in `box` routes to, with its index, or undefined (dispatch.zig forMail). */
+export const forMail = (rows: DispatchRow[], box: string) => found(rows, rows.findIndex((r) => takesMail(r, box)));
+
+/** The route an event in `box` (0.5.0: an event's name) routes to (dispatch.zig forEvent): the first exact (or `*`), then the longest prefix it starts with. */
+export function forEvent(rows: DispatchRow[], box: string): { i: number; row: DispatchRow } | undefined {
+  const exact = rows.findIndex((r) => r.transport === "event" && r.prefix !== true && atBox(r, box));
   if (exact >= 0) return found(rows, exact);
-  if (transport === "mailbox" || transport === "event") {
-    const any = rows.findIndex((r) => live(r) && r.prefix !== true && r.address === "*");
-    if (any >= 0) return found(rows, any);
-  }
   let best = -1;
   rows.forEach((r, i) => {
-    if (!live(r) || r.prefix !== true || !atSegment(address, r.address)) return;
+    if (r.transport !== "event" || r.prefix !== true || !box.startsWith(r.address)) return;
     if (best < 0 || r.address.length > rows[best]!.address.length) best = i;
   });
   return found(rows, best);
 }
 
-/** Whether a mailbox route takes a message in `box`. */
-export const takesMail = (r: DispatchRow, box: string): boolean => forRows([r], "mailbox", box) !== undefined;
+/** A request's http route (dispatch.zig forHttp): the exact path first, then the longest prefix the path starts with. */
+export function forHttp(rows: DispatchRow[], path: string): { i: number; row: DispatchRow } | undefined {
+  const exact = rows.findIndex((r) => r.transport === "http" && r.prefix !== true && r.address === path);
+  if (exact >= 0) return found(rows, exact);
+  let best = -1;
+  rows.forEach((r, i) => {
+    if (r.transport !== "http" || r.prefix !== true || !path.startsWith(r.address)) return;
+    if (best < 0 || r.address.length > rows[best]!.address.length) best = i;
+  });
+  return found(rows, best);
+}
 
-/** Whether an event route takes an event in `box` (an event's name). */
-export const takesEvent = (r: DispatchRow, box: string): boolean => forRows([r], "event", box) !== undefined;
-
-export const forMail = (rows: DispatchRow[], box: string) => forRows(rows, "mailbox", box);
-export const forEvent = (rows: DispatchRow[], box: string) => forRows(rows, "event", box);
-export const forHttp = (rows: DispatchRow[], path: string) => forRows(rows, "http", path);
-export const forLibp2p = (rows: DispatchRow[], name: string) => forRows(rows, "libp2p", name);
+/**
+ * A libp2p package's route (dispatch.zig forLibp2p): the `libp2p` route at its topic or
+ * `/<protocol>` exactly. A topic no route is at may be delivered by an app's subscription (#119, the kernel's).
+ */
+export const forLibp2p = (rows: DispatchRow[], name: string) => found(rows, rows.findIndex((r) => r.transport === "libp2p" && r.prefix !== true && r.address === name));

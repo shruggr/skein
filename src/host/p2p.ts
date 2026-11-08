@@ -19,11 +19,11 @@
 //              certificate), Kademlia DHT off | auto | client | server, AutoNAT,
 //              UPnP/NAT-PMP port mapping, mDNS on/off, bootstrap peers kept
 //              connected, circuit relays.
-//   topics     the instance's `libp2p.topics` and its dispatch table's libp2p
-//              rows' topics (libp2pConfig; 0.5.1: a subscription is a libp2p
-//              route — a live row, or one a step created under an allowance;
-//              read after each commit, an allowance and a prefix row join
-//              nothing): subscribed; each message is judged
+//   topics     the instance's `libp2p.topics`, its dispatch table's libp2p
+//              rows' topics (libp2pConfig) and the topics its apps subscribed
+//              (#119: `subscribe {topic, program, fn}` / `unsubscribe {topic}`,
+//              emitted by an app's installed program; the subscriptions folded
+//              from the log, subscriptionsOf, then followed live): subscribed; each message is judged
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
@@ -343,27 +343,78 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * subscribes those topics itself) needs the node, and adds no topic.
  * Undefined: no node — the genesis declares none and nothing needs one.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, beacons = false): P2PInstanceConfig | undefined {
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
   const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
   // #155: a stream protocol is declared whatever installed its row; a topic row from the genesis alone subscribes nothing.
-  // 0.5.1: a libp2p subscription is a libp2p row — an allowance (`dynamic`) joins nothing, and a prefix
-  // row names no one topic to join; a row a step created under an allowance joins its topic.
-  const names = rows.filter((r) => r.transport === "libp2p" && r.dynamic !== true && r.prefix !== true && (String(r.address).startsWith("/") || !seeded.has(String(r.address)))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
+  const names = rows.filter((r) => r.transport === "libp2p" && (String(r.address).startsWith("/") || !seeded.has(String(r.address)))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
   // #126: a beacon needs the node (to publish), not a subscription of its topic.
-  if (!base && !names.length && !beacons) return undefined;
+  if (!base && !names.length && !subscribed.length && !beacons) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
   return {
-    topics: add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))),
+    topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), subscribed),
     protocols: add(base?.protocols ?? [], names.filter((n) => n.startsWith("/"))),
     ...(base?.listen ? { listen: base.listen } : {}),
   };
 }
 
-// ---------------------------------------------------------------- topics
+// ---------------------------------------------------------------- subscriptions (#119)
+//
+// An app's installed program emits `subscribe {topic, program, fn}` /
+// `unsubscribe {topic}` (the kernel's open events: the record {kind: "event",
+// event, app, topic, program?, fn?, filter?} on the step's update, `app` the
+// kernel's, handed to the host after the commit). A subscription is the
+// delivery record: the kernel delivers a message on the topic to that app's
+// program and fn (kernel-zig/src/subscriptions.zig) — the host only
+// subscribes the topic and hands each message to the kernel. The kernel
+// checks a subscription as it is emitted (an installed app's program, a fn, a
+// topic not a /protocol, an unsubscribe of the app's own), so what the log
+// lists is followed as it is.
+//
+// The same fold as the kernel's: keyed by (app, topic) — an app's subscribe
+// replaces its own, an unsubscribe removes only its own — in log order. After
+// a restart the subscriptions are folded from the events every step recorded
+// (subscriptionsOf); the kernel keeps nothing written for them.
+
+export interface Subscription { app: string; topic: string; program: string; fn: string; filter?: string }
+export type SubscriptionEvent = { event: "subscribe"; sub: Subscription } | { event: "unsubscribe"; app: string; topic: string };
 
 export const isTopic = (t: unknown): t is string => typeof t === "string" && t.length > 0 && !/[\s\0]/.test(t) && !t.startsWith("/");
 
+/** A `subscribe` / `unsubscribe` event record, read (subscriptions.zig eventOf); or why it is not one this host follows. */
+export function subscriptionEvent(rec: Record<string, unknown>): SubscriptionEvent | { refused: string } {
+  const event = rec.event;
+  if (rec.kind !== "event" || (event !== "subscribe" && event !== "unsubscribe")) return { refused: "not a subscribe or unsubscribe event" };
+  if (typeof rec.app !== "string" || !rec.app) return { refused: "it names no app (its program record is not installed): ignored" };
+  if (!isTopic(rec.topic)) return { refused: `${JSON.stringify(rec.topic)} is not a topic (text, no space; a /protocol is not subscribed)` };
+  if (event === "unsubscribe") return { event, app: rec.app, topic: rec.topic };
+  if (typeof rec.program !== "string" || !rec.program || typeof rec.fn !== "string" || !rec.fn) return { refused: "a subscribe names its program and fn" };
+  return { event, sub: { app: rec.app, topic: rec.topic, program: rec.program, fn: rec.fn, ...(typeof rec.filter === "string" ? { filter: rec.filter } : {}) } };
+}
+
+/** Fold subscription events in order (subscriptions.zig apply). */
+export function foldSubscriptions(events: Iterable<SubscriptionEvent>, into: Subscription[] = []): Subscription[] {
+  for (const e of events) {
+    const [app, topic] = e.event === "subscribe" ? [e.sub.app, e.sub.topic] : [e.app, e.topic];
+    const i = into.findIndex((s) => s.app === app && s.topic === topic);
+    if (e.event === "subscribe") { if (i >= 0) into[i] = e.sub; else into.push(e.sub); } else if (i >= 0) into.splice(i, 1);
+  }
+  return into;
+}
+
+/** The topics the subscriptions take (each once): what the node subscribes for the apps. */
+export const subscribedTopics = (subs: Subscription[]): string[] => [...new Set(subs.map((s) => s.topic))];
+
+/**
+ * The subscriptions, folded from the store's log (#119, the host's recovery
+ * at hydrate; subscriptions.zig fold): the `subscribe` / `unsubscribe`
+ * records each step's update lists in `emitted`, in log order — by the entry
+ * the step processed (`input`'s `n`), the step's time, its thread's start,
+ * the thread's CID, its place in the thread and in `emitted`. Read only.
+ */
+export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edges">): Promise<Subscription[]> {
+  return foldSubscriptions(await emittedEvents(store, (rec) => { const e = subscriptionEvent(rec); return "refused" in e ? undefined : e; }));
+}
 
 /**
  * The beacons standing (#126), folded from the store's log as the

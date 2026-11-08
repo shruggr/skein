@@ -1,6 +1,7 @@
-// event-demo (skein 0.5.0, 0.5.1): a test program for the event index and routes — it emits facts,
-// reads the index in its step, creates routes under its allowances, and takes what its routes
-// deliver. Zig 0.16.0, wasm32-wasi, over skein-sdk 0.16.0 (its dag-cbor, `sk.events`, `sk.route`).
+// event-demo (skein 0.5.0): a test program for the event index — it emits facts, reads the index
+// in its step, and takes the facts an event route (a prefix subscription) delivers. Zig 0.16.0,
+// wasm32-wasi, over the SDK (its dag-cbor and the `skein` imports; the `events` import declared
+// here, the SDK's predates it).
 //
 //   zig build        → zig-out/bin/event-demo.wasm (build.sh copies it to bin/, committed)
 const std = @import("std");
