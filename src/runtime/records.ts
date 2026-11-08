@@ -127,7 +127,7 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   if (t !== "mailbox" && t !== "event" && t !== "http" && t !== "libp2p" && t !== "local") return false;
   if (x.sender !== undefined) return false;
   if (typeof x.address !== "string" || x.address === "" || /[ \0]/.test(x.address)) return false;
-  if (x.prefix !== undefined && x.prefix !== null && x.prefix !== false && !(x.prefix === true && t === "http")) return false;
+  if (x.prefix !== undefined && x.prefix !== null && x.prefix !== false && !(x.prefix === true && (t === "http" || t === "event"))) return false;
   const filters = x.filters === undefined || x.filters === null ? [] : x.filters;
   if (!Array.isArray(filters) || !filters.every(isFilterRef)) return false;
   if (filters.length && (t === "local" || (t === "event" && !(filters.length === 1 && filters[0] === "kernel.beef")))) return false;

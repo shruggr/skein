@@ -33,7 +33,7 @@ import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
 type Obj = Record<string, unknown>;
-export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads"] as const;
+export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "events"] as const;
 export type MapName = typeof MAPS[number];
 export const STATE_KIND = "skein-state";
 
@@ -154,6 +154,52 @@ const succ = (p: Uint8Array): Uint8Array | undefined => {
   for (let i = b.length - 1; i >= 0; i--) { if (b[i] !== 0xff) { b[i]++; return b.subarray(0, i + 1); } }
   return undefined;
 };
+
+// ---------------------------------------------------------------- the event index (0.5.0, index.zig `events`)
+
+/** The intentions (log.zig `intentions`): names the kernel or the host wires as requests — not under the name rule, not indexed. */
+export const INTENTIONS: readonly string[] = ["fetch", "deadline", "deliver", "payment", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant"];
+
+/** Whether `name` is an event name (log.zig isEventName): a slash path, no empty segment, no space or NUL. */
+export const isEventName = (name: string): boolean => name.length > 0 && !/[ \0]/.test(name) && name.split("/").every((x) => x.length > 0);
+
+/** The name an event record is indexed under (log.zig indexedName), or undefined: a fact, its name under its app. */
+export function indexedName(rec: unknown): string | undefined {
+  if (!isObj(rec) || rec.kind !== "event" || typeof rec.event !== "string" || typeof rec.app !== "string") return undefined;
+  const name = rec.event;
+  if (INTENTIONS.includes(name) || !isEventName(name)) return undefined;
+  return name.split("/")[0] === rec.app ? name : undefined;
+}
+
+/** An event's place in the log: the entry its step processed, the update's seq, its index in `emitted`, the thread. */
+export interface EventPlace { n: number; seq: number; i: number; thread: CID }
+/** A read of the event index (store.zig EventsQuery). */
+export interface EventsQuery { name: string; prefix?: boolean; after?: EventPlace; limit?: number; latest?: boolean }
+/** One indexed event. */
+export interface EventRow { name: string; place: EventPlace; record: CID }
+
+/** A place as the index orders it: n ‖ seq ‖ i ‖ thread. */
+export const placeKey = (p: EventPlace): Uint8Array => cat(be64(p.n), be64(p.seq), be64(p.i), p.thread.bytes);
+/** An event index key: the name, a 0, the place. */
+export const eventKey = (name: string, p: EventPlace): Uint8Array => cat(new TextEncoder().encode(name), Uint8Array.of(0), placeKey(p));
+
+/** The event index read over a root (index.zig eventsRead): by name or prefix, after, latest per name, the first `limit`; newest last. */
+export function readEvents(trees: Trees, root: CID | null, q: EventsQuery): EventRow[] {
+  const name = new TextEncoder().encode(q.name);
+  const prefix = q.prefix ? name : cat(name, Uint8Array.of(0));
+  const after = q.after ? placeKey(q.after) : undefined;
+  const rows: Array<EventRow & { key: Uint8Array }> = [];
+  for (const [k, v] of trees.prefixed(root, prefix)) {
+    const z = k.indexOf(0);
+    const rest = k.subarray(z + 1);
+    if (after && compare(rest, after) <= 0) continue;
+    const r = { name: new TextDecoder().decode(k.subarray(0, z)), place: { n: readBe64(rest, 0), seq: readBe64(rest, 8), i: readBe64(rest, 16), thread: fromBytes(rest.subarray(24)) }, record: v as CID, key: rest };
+    if (q.latest && rows.length && rows[rows.length - 1]!.name === r.name) { rows[rows.length - 1] = r; continue; }
+    rows.push(r);
+  }
+  rows.sort((x, y) => compare(x.key, y.key));
+  return rows.slice(0, q.limit ?? rows.length).map(({ key: _k, ...r }) => r);
+}
 
 // ---------------------------------------------------------------- the tree
 
@@ -296,6 +342,13 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
       const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
       edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
+      // 0.5.0: the facts the update lists in `emitted` (index.zig writeEvents).
+      if (Array.isArray(u.emitted)) for (const [j, x] of u.emitted.entries()) {
+        if (!isCID(x)) continue;
+        const name = indexedName(await store.get(x).catch(() => undefined));
+        const n = isCID(u.input) ? nOf.get(fmt(u.input)) : undefined;
+        if (name !== undefined && n !== undefined) pairs.events.push([eventKey(name, { n, seq: i + 1, i: j, thread: origin }), x]);
+      }
       // A kept bitcoin transaction's inputs (#42): from the block itself at seq 0; headers and merkle nodes none.
       for (const k of keptCids) {
         if (!isBitcoin(k)) continue;
@@ -379,7 +432,7 @@ class ReadOnly extends Error {
 }
 
 /** A store over the kernel's index (#30): its state record, and every head's name and root (the state's `heads` map). */
-export type IndexStore = SqliteStore & { state(): State; heads(): Array<{ name: string; root: CID }> };
+export type IndexStore = SqliteStore & { state(): State; heads(): Array<{ name: string; root: CID }>; events(q: EventsQuery): EventRow[] };
 
 export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): IndexStore {
   db.exec("PRAGMA busy_timeout = 5000;");
@@ -444,6 +497,7 @@ export function indexStoreOver(src: Blocks): IndexStore {
   const store: IndexStore = {
     state,
     heads: () => [...trees.range(root("heads"))].map(([k, v]) => ({ name: readStrKey(k).s, root: v as CID })),
+    events: (q) => readEvents(trees, root("events"), q),
     async put(value: Block) {
       if (!blockPut) throw new ReadOnly("put");
       const b = encode(value);

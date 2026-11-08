@@ -38,17 +38,18 @@
 //                                         JSON [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer
 //                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
 //                                         Unsigned, nothing logged; metered as a read (billing.ts)
-//   GET  /<app>/.events?event=<name>&topic=<t>[&topic=<t2>…]
-//                                         at an instance's origin (#148): a Server-Sent Events stream of the app's
-//                                         emitted events of that name whose `topic` is one of those (events.ts),
-//                                         served by the host, no program: `id` the event's place in the log
-//                                         (<n>.<seq>.<i>.<thread>), `event` its name, `data` the record as DAG-JSON.
-//                                         First the last one per topic (or, with Last-Event-ID, every one after
-//                                         it, folded from the log), then each as handed over (its place in the
-//                                         kernel's notice: no log read). 400 without
-//                                         `event` or a `topic`; 404 when the app is not installed. Unsigned,
-//                                         nothing logged; each message metered as a read. Closed at the app's
-//                                         uninstall and when the instance stops
+//   GET  /events/<name path>?after=<place>&limit=<n>&latest=1
+//                                         at an instance's origin (0.5.0, events.ts): the instance's event index,
+//                                         read from the store with no step and no fuel — the events under that
+//                                         name (a trailing `/`: every name the prefix starts), strictly after the
+//                                         place, the first n, or the last per name; newest last. JSON [{id: the
+//                                         event's place in the log (<n>.<seq>.<i>.<thread>), event: its name,
+//                                         record: the record as DAG-JSON}]. With Accept: text/event-stream the same
+//                                         read as a Server-Sent Events stream (`id`, `event`, `data`), then each
+//                                         as handed over (its place in the kernel's notice: no store read);
+//                                         Last-Event-ID is `after`. 400 for a bad name or parameter. Unsigned,
+//                                         nothing logged; each answer or message metered as a read. A stream
+//                                         closes when the instance stops
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
@@ -142,7 +143,7 @@ import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, typ
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
 import { foldLiveness, LIVENESS_MAX_MS, livenessEvent, livenessOf, type Live } from "./liveness.ts";
-import { EventStreams, eventsQuery, sseMessage, type Delivered } from "./events.ts";
+import { EventStreams, eventsPath, eventsQuery, sseMessage, type Delivered, type EventStore } from "./events.ts";
 import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
@@ -326,7 +327,6 @@ export interface RouterResponse {
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
 /** #148: an app's event stream, at an instance's origin. */
-const EVENTS_ROUTE = /^\/([^/]+)\/\.events$/;
 /** The apps a dispatch table names (an app with no row left is uninstalled). */
 const appsOf = (rows: DispatchRow[]): Set<string> => new Set(rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
 export { HANDLE };
@@ -593,7 +593,7 @@ export class Router {
     const p2p = this.p2p;
     this.deliverer = new Deliverer({ http: (req, from) => this.http(req, from), log: (s, l) => this.say(s, l) });
     this.events = new EventStreams({
-      open: (h) => { const row = this.o.db.get(h); return row && storeExists(storeSpec(row)) ? openStoreFile(storeSpec(row), { readOnly: true }) : undefined; },
+      open: (h) => { const row = this.o.db.get(h); return row && storeExists(storeSpec(row)) ? openStoreFile(storeSpec(row), { readOnly: true }) as EventStore : undefined; },
     });
     this.providers = new Providers({
       keyOf,
@@ -1598,7 +1598,7 @@ export class Router {
    * handled and unhandled) or stopped. A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
-    if ((!this.p2p && !this.headersKey() && !this.events.open(l.row.handle)) || l.kernel.gone) return;
+    if ((!this.p2p && !this.headersKey()) || l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
@@ -1606,8 +1606,6 @@ export class Router {
     l.dispatchTip = key;
     l.rows = d.rows;
     this.followHeaders(l.row.handle, d.rows);
-    // #148: an uninstalled app's event streams close.
-    if (this.events.open(l.row.handle)) this.events.keep(l.row.handle, appsOf(d.rows));
     // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
     // removes every row naming the app and leaves its heads).
     if (l.beacons.length || l.live.length) {
@@ -1721,23 +1719,40 @@ export class Router {
   }
 
   /**
-   * GET /<app>/.events at an instance's origin (#148, events.ts): the app's emitted events of the
-   * asked name and topics as a Server-Sent Events stream — the backlog folded from the log, then each
-   * as it is handed over — held open until the client goes, the app is uninstalled or the instance
-   * stops. The host's own (no program, no entry, nothing logged); each message metered as a read.
+   * GET /events/<name path> at an instance's origin (0.5.0, events.ts): the instance's event index,
+   * read from its store by CID — no step, no fuel, no entry. Answered as JSON; metered as a read.
    */
-  private async eventStream(handle: string, route: string, app: string, url: URL, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
+  private async eventsRead(handle: string, route: string, url: URL): Promise<RouterResponse> {
+    const q = eventsQuery(route, url.searchParams);
+    if (!q) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no route ${route}` });
+    if ("problem" in q) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: q.problem });
+    if (this.stopped) return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: "the host is shutting down" });
+    try { await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    const closed = this.closed(handle);
+    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
+    const rows = await this.events.read(handle, q);
+    const body = new TextEncoder().encode(`[${rows.map((d) => `{"id":${JSON.stringify(d.id)},"event":${JSON.stringify(d.event)},"record":${d.data}}`).join(",")}]`);
+    this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: body.length });
+    return { status: 200, headers: { "content-type": "application/json" }, body };
+  }
+
+  /**
+   * GET /events/<name path> with Accept: text/event-stream (0.5.0, events.ts): the same read as a
+   * Server-Sent Events stream, then each matching event as it is handed over — held open until the
+   * client goes or the instance stops. The host's own (no program, no entry, nothing logged); each
+   * message metered as a read.
+   */
+  private async eventStream(handle: string, route: string, url: URL, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
     const answer = (r: RouterResponse) => { if (!res.headersSent) { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); } };
     try {
       const last = req.headers["last-event-id"];
-      const q = eventsQuery(app, url.searchParams, Array.isArray(last) ? last[0] : last);
+      const q = eventsQuery(route, url.searchParams, Array.isArray(last) ? last[0] : last);
+      if (!q) return answer(json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no route ${route}` }));
       if ("problem" in q) return answer(json(400, { status: "error", code: "ERR_BAD_REQUEST", description: q.problem }));
       if (this.stopped) return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: "the host is shutting down" }));
-      let l: Loaded;
-      try { l = await this.hydrate(handle); } catch (e) { return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message })); }
+      try { await this.hydrate(handle); } catch (e) { return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message })); }
       const closed = this.closed(handle);
       if (closed) return answer(json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed }));
-      if (!appsOf((await l.kernel.dispatch()).rows).has(app)) return answer(json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no app ${app} installed here` }));
       res.writeHead(200, { ...cors, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       res.flushHeaders();
       let forget: (() => void) | undefined;
@@ -2150,8 +2165,11 @@ export class Router {
       // #138: the liveness tool's read, the host's own (no program).
       const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(x.route) : null;
       if (live) return await this.held(this.liveRead(x.handle, x.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
-      // #148: a stream, served on a socket only (handler).
-      if (req.method === "GET" && EVENTS_ROUTE.test(x.route)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
+      // 0.5.0: the event index, the host's own read (no program); a stream is served on a socket only (handler).
+      if (req.method === "GET" && eventsPath(x.route)) {
+        if (/text\/event-stream/.test(req.headers["accept"] ?? "")) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "an event stream (text/event-stream) is served on a connection of its own, not in process" });
+        return await this.held(this.eventsRead(x.handle, x.route, url));
+      }
       // An application host's own requests (appRead, every method since 0.3.2): before the instance's program; undefined falls through.
       if (this.o.appRead) {
         const a = await this.o.appRead(x.handle, x.route, url, req);
@@ -2337,12 +2355,11 @@ export class Router {
         "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*", "access-control-expose-headers": "*",
       };
       if (req.method === "OPTIONS") { res.writeHead(200, cors).end(); return; }
-      // #148: an event stream is held open, not buffered.
-      if (req.method === "GET") {
+      // 0.5.0: an event stream is held open, not buffered.
+      if (req.method === "GET" && /text\/event-stream/.test(req.headers.accept ?? "")) {
         const url = new URL(`http://${req.headers.host ?? `127.0.0.1:${this.port}`}${req.url ?? "/"}`);
         const t = this.target(url);
-        const m = t ? EVENTS_ROUTE.exec(t.route) : null;
-        if (t && m) { void this.eventStream(t.handle, t.route, decodeURIComponent(m[1]!), url, req, res, cors); return; }
+        if (t && eventsPath(t.route)) { void this.eventStream(t.handle, t.route, url, req, res, cors); return; }
       }
       // 0.3.2: the client's connection closing before the answer is written (the response's `close`
       // with nothing ended: the request's own `close` also fires once its body is read) aborts req.signal.

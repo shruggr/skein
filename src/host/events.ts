@@ -1,92 +1,111 @@
-// An app's emitted events, served live to its page (#148). Any program of an
-// app emits events ({kind: "event", event, app, topic, …}, log.zig
-// eventRecord, #119); the kernel lists each on its step's update (`emitted`)
-// and, once the step is committed, hands it to the host with its place in the
-// log (providers.ts: the `emitted` hook, for every event whatever its name). This module serves
-// them on the instance's origin, the host's own route (no program, no entry,
-// nothing logged, unsigned — a read like /.live, #138, #143):
+// The event index served by the host (0.5.0). Every fact a step emits —
+// {kind: "event", event: <name>, app, …}, its name a slash path under its
+// app's own name (log.zig indexedName) — the kernel puts in the instance's
+// event index at commit (index.zig `events`: name ‖ place → record). The host
+// reads that index from the store by CID, with no step and no fuel (the same
+// read a program makes in its step, program.zig `events`), at the instance's
+// origin, its own route (no program, no entry, nothing logged, unsigned):
 //
-//   GET /<app>/.events?event=<name>&topic=<t1>&topic=<t2>…
+//   GET /events/<name path>?after=<place>&limit=<n>&latest=1
 //
-//   `event` is required, one name; `topic` is repeated, one per topic (at
-//   least one; a topic is any text, so no separator is taken out of it). Sent:
-//   only the events of that app (the record's `app`, the kernel's), that name,
-//   whose `topic` is one of those. Nothing about any name is the host's: a
-//   price is one more event.
+//   The path after `/events/` is an event's name (each segment
+//   URI-decoded), or with a trailing `/` a prefix of names (`/events/` alone:
+//   every name). `after`: only the events strictly after that place; `limit`:
+//   the first n; `latest=1`: the last event per distinct name under the
+//   prefix. Newest last.
 //
-// The answer is a Server-Sent Events stream (text/event-stream), one message
-// per event record, in log order:
+//   Answered as JSON [{id, event, record}] — `record` the record as DAG-JSON
+//   (as the explorer renders records: a link {"/": "<cid>"}, bytes {"/":
+//   {"bytes": "<base64>"}}).
+//
+//   With `Accept: text/event-stream`: the same read as a Server-Sent Events
+//   stream, then live — each matching event as its step's commit hands it
+//   over (its place in the kernel's notice: no store read), until the client
+//   goes or the instance stops. Last-Event-ID (the browser's EventSource sends
+//   it on reconnect) is `after`. One message per event:
 //
 //   id: <n>.<seq>.<i>.<thread>   the event's place in the log: the entry its step processed (`n`), the
-//                                step's place in its thread (`seq`), the record's place in the update's
-//                                `emitted` (`i`), the thread (its origin's CID). The entry alone is not a
-//                                place: one entry can step several threads
+//                                step's update in its thread (`seq`), the record's index in the update's
+//                                `emitted` (`i`), the thread (its origin's CID)
 //   event: <name>                the event's name
-//   data: <the record>           the record as DAG-JSON (as the explorer renders records: a link
-//                                {"/": "<cid>"}, bytes {"/": {"bytes": "<base64>"}}), one line
+//   data: <the record>           the record as DAG-JSON, one line
 //
-// On connect:
-//   - with Last-Event-ID (the browser's EventSource sends it on reconnect):
-//     every matching event after that place, folded from the log (p2p.ts
-//     emittedEvents, the order the kernel folds by), then live. A place no
-//     longer in the log (or never in it) resumes after its entry: the
-//     matching events of later entries. One that is not a place: 400;
-//   - without: the current value — the LAST matching event per requested
-//     topic (one per topic that has one), in log order — then live.
-//
-// Live: the kernel's `emit` notice carries each event's place in the log
-// beside the record (`place`: {n, seq, i, thread}; the record is unchanged),
-// so a live event is sent as it is handed over, its id made from the notice,
-// with no log read; the log is read only for a new subscription's first
-// messages (Last-Event-ID, or the current value). An id handed over again (a
-// start re-offers what a waiting thread awaits) is not sent again. Nothing is
-// kept but the open subscriptions and the ids lately sent: one registry per
-// instance, in memory. An app's subscriptions close at its uninstall (no row
-// of it left in the dispatch table), all of an instance's when it stops (the
-// instance manager, a reclaim) and when the host shuts down.
-//
-// Beats (#138) are not events: not served here (GET /<app>/.live/<topic>).
+// Nothing is kept but the open streams and the ids lately sent (a start hands
+// an awaited event over again): one registry per instance, in memory.
 
 import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
-import type { CID } from "multiformats/cid";
+import { CID } from "multiformats/cid";
+import { indexedName, type EventPlace, type EventRow, type EventsQuery } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
-import { emittedEvents } from "./p2p.ts";
 
-/** The store a fold reads (a store file opened read-only), closed after. */
-export type EventStore = Pick<Store, "get" | "chains" | "edges" | "bytes"> & { close(): unknown };
+/** The store a read uses (a store file opened read-only), closed after: its event index read, when it has one. */
+export type EventStore = Pick<Store, "bytes"> & { events?(q: EventsQuery): EventRow[]; close(): unknown };
 
-/** One emitted event as the stream sends it. */
+/** One event as the read and the stream send it. */
 export interface Delivered {
   /** Its place: `<n>.<seq>.<i>.<thread>`. */
   id: string;
-  n: number;
   event: string;
-  app: string;
-  topic: string;
   /** The record as DAG-JSON. */
   data: string;
 }
 
-/** A subscription's request: the app, the event's name, the topics; and where it resumes (Last-Event-ID). */
-export interface EventsQuery { app: string; event: string; topics: string[]; after?: string }
-
-/** The query of GET /<app>/.events (`event`, `topic` repeated) and Last-Event-ID, or why it is not one. */
-export function eventsQuery(app: string, params: URLSearchParams, lastEventId: string | undefined): EventsQuery | { problem: string } {
-  const event = params.get("event") ?? "";
-  if (!event) return { problem: "event: the event's name (required)" };
-  if (params.getAll("event").length > 1) return { problem: "event: one name" };
-  const topics = [...new Set(params.getAll("topic"))];
-  if (!topics.length || topics.some((t) => !t)) return { problem: "topic: one or more topics (repeat topic=, one per topic)" };
-  const after = lastEventId?.trim() || undefined;
-  if (after !== undefined && !placeOf(after)) return { problem: `Last-Event-ID: ${JSON.stringify(after)} is not an event's place (<n>.<seq>.<i>.<thread>)` };
-  return { app, event, topics, ...(after ? { after } : {}) };
+/** The place of id `<n>.<seq>.<i>.<thread>`, or undefined. */
+export function placeOf(id: string): EventPlace | undefined {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.([a-z0-9]+)$/.exec(id);
+  if (!m) return undefined;
+  try { return { n: Number(m[1]), seq: Number(m[2]), i: Number(m[3]), thread: CID.parse(m[4]!) }; } catch { return undefined; }
 }
 
-/** An event id's parts, or undefined. */
-export function placeOf(id: string): { n: number; seq: number; i: number; thread: string } | undefined {
-  const m = /^(\d+)\.(\d+)\.(\d+)\.([a-z0-9]+)$/.exec(id);
-  return m ? { n: Number(m[1]), seq: Number(m[2]), i: Number(m[3]), thread: m[4]! } : undefined;
+/** The id of the event at `p`: `<n>.<seq>.<i>.<thread>`. */
+export const idOf = (p: { n: number; seq: number; i: number; thread: CID }): string => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+
+/** GET /events/<path>: the route's path → the name (or prefix) read, or undefined when the route is not one. */
+export function eventsPath(route: string): { name: string; prefix: boolean } | { problem: string } | undefined {
+  if (route !== "/events" && !route.startsWith("/events/")) return undefined;
+  const rest = route.slice("/events/".length);
+  const prefix = rest === "" || rest.endsWith("/");
+  let name: string;
+  try { name = rest.split("/").map(decodeURIComponent).join("/"); } catch { return { problem: `/events/${rest}: not a name (a bad %-escape)` }; }
+  if (/[ \0]/.test(name)) return { problem: `${JSON.stringify(name)}: a name has no space or NUL` };
+  const segs = (prefix ? name.replace(/\/$/, "") : name).split("/");
+  if (name !== "" && segs.some((x) => x === "")) return { problem: `${JSON.stringify(name)}: an empty segment` };
+  return { name, prefix };
+}
+
+/** A read's query: the path's name, and `after` / `limit` / `latest` (Last-Event-ID wins over `after`), or why it is not one. */
+export function eventsQuery(route: string, params: URLSearchParams, lastEventId?: string): EventsQuery | { problem: string } | undefined {
+  const p = eventsPath(route);
+  if (!p || "problem" in p) return p;
+  const q: EventsQuery = { name: p.name, prefix: p.prefix };
+  const after = lastEventId?.trim() || params.get("after") || undefined;
+  if (after !== undefined) {
+    const at = placeOf(after);
+    if (!at) return { problem: `after: ${JSON.stringify(after)} is not an event's place (<n>.<seq>.<i>.<thread>)` };
+    q.after = at;
+  }
+  const limit = params.get("limit");
+  if (limit !== null) {
+    if (!/^[1-9]\d*$/.test(limit)) return { problem: "limit: a whole number of events, 1 or more" };
+    q.limit = Number(limit);
+  }
+  const latest = params.get("latest");
+  if (latest !== null) {
+    if (latest !== "1" && latest !== "0") return { problem: "latest: 1 (the last per name) or 0" };
+    if (latest === "1") q.latest = true;
+  }
+  return q;
+}
+
+const dataOf = (rec: unknown): string => new TextDecoder().decode(dagJson.encode(rec));
+
+/** The read over a store's event index (none in a store without one: nothing). */
+export async function readEvents(store: EventStore, q: EventsQuery): Promise<Delivered[]> {
+  if (!store.events) return [];
+  const out: Delivered[] = [];
+  for (const r of store.events(q)) out.push({ id: idOf(r.place), event: r.name, data: dataOf(dagCbor.decode(await store.bytes(r.record))) });
+  return out;
 }
 
 /** One event as an SSE message. */
@@ -94,46 +113,10 @@ export function sseMessage(d: Delivered): string {
   return `id: ${d.id}\nevent: ${d.event}\ndata: ${d.data}\n\n`;
 }
 
-/** Every event record a stream serves in the log, in log order, as delivered (resume and the current value). */
-export async function foldEvents(store: EventStore): Promise<Delivered[]> {
-  const places = await emittedEvents(store, (rec, p) => typeof rec.event === "string" && typeof rec.app === "string" && typeof rec.topic === "string" ? p : undefined);
-  const out: Delivered[] = [];
-  for (const p of places) {
-    const d = deliveredOf(dagCbor.decode(await store.bytes(p.record)), p);
-    if (d) out.push(d);
-  }
-  return out;
-}
+/** Whether a stream's query takes a live event of `name` (its name, or a name under its prefix). */
+const takes = (q: EventsQuery, name: string) => (q.prefix ? name.startsWith(q.name) : name === q.name);
 
-/** Whether a subscription takes an event. */
-const takes = (q: EventsQuery, d: Delivered) => d.app === q.app && d.event === q.event && q.topics.includes(d.topic);
-
-/** What a subscription is sent first (folded from the log): after its Last-Event-ID, else the last per topic. */
-export function backlog(all: Delivered[], q: EventsQuery): Delivered[] {
-  if (q.after !== undefined) {
-    const i = all.findIndex((d) => d.id === q.after);
-    const n = placeOf(q.after)!.n;
-    return (i >= 0 ? all.slice(i + 1) : all.filter((d) => d.n > n)).filter((d) => takes(q, d));
-  }
-  const last = new Map<string, Delivered>();
-  for (const d of all) if (takes(q, d)) last.set(d.topic, d);
-  const ids = new Set([...last.values()].map((d) => d.id));
-  return all.filter((d) => ids.has(d.id));
-}
-
-/** An event's place in the log, as the kernel's `emit` notice carries it beside the record (#148). */
-export interface Place { n: number; seq: number; i: number; thread: CID }
-
-/** The id of the event at `p`: `<n>.<seq>.<i>.<thread>` — the fold's (foldEvents), free from the notice. */
-export const idOf = (p: Place): string => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
-
-/** A handed-over event as delivered, or undefined when it is not one a stream serves (no app, no topic). */
-export function deliveredOf(rec: Record<string, unknown>, p: Place): Delivered | undefined {
-  if (rec.kind !== "event" || typeof rec.event !== "string" || typeof rec.app !== "string" || typeof rec.topic !== "string") return undefined;
-  return { id: idOf(p), n: p.n, event: rec.event, app: rec.app, topic: rec.topic, data: new TextDecoder().decode(dagJson.encode(rec)) };
-}
-
-/** An open subscription: what it asked for, where its messages go, how it is closed; what came live while its backlog was read. */
+/** An open stream: what it asked for, where its messages go, how it is closed; what came live while its first read ran. */
 interface Sub { q: EventsQuery; send(d: Delivered): void; close(): void; held?: Delivered[] }
 
 export interface EventStreamsOptions {
@@ -144,7 +127,7 @@ export interface EventStreamsOptions {
 /** How many ids sent an instance remembers (a start hands an awaited event over again). */
 const SENT_MAX = 10_000;
 
-/** The registry of open subscriptions, per instance (#148). */
+/** The registry of open streams, per instance. */
 export class EventStreams {
   private subs = new Map<string, Set<Sub>>();
   /** Per instance: the ids handed over lately, in order: one handed over again is not sent again. */
@@ -152,17 +135,23 @@ export class EventStreams {
   private readonly o: EventStreamsOptions;
   constructor(o: EventStreamsOptions) { this.o = o; }
 
-  /** Whether `handle` has an open subscription. */
+  /** Whether `handle` has an open stream. */
   open(handle: string): boolean { return (this.subs.get(handle)?.size ?? 0) > 0; }
 
-  /** How many subscriptions `handle` has open (tests). */
+  /** How many streams `handle` has open (tests). */
   count(handle: string): number { return this.subs.get(handle)?.size ?? 0; }
 
+  /** The read, once (GET /events/… as JSON). */
+  async read(handle: string, q: EventsQuery): Promise<Delivered[]> {
+    const s = this.o.open(handle);
+    if (!s) return [];
+    try { return await readEvents(s, q); } finally { s.close(); }
+  }
+
   /**
-   * Open a subscription for `handle`: its backlog folded from the log and sent, then each new
-   * matching event as it is handed over (what came during the fold, after it, once). `send` writes
-   * one event; `close` ends the stream (the host's: an uninstall, the instance stopping). The
-   * returned function forgets it (the client went).
+   * Open a stream for `handle`: the read sent, then each new matching event as it is handed over
+   * (what came during the read, after it, once). `send` writes one event; `close` ends the stream
+   * (the host's: the instance stopping). The returned function forgets it (the client went).
    */
   async subscribe(handle: string, q: EventsQuery, send: (d: Delivered) => void, close: () => void): Promise<() => void> {
     const sub: Sub = { q, send, close, held: [] };
@@ -171,10 +160,7 @@ export class EventStreams {
     set.add(sub);
     const forget = () => this.remove(handle, sub);
     try {
-      const s = this.o.open(handle);
-      let all: Delivered[] = [];
-      if (s) try { all = await foldEvents(s); } finally { s.close(); }
-      const first = backlog(all, q);
+      const first = await this.read(handle, q);
       const had = new Set(first.map((d) => d.id));
       const held = sub.held!;
       delete sub.held;
@@ -187,28 +173,25 @@ export class EventStreams {
 
   /**
    * An event handed over for `handle` (after its step's commit), with its place in the log: sent
-   * as it is to each open subscription it matches — no log read. One handed over again (a start
-   * re-offers what a waiting thread awaits) is not sent again.
+   * as it is to each open stream it matches — no store read. Only a fact the index holds (an
+   * intention is not one); one handed over again (a start re-offers what a waiting thread awaits)
+   * is not sent again.
    */
-  emitted(handle: string, rec: Record<string, unknown>, place: Place): void {
+  emitted(handle: string, rec: Record<string, unknown>, place: { n: number; seq: number; i: number; thread: CID }): void {
     const subs = this.subs.get(handle);
     if (!subs?.size) return;
-    const d = deliveredOf(rec, place);
-    if (!d) return;
+    const name = indexedName(rec);
+    if (name === undefined) return;
+    const d: Delivered = { id: idOf(place), event: name, data: dataOf(rec) };
     let sent = this.sent.get(handle);
     if (!sent) this.sent.set(handle, sent = new Set());
     if (sent.has(d.id)) return;
     sent.add(d.id);
     if (sent.size > SENT_MAX) sent.delete(sent.values().next().value!);
-    for (const s of subs) if (takes(s.q, d)) { if (s.held) s.held.push(d); else s.send(d); }
+    for (const s of subs) if (takes(s.q, name)) { if (s.held) s.held.push(d); else s.send(d); }
   }
 
-  /** The apps `handle` has installed now (rows in its dispatch table): the others' subscriptions close. */
-  keep(handle: string, apps: Set<string>): void {
-    for (const s of [...this.subs.get(handle) ?? []]) if (!apps.has(s.q.app)) this.end(handle, s);
-  }
-
-  /** Close every subscription of `handle` (it stops). */
+  /** Close every stream of `handle` (it stops). */
   drop(handle: string): void {
     for (const s of [...this.subs.get(handle) ?? []]) this.end(handle, s);
   }
