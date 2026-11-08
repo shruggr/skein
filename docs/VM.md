@@ -170,60 +170,27 @@ passes; who may run a function is the gate's (grants.zig). The kernel's one
 invariant: what a skein decides from is logged and replayable — everything
 else (signing requirements, host boundaries) is policy layered on top.
 
-**The route table** (0.5.1: routes are the one concept — a route is
-(transport, address) → (program, fn, filters)) is one chain per instance:
-origin `{kind: "dispatch"}`, one update per change `{op: "add" | "remove",
-row, thread?, input, at}` — and ONE indexed map of it in the state, the
-index's `routes`: `transport ‖ 0 ‖ address ‖ 0 ‖ kind → the row` (kind 0
-an exact address, 1 a prefix, 2 an allowance), the updates applied in order
-(`kernel-zig/src/dispatch.zig`; `src/runtime/dispatch.ts` matches with the
-same rules over the folded rows, both checked against
-`kernel-zig/test/dispatch-cases.json`). Rows accumulate for the instance's
-life (one per txid, say); the map makes a match one lookup for an exact
-address and at most two per path segment for a prefix. A route:
+**The route table** is one chain per instance: origin `{kind: "dispatch"}`,
+one update per change `{op: "add" | "remove", row, thread?, input, at}`,
+the routes the updates folded in order (`kernel-zig/src/dispatch.zig`;
+`src/runtime/dispatch.ts` reads it and matches with the same rules, both
+checked against `kernel-zig/test/dispatch-cases.json`). A route:
 
 ```
-{transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true, dynamic?: true,
+{transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
  filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"],
  program?: <program record CID> | "kernel", fn?, app?, …settings}
 ```
 
-A route's key is (transport, address, prefix, dynamic): `add` replaces the
-route with that key in place, else appends; `remove` deletes it. The match
-is by address alone, one rule for every transport: the exact address, then
-— for a box (`mailbox`, `event`) — `*` (any box), then the longest prefix
-route (`prefix: true`, on ANY transport) the address starts with at a path
-segment (the prefix is the whole address, or ends just before or just after
-a `/`: "/explore" takes "/explore/x", "evx/" takes "evx/pool/a"). A
-`mailbox` route takes messages; an `event` route takes events by name (the
-host's wiring into a box, and the facts a step emits) — never a message; an
-`http` route's a path; a `libp2p` route's a pubsub topic or `/<protocol>`
-(a libp2p subscription IS a libp2p route: the host's node joins the topics
-of the live libp2p rows, read after each commit — an allowance and a prefix
-row join nothing).
-
-**Allowances** (`dynamic: true`, 0.5.1): a row root approves at install that
-is wired to nothing — it matches no request, the host joins no topic for it
-— and says a program may create routes under its address at run time.
-**`route`** is the kernel call a program makes in its step:
-
-```
-route(q, len) → 0         preview1: skein.route(q, len)
-                          WIT:      route: func(request: list<u8>) -> result<_, string>
-q         dag-cbor {transport, address, prefix?: true}
-```
-
-The address must fall under an allowance of the same transport (its address
-is the asked one or one of its path-segment prefixes; the longest wins); the
-route takes the allowance's handler, filters and settings (its `app` too) —
-the program chooses only the address and `prefix`. It is written to the
-route table when the step ends without error (a state write, like a head
-move; not an emit), so later steps and entries match it; there is no
-removal call. Errors: `route: want {transport, address, prefix?: true}` ·
-`route: transport "<t>": …` · `route: address "<a>": empty, or has a space
-or NUL` · `route: <t> "<a>": under no allowance (a row of that transport
-with "dynamic": true whose address it falls under)` · in a kernel call,
-`route: …` read-only. `program` is the handler, or `kernel`: an admin route,
+A route's key is (transport, address, prefix): `add` replaces the route
+with that key in place, else appends; `remove` deletes it. The match is by
+address alone: a `mailbox` route's address is a box (`*`: any box), and it
+takes messages; an `event` route's a box, and it takes events (the host's
+wiring: a feed's header, the broadcaster's proof, what a libp2p route
+admits) — never a message; an `http` route's a path (the exact path first,
+then the longest prefix); a `libp2p` route's a pubsub topic or
+`/<protocol>`, exactly (a topic no route is at goes to the app that
+subscribed it, #119). `program` is the handler, or `kernel`: an admin route,
 `fn` its operation (or the claim, or the host's tick: #130 — the host's key
 is the route's `host` setting, a tick from any other key refused). **No
 program: a read route** (http, and a libp2p `/<protocol>`: a transport that
@@ -338,8 +305,6 @@ these imports:
   or an event — an intention the runtime answers (#126: a `deadline`, a
   `fetch`) or one it acts on (a broadcast, a subscription, a beacon) — the
   way out (below, "emit");
-- **`route`** (0.5.1): create a route in the route table under an allowance
-  (below, "The route table"): a state write, like a head move, not an emit;
 - **`events`** (0.5.0): the instance's event index read — the facts its
   steps emitted, by name or name prefix, after a place, the last per name
   (below, "emit" and "The index");
@@ -541,14 +506,23 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     handler of the event route its name takes (an app's subscription:
     docs/MESSAGES.md "The event index (0.5.0)"). Replay puts the same
     records, the same index and launches the same threads. The intentions
-    below (`beacon`, `liveness`, `fetch`, `deliver`, `payment`,
+    below (`subscribe`, `beacon`, `liveness`, `fetch`, `deliver`, `payment`,
     the `deadline` the kernel records, and `want`, the un-s) are not under
     the name rule and not in the index.
-  - `subscribe` / `unsubscribe` (#119) are **gone** (0.5.1): a libp2p
-    subscription is a libp2p route in the route table — a live row, or one a
-    step creates under an allowance with `route` (above, "The route table").
-    An emit of `subscribe` is now a fact's name under no app's: refused by
-    the name rule.
+  - `subscribe` / `unsubscribe` (#119) are **subscriptions**, and the kernel
+    reads them too. `{event: "subscribe", topic, program: <role>, fn,
+    filter?}` says: deliver a libp2p message on `topic` to this app's
+    `program` (a role in its record at `<app>/app`) at `fn`; `{event:
+    "unsubscribe", topic}` ends it. The kernel checks each as it is emitted
+    (an installed app's program; a topic, not a `/<protocol>`; the role is
+    the app's and `fn` not empty; an unsubscribe of the app's own
+    subscription) and refuses the emit otherwise. The subscriptions are the
+    fold of these records in log order — derived, never written; a
+    subscription is keyed by (app, topic), and the first standing one for a
+    topic delivers. An inbound message on a topic no dispatch row is at goes
+    to that subscription's program and fn through the door, as a row's
+    handler would; a row at the topic wins. The host's libp2p node
+    subscribes the topics they take (docs/MESSAGES.md "libp2p (#51)").
   - `fetch` (#126) is an **intention**: `{event: "fetch", method, url,
     headers?: {name: text}, body?: bytes, timeoutMs?, maxBytes?}` → the
     record `{kind: "event", event: "fetch", …, thread, step, app?}` (the
@@ -558,7 +532,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   - `beacon` / `unbeacon` (#126): `{event: "beacon", topic, every: <ms ≥
     1000, ≤ a day>, body: bytes (≤ 64 KiB)}` declares once that the
     instance's libp2p node publishes `body` on `topic` every `every` ms;
-    `{event: "unbeacon", topic}` stops it. An
+    `{event: "unbeacon", topic}` stops it. Like a subscription: an
     installed app's (refused otherwise), keyed by (app, topic), folded by the
     host from the log; no answer comes. The node beats on its own clock
     (GossipSub signs each publish with its key), logs nothing per beat and
@@ -568,7 +542,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   - `payment` (#130): the kernel's pay step's alone (below, "Billing"); any
     other step's emit of it is refused.
   - The events the reference host wires today: `broadcast` (Arcade),
-    `beacon` / `unbeacon` and `liveness` / `unliveness` (its libp2p
+    `subscribe` / `unsubscribe` and `beacon` / `unbeacon` (its libp2p
     node), `deadline` and `fetch` (intentions: its waker, its HTTP proxy).
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
   <dag-cbor bytes>, subject?: <cid>}, {event: "broadcast", tx: <cid>, beef?:
@@ -576,7 +550,12 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   empty and has no space or NUL`` · ``emit: event <name>: a name is a slash
   path of segments: no empty segment, no space or NUL`` · ``emit: event
   <name>: an app emits under its own name`` (0.5.0, a fact) · ``emit: an event's `kind` and `app` are
-  the kernel's to set`` · `emit: <…>: the emitting program is not installed …` · `emit: the message is not dag-cbor`
+  the kernel's to set`` · a refused subscription (`emit: subscribe names
+  its program: …`, `emit: subscribe: "<role>" is not a program of app
+  <app> …`, `emit: subscribe names the function delivered to …`, `emit:
+  <subscribe|unsubscribe>: topic "<t>" is not a topic …`, `emit:
+  unsubscribe: app <app> has no subscription to <t> …`, `emit: <…>: the
+  emitting program is not installed …`) · `emit: the message is not dag-cbor`
   · ``emit: `to` is not an identity key (33 bytes): emit to a key, not a
   handle (resolve the handle first)`` · `emit: the box is empty or starts
   with ':' (reserved)` · `emit: the body is not dag-cbor` | `… not IPLD` |
