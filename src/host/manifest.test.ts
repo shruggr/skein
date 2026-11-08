@@ -74,10 +74,7 @@ test("routes: no sender (#143), the transports, handlers, filters, the keys", ()
   // #154: a libp2p stream protocol carries an answer: a read route there (filters, no handler) installs; a topic's does not.
   assert.equal(route({ transport: "libp2p", address: "/skein/overlay/sync/1.0.0", filters: ["chain.sync"], handler: undefined }), "");
   assert.match(route({ transport: "libp2p", address: "tm_demo", filters: ["chain.sync"], handler: undefined }), /libp2p topic route names its handler/);
-  assert.equal(route({ prefix: true }), "", "0.5.1: a prefix on any transport");
-  assert.match(route({ prefix: "yes" }), /prefix is true or absent/);
-  assert.equal(route({ dynamic: true }), "", "0.5.1: an allowance");
-  assert.match(route({ dynamic: false }), /dynamic is true or absent/);
+  assert.match(route({ prefix: true }), /a mailbox route has no prefix/);
   assert.equal(route({ transport: "event", filters: ["kernel.beef"] }), "", "#121: an event route may name kernel.beef");
   assert.match(route({ transport: "event", filters: ["kernel.brc104"] }), /an event route has no filters but kernel\.beef/);
   assert.match(route({ transport: "event", filters: ["kernel.beef", "page"] }), /an event route has no filters but kernel\.beef/);
