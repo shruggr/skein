@@ -152,7 +152,7 @@
       ]
     },
     {
-      "name": "mailbox: the first route in table order whose address is the box or *",
+      "name": "mailbox: the exact box first, then * (0.5.1: the table is keyed, table order no longer decides)",
       "updates": [
         {
           "op": "add",
@@ -191,7 +191,7 @@
         {
           "kind": "mail",
           "box": "run",
-          "want": "any"
+          "want": "a"
         },
         {
           "kind": "event",
@@ -302,7 +302,7 @@
       ]
     },
     {
-      "name": "libp2p: a topic or /protocol exactly; a prefix route a log holds is no route",
+      "name": "libp2p: a topic or /protocol exactly, else the longest prefix at a path segment (0.5.1: a prefix on any transport)",
       "updates": [
         {
           "op": "add",
@@ -364,6 +364,11 @@
           "kind": "libp2p",
           "name": "tx_00ff",
           "want": null
+        },
+        {
+          "kind": "libp2p",
+          "name": "tx_",
+          "want": "old"
         }
       ]
     },
@@ -409,6 +414,104 @@
           "kind": "mail",
           "box": "billing2",
           "want": "second"
+        }
+      ]
+    },
+    {
+      "name": "0.5.1: an allowance (dynamic) matches nothing; prefixes at path segments (before or after a /), the longest first",
+      "updates": [
+        {
+          "op": "add",
+          "row": {
+            "transport": "event",
+            "address": "evx/",
+            "dynamic": true,
+            "id": "allow",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "event",
+            "address": "evx/a",
+            "id": "made",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "event",
+            "address": "evx/",
+            "prefix": true,
+            "id": "live",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/explore",
+            "prefix": true,
+            "id": "explore",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "amm/",
+            "prefix": true,
+            "id": "mbox",
+            "program": "$cid"
+          }
+        }
+      ],
+      "fold": [
+        "allow",
+        "made",
+        "live",
+        "explore",
+        "mbox"
+      ],
+      "cases": [
+        {
+          "kind": "event",
+          "box": "evx/a",
+          "want": "made"
+        },
+        {
+          "kind": "event",
+          "box": "evx/b",
+          "want": "live"
+        },
+        {
+          "kind": "event",
+          "box": "evy/a",
+          "want": null
+        },
+        {
+          "kind": "http",
+          "path": "/explore/x",
+          "want": "explore"
+        },
+        {
+          "kind": "http",
+          "path": "/explore",
+          "want": "explore"
+        },
+        {
+          "kind": "http",
+          "path": "/explorex",
+          "want": null
+        },
+        {
+          "kind": "mail",
+          "box": "amm/q",
+          "want": "mbox"
         }
       ]
     }

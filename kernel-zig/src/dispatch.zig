@@ -71,6 +71,9 @@ pub const Row = struct {
     transport: []const u8,
     address: []const u8,
     prefix: bool,
+    /// 0.5.1: an allowance — root approved that a program may create routes under this address
+    /// (`route`); it matches nothing itself.
+    dynamic: bool = false,
     /// The handler's program record; null for a kernel route (`op`) and for a read route.
     program: ?[]const u8,
     /// The kernel operation, when the route's program is "kernel".
@@ -158,9 +161,11 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     if (v.get("sender") != null) return try a.dupe(u8, "sender: a route has none (#143: routing only — who may run a function is the grants')");
     const addr = Value.str(v.get("address")) orelse return try a.dupe(u8, "address: want text (a box, a path, a topic or /protocol, a provider's name)");
     if (!isBox(addr)) return try std.fmt.allocPrint(a, "address {s}: empty, or has a space or NUL", .{try json.quoted(a, addr)});
-    if (v.get("prefix")) |p| {
-        if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
-        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http") and !std.mem.eql(u8, t, "event")) return try a.dupe(u8, "prefix: only an http or an event route has one");
+    // 0.5.1: a prefix on any transport (the longest matching address wins).
+    if (v.get("prefix")) |p| if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
+    if (v.get("dynamic")) |d| {
+        if (d != .null and !(d == .bool and d.bool)) return try a.dupe(u8, "dynamic: true or absent");
+        if (d == .bool and Value.str(v.get("program")) != null) return try a.dupe(u8, "dynamic: a kernel route is not an allowance");
     }
     var n_filters: usize = 0;
     if (v.get("filters")) |fs| if (fs != .null) {
@@ -227,10 +232,12 @@ pub fn rowOf(v: Value) ?Row {
         } else if (prog == .cid) program = prog.cid else return null;
     }
     const p = v.get("prefix");
+    const d = v.get("dynamic");
     return .{
         .transport = t,
         .address = addr,
         .prefix = p != null and p.? == .bool and p.?.bool,
+        .dynamic = d != null and d.? == .bool and d.?.bool,
         .program = program,
         .op = if (is_kernel) Value.str(v.get("fn")) else null,
         .func = Value.str(v.get("fn")),
@@ -248,9 +255,40 @@ fn filtersOf(v: Value) []const Value {
     return fs.array;
 }
 
-/// The same key: (transport, address, prefix).
+/// The same key: (transport, address, prefix, dynamic).
 pub fn sameKey(x: Row, y: Row) bool {
-    return std.mem.eql(u8, x.transport, y.transport) and std.mem.eql(u8, x.address, y.address) and x.prefix == y.prefix;
+    return std.mem.eql(u8, x.transport, y.transport) and std.mem.eql(u8, x.address, y.address) and x.prefix == y.prefix and x.dynamic == y.dynamic;
+}
+
+/// 0.5.1: what a row's key is in the index (index.zig `routes`): exact, a prefix, an allowance.
+pub const Kind = enum(u8) { exact = 0, prefix = 1, dynamic = 2 };
+
+pub fn kindOf(r: Row) Kind {
+    return if (r.dynamic) .dynamic else if (r.prefix) .prefix else .exact;
+}
+
+/// The routes map's key (index.zig): transport ‖ 0 ‖ address ‖ 0 ‖ kind.
+pub fn key(a: std.mem.Allocator, transport: []const u8, address: []const u8, kind: Kind) ![]u8 {
+    var out = std.array_list.Managed(u8).init(a);
+    try out.appendSlice(transport);
+    try out.append(0);
+    try out.appendSlice(address);
+    try out.append(0);
+    try out.append(@intFromEnum(kind));
+    return out.items;
+}
+
+/// 0.5.1: the prefixes of `address` a prefix route may be at, longest first — at most two per path
+/// segment: the whole address, and before and after each `/` (a prefix "/explore" takes
+/// "/explore/x", "/site/" takes "/site/y", "evx/" takes "evx/pool/a").
+pub fn prefixes(a: std.mem.Allocator, address: []const u8) ![]const []const u8 {
+    var out = std.array_list.Managed([]const u8).init(a);
+    var k: usize = address.len;
+    while (k > 0) : (k -= 1) {
+        const at = k == address.len or address[k] == '/' or address[k - 1] == '/';
+        if (at) try out.append(address[0..k]);
+    }
+    return out.items;
 }
 
 fn sameRow(a: std.mem.Allocator, x: Row, y: Row) bool {
@@ -300,14 +338,11 @@ pub const By = struct { thread: ?[]const u8, input: []const u8, at: i64 };
 /// Apply a change; the update written, or null when it changes nothing. `v`
 /// is the route (for a remove, its key fields suffice).
 pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !?[]u8 {
-    const now = (try current(a, s)) orelse &.{};
     const r = rowOf(v) orelse return error.BadRow;
     const add = std.mem.eql(u8, op, "add");
     if (!add and !std.mem.eql(u8, op, "remove")) return error.BadRow;
-    var listed: ?Row = null;
-    for (now) |x| if (sameKey(x, r)) {
-        listed = x;
-    };
+    // 0.5.1: the row at its key, from the index (one lookup).
+    const listed: ?Row = if (try s.route(a, try key(a, r.transport, r.address, kindOf(r)))) |x| rowOf(x) else null;
     if (add) {
         if (listed) |x| if (sameRow(a, x, r)) return null;
     } else if (listed == null) return null;
@@ -329,41 +364,56 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !
 // topic or `/<protocol>` exactly. No key takes part: who it is from is the
 // filters' to establish and the gate's to judge.
 
-/// A message's route: the first `mailbox` route whose address is the box (or any box).
+/// The route `transport`/`address` takes among `rows` (0.5.1, the one rule; the index's `match` in a
+/// store): the exact address first — or, for a box (`mailbox`, `event`), `*` — then the longest
+/// prefix (`prefixes`); an allowance (`dynamic`) takes nothing.
+pub fn forRows(rows: []const Row, transport: []const u8, address: []const u8) ?Row {
+    const box = std.mem.eql(u8, transport, "mailbox") or std.mem.eql(u8, transport, "event");
+    for (rows) |r| if (!r.dynamic and !r.prefix and std.mem.eql(u8, r.transport, transport) and std.mem.eql(u8, r.address, address)) return r;
+    if (box) for (rows) |r| if (!r.dynamic and !r.prefix and std.mem.eql(u8, r.transport, transport) and std.mem.eql(u8, r.address, "*")) return r;
+    var best: ?Row = null;
+    for (rows) |r| {
+        if (r.dynamic or !r.prefix or !std.mem.eql(u8, r.transport, transport) or !atSegment(address, r.address)) continue;
+        if (best == null or r.address.len > best.?.address.len) best = r;
+    }
+    return best;
+}
+
+/// Whether `p` is one of `address`'s `prefixes`.
+fn atSegment(address: []const u8, p: []const u8) bool {
+    if (p.len == 0 or !std.mem.startsWith(u8, address, p)) return false;
+    const k = p.len;
+    return k == address.len or address[k] == '/' or address[k - 1] == '/';
+}
+
 pub fn forMail(rows: []const Row, box: []const u8) ?Row {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "mailbox") and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
+    return forRows(rows, "mailbox", box);
+}
+pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
+    return forRows(rows, "event", box);
+}
+pub fn forHttp(rows: []const Row, path: []const u8) ?Row {
+    return forRows(rows, "http", path);
+}
+pub fn forLibp2p(rows: []const Row, name: []const u8) ?Row {
+    return forRows(rows, "libp2p", name);
+}
+
+/// The route a package at `transport`/`address` takes, from the store's routes map (index.zig): one
+/// lookup for the exact address (and `*` for a box), then at most two per path segment.
+pub fn match(a: std.mem.Allocator, s: Store, transport: []const u8, address: []const u8) !?Row {
+    if (try s.route(a, try key(a, transport, address, .exact))) |v| return rowOf(v);
+    if (std.mem.eql(u8, transport, "mailbox") or std.mem.eql(u8, transport, "event")) {
+        if (try s.route(a, try key(a, transport, "*", .exact))) |v| return rowOf(v);
+    }
+    for (try prefixes(a, address)) |p| if (try s.route(a, try key(a, transport, p, .prefix))) |v| return rowOf(v);
     return null;
 }
 
-/// An event's route (#143: events are their own transport): the first `event` route whose address is
-/// the box — an event's name (0.5.0: a host's event in a box, or a fact a step emitted) — or any box
-/// (`*`); then (0.5.0, an app's subscription by name prefix) the longest prefix the name starts with.
-pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "event") and !r.prefix and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
-    var best: ?Row = null;
-    for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, "event") or !r.prefix or !std.mem.startsWith(u8, box, r.address)) continue;
-        if (best == null or r.address.len > best.?.address.len) best = r;
-    }
-    return best;
-}
-
-/// A request's `http` route: the exact path first, then the longest prefix that the path starts with.
-pub fn forHttp(rows: []const Row, path: []const u8) ?Row {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "http") and !r.prefix and std.mem.eql(u8, r.address, path)) return r;
-    var best: ?Row = null;
-    for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, "http") or !r.prefix or !std.mem.startsWith(u8, path, r.address)) continue;
-        if (best == null or r.address.len > best.?.address.len) best = r;
-    }
-    return best;
-}
-
-/// A libp2p package's route: the `libp2p` route at the topic or `/<protocol>` exactly. A topic no
-/// route is at may be delivered by an app's subscription instead (#119: subscriptions.zig; the
-/// scheduler's matchOf) — a route at the topic wins over a subscription.
-pub fn forLibp2p(rows: []const Row, name: []const u8) ?Row {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "libp2p") and !r.prefix and std.mem.eql(u8, r.address, name)) return r;
+/// 0.5.1: the allowance (`dynamic` row) of `transport` whose address `address` falls under — the
+/// whole address, or one of its `prefixes`, the longest — or null.
+pub fn covering(a: std.mem.Allocator, s: Store, transport: []const u8, address: []const u8) !?Row {
+    for (try prefixes(a, address)) |p| if (try s.route(a, try key(a, transport, p, .dynamic))) |v| return rowOf(v);
     return null;
 }
 
@@ -468,9 +518,9 @@ test "routes: filters, read routes, prefixes; an http path exact first, then the
     try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{"kernel.brc104"}, cid1, "y"))) != null);
     try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{ "kernel.beef", "amm.quote" }, cid1, "y"))) != null);
     try std.testing.expect((try problem(a, try route(a, "local", "fetch", false, &.{"kernel.beef"}, cid1, "y"))) != null);
-    // A prefix is an http or (0.5.0, a subscription by name prefix) an event route's only.
-    try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_", true, &.{}, cid1, "p"))) != null);
-    try std.testing.expect((try problem(a, try route(a, "mailbox", "amm/", true, &.{}, cid1, "p"))) != null);
+    // 0.5.1: a prefix on any transport.
+    try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_", true, &.{}, cid1, "p"))) == null);
+    try std.testing.expect((try problem(a, try route(a, "mailbox", "amm/", true, &.{}, cid1, "p"))) == null);
     try std.testing.expect((try problem(a, try route(a, "event", "amm/", true, &.{}, cid1, "p"))) == null);
     {
         // An event's route: the exact name (or `*`) first, then the longest prefix it starts with.
