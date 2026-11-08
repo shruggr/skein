@@ -160,7 +160,7 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     if (!isBox(addr)) return try std.fmt.allocPrint(a, "address {s}: empty, or has a space or NUL", .{try json.quoted(a, addr)});
     if (v.get("prefix")) |p| {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
-        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http route has one");
+        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http") and !std.mem.eql(u8, t, "event")) return try a.dupe(u8, "prefix: only an http or an event route has one");
     }
     var n_filters: usize = 0;
     if (v.get("filters")) |fs| if (fs != .null) {
@@ -335,10 +335,17 @@ pub fn forMail(rows: []const Row, box: []const u8) ?Row {
     return null;
 }
 
-/// An event's route (#143: events are their own transport): the first `event` route whose address is the box (or any box).
+/// An event's route (#143: events are their own transport): the first `event` route whose address is
+/// the box — an event's name (0.5.0: a host's event in a box, or a fact a step emitted) — or any box
+/// (`*`); then (0.5.0, an app's subscription by name prefix) the longest prefix the name starts with.
 pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "event") and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
-    return null;
+    for (rows) |r| if (std.mem.eql(u8, r.transport, "event") and !r.prefix and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
+    var best: ?Row = null;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.transport, "event") or !r.prefix or !std.mem.startsWith(u8, box, r.address)) continue;
+        if (best == null or r.address.len > best.?.address.len) best = r;
+    }
+    return best;
 }
 
 /// A request's `http` route: the exact path first, then the longest prefix that the path starts with.
@@ -461,8 +468,22 @@ test "routes: filters, read routes, prefixes; an http path exact first, then the
     try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{"kernel.brc104"}, cid1, "y"))) != null);
     try std.testing.expect((try problem(a, try route(a, "event", "deploy", false, &.{ "kernel.beef", "amm.quote" }, cid1, "y"))) != null);
     try std.testing.expect((try problem(a, try route(a, "local", "fetch", false, &.{"kernel.beef"}, cid1, "y"))) != null);
-    // A prefix is an http route's only.
+    // A prefix is an http or (0.5.0, a subscription by name prefix) an event route's only.
     try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_", true, &.{}, cid1, "p"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "mailbox", "amm/", true, &.{}, cid1, "p"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "event", "amm/", true, &.{}, cid1, "p"))) == null);
+    {
+        // An event's route: the exact name (or `*`) first, then the longest prefix it starts with.
+        const ev_exact = try route(a, "event", "amm/pool/x", false, &.{}, cid1, "ev-exact");
+        const ev_short = try route(a, "event", "amm/", true, &.{}, cid1, "ev-short");
+        const ev_long = try route(a, "event", "amm/pool/", true, &.{}, cid1, "ev-long");
+        const ev_rows = try fold(a, &.{ try up(a, ev_short), try up(a, ev_long), try up(a, ev_exact) });
+        try std.testing.expectEqualStrings("ev-exact", Value.str(forEvent(ev_rows, "amm/pool/x").?.value.get("id")).?);
+        try std.testing.expectEqualStrings("ev-long", Value.str(forEvent(ev_rows, "amm/pool/y").?.value.get("id")).?);
+        try std.testing.expectEqualStrings("ev-short", Value.str(forEvent(ev_rows, "amm/output/o").?.value.get("id")).?);
+        try std.testing.expect(forEvent(ev_rows, "chain/tx/t") == null);
+        try std.testing.expect(forEvent(ev_rows, "amm") == null);
+    }
     const exact = try route(a, "http", "/site/x", false, &.{"kernel.brc104"}, cid1, "exact");
     const longer = try route(a, "http", "/site/deep/", true, &.{}, cid1, "longer");
     const topic = try route(a, "libp2p", "tm_ab", false, &.{"kernel.beef"}, cid1, "topic");

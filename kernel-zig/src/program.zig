@@ -37,6 +37,15 @@
 //                                  transactions this step kept so far (exactly the edges
 //                                  its update will add); other kept records' refs appear
 //                                  from the next step on.
+//   events(q, len, out, cap) → n   (0.5.0) the event index (index.zig `events`): dag-cbor
+//                                  {name: <a name> | prefix: <a name prefix>, after?: {n,
+//                                  seq, i, thread: <cid>}, limit?, latest?: bool} → dag-cbor
+//                                  [{name, place: {n, seq, i, thread}, cid, record}] newest
+//                                  last: the facts emitted under that name (or every name
+//                                  the prefix starts), strictly after `after`, the last per
+//                                  name with `latest`, the first `limit`. A read: a pure
+//                                  function of the log up to this step (this step's own
+//                                  emits are indexed when its update is written)
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -81,7 +90,66 @@ pub const Host = struct {
     /// A BRC-104 request (#126, authfetch.zig): dag-cbor {url, method?, path?, headers?, body?,
     /// timeoutMs?} → dag-cbor {status, headers, body}; a recorded call.
     authfetch: *const fn (imp: *Imports, req: []const u8) Err![]const u8 = noAuthfetch,
+    /// 0.5.0: the event index read: dag-cbor query → dag-cbor rows (eventsRead).
+    events: *const fn (imp: *Imports, query: []const u8) Err![]const u8 = noEvents,
 };
+
+fn noEvents(imp: *Imports, _: []const u8) Err![]const u8 {
+    return imp.failWith("events: this host keeps no index");
+}
+
+pub const EVENTS_WANT = "events: want {name: <a name> | prefix: <a name prefix>, after?: {n, seq, i, thread: <cid>}, limit?: <n > 0>, latest?: bool}";
+
+/// The read's query (0.5.0) from its dag-cbor, or why it is not one.
+pub fn eventsQueryOf(a: std.mem.Allocator, bytes: []const u8) !union(enum) { ok: storem.EventsQuery, bad: []const u8 } {
+    const q = cbor.decode(a, bytes) catch return .{ .bad = "events: the query is not dag-cbor" };
+    if (q != .map) return .{ .bad = EVENTS_WANT };
+    const name = Value.str(q.get("name"));
+    const prefix = Value.str(q.get("prefix"));
+    if ((name == null) == (prefix == null)) return .{ .bad = EVENTS_WANT };
+    var out = storem.EventsQuery{ .name = name orelse prefix.?, .prefix = prefix != null };
+    if (q.get("after")) |x| if (x != .null) {
+        if (x != .map) return .{ .bad = EVENTS_WANT };
+        const n = Value.intOf(x.get("n")) orelse return .{ .bad = EVENTS_WANT };
+        const seq = Value.intOf(x.get("seq")) orelse return .{ .bad = EVENTS_WANT };
+        const i = Value.intOf(x.get("i")) orelse return .{ .bad = EVENTS_WANT };
+        const t = Value.cidOf(x.get("thread")) orelse return .{ .bad = EVENTS_WANT };
+        out.after = .{ .n = @intCast(std.math.clamp(n, std.math.minInt(i64), std.math.maxInt(i64))), .seq = @intCast(std.math.clamp(seq, std.math.minInt(i64), std.math.maxInt(i64))), .i = @intCast(std.math.clamp(i, std.math.minInt(i64), std.math.maxInt(i64))), .thread = t };
+    };
+    if (q.get("limit")) |x| if (x != .null) {
+        const l = Value.intOf(x) orelse return .{ .bad = EVENTS_WANT };
+        if (l <= 0) return .{ .bad = EVENTS_WANT };
+        out.limit = @intCast(@min(l, std.math.maxInt(u32)));
+    };
+    if (q.get("latest")) |x| switch (x) {
+        .bool => |b| out.latest = b,
+        .null => {},
+        else => return .{ .bad = EVENTS_WANT },
+    };
+    return .{ .ok = out };
+}
+
+/// The answer of `events` (0.5.0): the index's rows for the query, each with its record, as
+/// dag-cbor [{name, place: {n, seq, i, thread}, cid, record}].
+pub fn eventsRead(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery) ![]u8 {
+    const rows = try s.events(a, q);
+    const out = try a.alloc(Value, rows.len);
+    for (rows, out) |r, *o| {
+        var p = cbor.MapBuilder.init(a);
+        try p.put("n", cbor.int(r.place.n));
+        try p.put("seq", cbor.int(r.place.seq));
+        try p.put("i", cbor.int(r.place.i));
+        try p.put("thread", .{ .cid = r.place.thread });
+        var m = cbor.MapBuilder.init(a);
+        try m.put("name", cbor.string(r.name));
+        try m.put("place", p.value());
+        try m.put("cid", .{ .cid = r.record });
+        const b = (try s.bytes(a, r.record)) orelse return error.NotFound;
+        try m.put("record", try cbor.decode(a, b));
+        o.* = m.value();
+    }
+    return cbor.encode(a, .{ .array = out });
+}
 
 fn noAuthfetch(imp: *Imports, _: []const u8) Err![]const u8 {
     return imp.failWith("authfetch: this host carries no HTTP");
@@ -232,6 +300,7 @@ pub const Imports = struct {
                 return imp.out(p, try h.edges(imp, to, rel), a[4], a[5]);
             },
             .authfetch => return imp.out(p, try h.authfetch(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
+            .events => return imp.out(p, try h.events(imp, try imp.alloc.dupe(u8, p.slice(a[0], a[1]) catch return error.OutOfMemory)), a[2], a[3]),
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");

@@ -36,6 +36,17 @@
 //                                                              block at seq 0 (#42, bitcoin.zig): `spends`
 //                                                              (locator = vout); headers and merkle nodes: none)
 //   heads     name                       → tree CID            (named heads)
+//   events    name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → record CID     (0.5.0: the event index — every fact a
+//                                                              step emitted, {kind: "event", event:
+//                                                              <name>, app, …} with its name under its
+//                                                              app and no intention's (log.zig
+//                                                              indexedName), keyed by its name (raw
+//                                                              bytes, then a 0: a name has no NUL, so
+//                                                              a prefix of names is a prefix of keys)
+//                                                              and its place in the log: the entry
+//                                                              its step processed, the update's seq
+//                                                              in its thread, the record's index in
+//                                                              `emitted`, the thread's origin)
 //
 // Every map is a function of the chains and the log (the derivation is
 // sqlite.ts's, key for key), and the trees are canonical, so the state
@@ -55,6 +66,7 @@ const cidm = @import("cid");
 const mst = @import("mst");
 const storem = @import("store.zig");
 const bitcoin = @import("bitcoin.zig");
+const logm = @import("log.zig");
 const Value = cbor.Value;
 
 /// What the index needs of a store: blocks by CID, and one named pointer.
@@ -76,7 +88,7 @@ pub const Backend = struct {
     };
 };
 
-pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads };
+pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events };
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
@@ -607,6 +619,83 @@ pub const Index = struct {
         try ix.mapPut(.updates, try cat(a, .{ origin, seq }), .{ .cid = cid });
         try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
         try ix.writeKeptBitcoin(a, u);
+        try ix.writeEvents(a, origin, seq, u);
+    }
+
+    /// 0.5.0: the facts an update lists in `emitted` (log.zig indexedName) into the event index,
+    /// each at its place: the entry the step processed (`input`'s `n`), `seq`, its index, the thread.
+    fn writeEvents(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, u: Value) !void {
+        const emitted = u.get("emitted") orelse return;
+        if (emitted != .array or emitted.array.len == 0) return;
+        var n: ?i64 = null;
+        for (emitted.array, 0..) |x, i| {
+            const c = Value.cidOf(x) orelse continue;
+            const bytes = (try ix.backend.vt.get(ix.backend.ctx, a, c)) orelse continue;
+            const rec = cbor.decode(a, bytes) catch continue;
+            const name = logm.indexedName(rec) orelse continue;
+            if (n == null) {
+                const ec = Value.cidOf(u.get("input")) orelse return;
+                const e = ix.blockValue(a, ec) catch return;
+                n = @intCast(Value.intOf(e.get("n")) orelse return);
+            }
+            try ix.mapPut(.events, try eventKey(a, name, .{ .n = n.?, .seq = seq, .i = @intCast(i), .thread = origin }), .{ .cid = c });
+        }
+    }
+
+    /// A place as the event index orders it: n ‖ seq ‖ i ‖ thread (numbers as every map's).
+    pub fn placeKey(a: std.mem.Allocator, p: storem.Place) ![]u8 {
+        return cat(a, .{ p.n, p.seq, p.i, p.thread });
+    }
+
+    /// An event index key: the name, a 0, the place.
+    pub fn eventKey(a: std.mem.Allocator, name: []const u8, p: storem.Place) ![]u8 {
+        return cat(a, .{ name, &[_]u8{0}, try placeKey(a, p) });
+    }
+
+    const PlacedRow = struct { name: []const u8, place_key: []const u8, place: storem.Place, record: []const u8 };
+
+    fn parseEventKey(key: []const u8, v: Value) !PlacedRow {
+        const z = std.mem.indexOfScalar(u8, key, 0) orelse return error.BadIndex;
+        const rest = key[z + 1 ..];
+        if (rest.len <= 24) return error.BadIndex;
+        return .{
+            .name = key[0..z],
+            .place_key = rest,
+            .place = .{ .n = readBe64(rest[0..8]), .seq = readBe64(rest[8..16]), .i = readBe64(rest[16..24]), .thread = rest[24..] },
+            .record = Value.cidOf(v) orelse return error.BadIndex,
+        };
+    }
+
+    /// The event index read (0.5.0): the events under a name (or every name a prefix starts),
+    /// strictly after `after`, the last per name with `latest`, the first `limit`; newest last.
+    pub fn eventsRead(ix: *Index, a: std.mem.Allocator, q: storem.EventsQuery) ![]storem.EventRow {
+        const s = ix.scratch();
+        const prefix = if (q.prefix) q.name else try cat(s, .{ q.name, &[_]u8{0} });
+        const after: ?[]const u8 = if (q.after) |p| try placeKey(s, p) else null;
+        var rows = std.array_list.Managed(PlacedRow).init(s);
+        for (try ix.scanPrefix(s, .events, prefix)) |kv| {
+            const r = try parseEventKey(kv.key, kv.value);
+            if (after) |x| if (std.mem.order(u8, r.place_key, x) != .gt) continue;
+            // The keys come by name, then place: the last of a name replaces the one before.
+            if (q.latest and rows.items.len > 0 and std.mem.eql(u8, rows.items[rows.items.len - 1].name, r.name)) {
+                rows.items[rows.items.len - 1] = r;
+                continue;
+            }
+            try rows.append(r);
+        }
+        std.mem.sort(PlacedRow, rows.items, {}, struct {
+            fn lt(_: void, x: PlacedRow, y: PlacedRow) bool {
+                return std.mem.order(u8, x.place_key, y.place_key) == .lt;
+            }
+        }.lt);
+        const n = if (q.limit) |l| @min(l, rows.items.len) else rows.items.len;
+        const out = try a.alloc(storem.EventRow, n);
+        for (rows.items[0..n], out) |r, *o| o.* = .{
+            .name = try a.dupe(u8, r.name),
+            .place = .{ .n = r.place.n, .seq = r.place.seq, .i = r.place.i, .thread = try a.dupe(u8, r.place.thread) },
+            .record = try a.dupe(u8, r.record),
+        };
+        return out;
     }
 
     /// move(): the chain's tip is now `tip` (at `seq`); the maps that follow tips follow.
@@ -676,7 +765,12 @@ pub const Index = struct {
         .edges = edgesFn,
         .processedState = processedStateFn,
         .size = sizeFn,
+        .events = eventsFn,
     };
+
+    fn eventsFn(ctx: *anyopaque, a: std.mem.Allocator, q: storem.EventsQuery) anyerror![]storem.EventRow {
+        return self(ctx).eventsRead(a, q);
+    }
 
     fn sizeFn(ctx: *anyopaque) anyerror!u64 {
         const ix = self(ctx);

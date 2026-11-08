@@ -32,6 +32,19 @@ pub const AppendResult = union(enum) { ok: []u8, rejected: struct { reason: Reje
 /// #42) — the link's position there (`ord`), its rel and locator.
 pub const Edge = struct { from: []u8, seq: i64, ord: i64, rel: []u8, locator: ?Value };
 
+/// An event's place in the log (0.5.0, the event index): the entry its step processed (`n`), the
+/// step's update in its thread (`seq`), the record's index in the update's `emitted` (`i`), the
+/// thread's origin (binary CID) — the stream's id `<n>.<seq>.<i>.<thread>`.
+pub const Place = struct { n: i64, seq: i64, i: i64, thread: []const u8 };
+
+/// A read of the event index (0.5.0): the events under `name` exactly, or (`prefix`) every name
+/// that starts with it; only those strictly after `after`; with `latest`, the last per name; at
+/// most `limit` (the first, in log order).
+pub const EventsQuery = struct { name: []const u8, prefix: bool = false, after: ?Place = null, limit: ?usize = null, latest: bool = false };
+
+/// One indexed event: its name, its place, its record's CID.
+pub const EventRow = struct { name: []u8, place: Place, record: []u8 };
+
 pub const VTable = struct {
     bytes: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
     has: *const fn (ctx: *anyopaque, cid: []const u8) anyerror!bool,
@@ -71,6 +84,8 @@ pub const VTable = struct {
     processedState: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
     /// #130: the bytes the store holds, as its backend measures them (0: it cannot say).
     size: *const fn (ctx: *anyopaque) anyerror!u64,
+    /// 0.5.0: the event index read (index.zig `events`), newest last.
+    events: *const fn (ctx: *anyopaque, a: std.mem.Allocator, q: EventsQuery) anyerror![]EventRow,
 };
 
 pub const Store = struct {
@@ -169,5 +184,8 @@ pub const Store = struct {
     }
     pub fn size(s: Store) !u64 {
         return s.vt.size(s.ctx);
+    }
+    pub fn events(s: Store, a: std.mem.Allocator, q: EventsQuery) ![]EventRow {
+        return s.vt.events(s.ctx, a, q);
     }
 };

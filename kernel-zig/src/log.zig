@@ -164,6 +164,59 @@ test "deadlineRecord (#126): an event the wait owns — at, thread, step, the ap
     try std.testing.expect((try deadlineRecord(a, 5, t1, 1, null)).get("app") == null);
 }
 
+/// The intentions (#119, #126, #130, #138, #157): event names the kernel or the host wires as
+/// requests of their own — not facts. They are not under the name rule (an app emits them by
+/// these names) and not in the event index (index.zig `events`); everything else a program emits
+/// as {event: <name>} is a fact, indexed by name.
+pub const intentions = [_][]const u8{ "fetch", "deadline", "deliver", "payment", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant" };
+
+pub fn isIntention(name: []const u8) bool {
+    for (intentions) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
+
+/// Whether `name` is an event name (0.5.0): a slash path of segments — not empty, no empty segment
+/// (no leading, trailing or doubled `/`), no space and no NUL.
+pub fn isEventName(name: []const u8) bool {
+    if (!dispatch.isBox(name)) return false;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |seg| if (seg.len == 0) return false;
+    return true;
+}
+
+/// Whether `name` is under `app`: its first segment is the app's name (0.5.0's rule: an app emits
+/// under its own name, as it writes heads under its own name).
+pub fn underApp(name: []const u8, app: []const u8) bool {
+    const end = std.mem.indexOfScalar(u8, name, '/') orelse name.len;
+    return std.mem.eql(u8, name[0..end], app);
+}
+
+/// The name an indexed event record goes under (index.zig `events`), or null: a record {kind:
+/// "event", event: <name>, app: <app>} whose name is no intention and lies under its app.
+pub fn indexedName(m: Value) ?[]const u8 {
+    if (!isEvent(m)) return null;
+    const name = Value.str(m.get("event")).?;
+    if (isIntention(name)) return null;
+    const app = Value.str(m.get("app")) orelse return null;
+    if (!isEventName(name) or !underApp(name, app)) return null;
+    return name;
+}
+
+test "event names (0.5.0): segments, the app's own first segment, intentions apart" {
+    try std.testing.expect(isEventName("amm/pool/abc"));
+    try std.testing.expect(isEventName("amm"));
+    try std.testing.expect(!isEventName(""));
+    try std.testing.expect(!isEventName("/amm"));
+    try std.testing.expect(!isEventName("amm/"));
+    try std.testing.expect(!isEventName("amm//x"));
+    try std.testing.expect(!isEventName("amm/a b"));
+    try std.testing.expect(underApp("amm/pool/x", "amm"));
+    try std.testing.expect(underApp("amm", "amm"));
+    try std.testing.expect(!underApp("ammx/pool", "amm"));
+    try std.testing.expect(!underApp("pool", "amm"));
+    try std.testing.expect(isIntention("subscribe") and isIntention("fetch") and !isIntention("amm/fetch"));
+}
+
 /// Whether a record is an emitted event of #119's kind ({kind: "event", event: <name>, …}).
 pub fn isEvent(m: Value) bool {
     if (m != .map) return false;

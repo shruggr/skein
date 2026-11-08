@@ -8,7 +8,7 @@
 //    updates: [[origin, seq, cid, fuel|null]], threads: [origin] (at, origin),
 //    resting: [origin] (at, origin), sleepers: [[until, origin]],
 //    awaits: [[envelope, origin]], edges: [[from, seq, ord, to, rel, locator|null]],
-//    heads: [[name, tree, owner]], fuel: {total, threads: [[origin, fuel, steps]]}
+//    heads: [[name, tree, owner]], events: [[name, n, seq, i, thread, record]] (0.5.0), fuel: {total, threads: [[origin, fuel, steps]]}
 //    (issue #5: each update's `fuel`, summed per thread in thread order),
 //    blocks: [cid] (not index nodes or state records), indexBlocks: n}
 const std = @import("std");
@@ -205,6 +205,26 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
         try w.cid(kv.value.cid);
         try w.raw(",");
         try w.str(@import("heads.zig").ownerOf(strAt(kv.key).s));
+        try w.raw("]");
+    }
+    try w.raw("],\"events\":[");
+    for (try ix.all(a, .events), 0..) |kv, i| {
+        // 0.5.0: name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → record.
+        try w.sep(i);
+        const z = std.mem.indexOfScalar(u8, kv.key, 0) orelse kv.key.len;
+        const rest = kv.key[@min(z + 1, kv.key.len)..];
+        try w.raw("[");
+        try w.str(kv.key[0..z]);
+        try w.raw(",");
+        try w.int(num(rest[0..]));
+        try w.raw(",");
+        try w.int(num(rest[8..]));
+        try w.raw(",");
+        try w.int(num(rest[16..]));
+        try w.raw(",");
+        try w.cid(rest[24..]);
+        try w.raw(",");
+        try w.cid(kv.value.cid);
         try w.raw("]");
     }
     try w.raw("],\"fuel\":{\"total\":");

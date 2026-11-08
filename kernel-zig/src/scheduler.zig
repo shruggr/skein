@@ -1285,6 +1285,8 @@ pub const Runtime = struct {
             if (isBroadcast(m) or isEvent(m)) {
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
                 try rt.handOverEvent(a, mc, m, thread);
+                // 0.5.0: a fact steps the handler of the event route its name takes (an app's subscription).
+                if (logm.indexedName(m)) |name| try rt.subscriber(a, ctx, mc, name, thread);
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
@@ -1309,6 +1311,45 @@ pub const Runtime = struct {
             rt.say("message {s} in {s} to {s} → delivery {s}", .{ short(a, mc), Value.str(m.get("box")) orelse "?", shortKey(to), short(a, t) });
             try rt.run(a, t);
         }
+    }
+
+    /// 0.5.0: a fact a step emitted, `ev` under `name`, steps the handler of the event route its name
+    /// takes (dispatch.forEvent: the exact name, then the longest prefix — an app's subscription, of
+    /// its own names or another app's): a thread launched by the event record under the entry that
+    /// drove the emitting step, its args {event, box: <the name>, fn?, place: {n, seq, i, thread}}
+    /// (the place makes two like records two threads). As processEvent does for a host's event:
+    /// a kernel route, or a gated function (an event has no principal), runs nothing. A function of
+    /// the update and the state: replay launches the same threads.
+    fn subscriber(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
+        const row = dispatch.forEvent((try dispatch.current(a, rt.store)) orelse &.{}, name) orelse return;
+        const handler = row.program orelse return;
+        if (grants.gate(null, try rt.gatingRoles(a, row), null) != .pass) {
+            rt.say("event {s} {s}: {s} is gated, and an event has no principal; nothing runs", .{ name, short(a, ev), row.func orelse "the handler" });
+            return;
+        }
+        const place = (try rt.placeOf(a, ev, thread)) orelse return;
+        var p = cbor.MapBuilder.init(a);
+        try p.put("n", cbor.int(place.n));
+        try p.put("seq", cbor.int(place.seq));
+        try p.put("i", cbor.int(place.i));
+        try p.put("thread", cbor.cidv(place.thread));
+        var info = cbor.MapBuilder.init(a);
+        try info.put("event", cbor.cidv(ev));
+        try info.put("box", cbor.string(name));
+        if (row.func) |f| try info.put("fn", cbor.string(f));
+        try info.put("place", p.value());
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(handler));
+        try origin.put("args", info.value());
+        try origin.put("launchedBy", cbor.cidv(ev));
+        try origin.put("input", cbor.cidv(ctx.cid));
+        try origin.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
+        const t = try rt.store.chainOpen(a, origin.value());
+        // A step run again (cut off before it ended, resumed) emits the same fact: its handler is under way.
+        if (try rt.store.chainTip(a, t)) |tip| if (!std.mem.eql(u8, tip, t)) return;
+        rt.say("event {s} {s} → {s} {s}", .{ name, short(a, ev), try rt.programName(a, handler), short(a, t) });
+        try rt.run(a, t);
     }
 
     /// A request thread's origin (#68), from its entry alone: the transport's
@@ -2582,6 +2623,7 @@ pub const Runtime = struct {
             .call = hCall,
             .edges = hEdges,
             .authfetch = hAuthfetch,
+            .events = hEvents,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -2921,6 +2963,12 @@ pub const Runtime = struct {
         const run_ = &st.progs.items[st.progs.items.len - 1];
         if (run_.install == null) run_.install = st.rt.installedAs(a, run_.cid, run_.record) catch return imp.failWith("store error");
         const app: ?[]const u8 = if (run_.install.? == .none) null else Value.str(run_.record.get("app"));
+        // 0.5.0: a fact (any name but an intention's) is a slash path under the emitting app's own
+        // name — the event index's key (index.zig `events`), as a head is under its app's name.
+        if (!logm.isIntention(name)) {
+            if (!logm.isEventName(name)) return imp.failFmt("emit: event {s}: a name is a slash path of segments: no empty segment, no space or NUL", .{try json.quoted(a, name)});
+            if (app == null or !logm.underApp(name, app.?)) return imp.failFmt("emit: event {s}: an app emits under its own name", .{try json.quoted(a, name)});
+        }
         // #119: a subscription is checked as it is emitted (subscriptions.zig problem).
         const kind: ?subsm.Kind = if (std.mem.eql(u8, name, "subscribe")) .subscribe else if (std.mem.eql(u8, name, "unsubscribe")) .unsubscribe else null;
         if (kind) |k| {
@@ -3125,6 +3173,23 @@ pub const Runtime = struct {
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
     }
+    /// 0.5.0: the event index read (program.zig eventsRead), as the log stands before this step's update.
+    fn hEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        return eventsAnswer(imp, st.a, st.rt.store, query);
+    }
+
+    fn eventsAnswer(imp: *program.Imports, a: std.mem.Allocator, store: Store, query: []const u8) program.Err![]const u8 {
+        const q = switch (program.eventsQueryOf(a, query) catch return error.OutOfMemory) {
+            .ok => |x| x,
+            .bad => |why| return imp.failWith(why),
+        };
+        return program.eventsRead(a, store, q) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => imp.failFmt("events: {s}", .{@errorName(err)}),
+        };
+    }
+
     fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
         const st = stepOf(imp);
         if (until <= st.at) return imp.failWith("deadline: not after the step's time");
@@ -3407,6 +3472,7 @@ pub const Runtime = struct {
         .call = cCall,
         .edges = cEdges,
         .authfetch = cAuthfetch,
+        .events = cEvents,
     };
 
     fn callOf(imp: *program.Imports) *CallState {
@@ -3473,6 +3539,10 @@ pub const Runtime = struct {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
+    }
+    fn cEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        return eventsAnswer(imp, cs.a, cs.store, query);
     }
     fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const cs = callOf(imp);

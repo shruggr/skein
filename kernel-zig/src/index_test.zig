@@ -328,3 +328,115 @@ test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redeliver
     try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
     try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .log)).len);
 }
+
+fn evRec(a: std.mem.Allocator, name: []const u8, app: ?[]const u8, v: i64) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("event"));
+    try m.put("event", cbor.string(name));
+    if (app) |x| try m.put("app", cbor.string(x));
+    try m.put("v", cbor.int(v));
+    return m.value();
+}
+
+fn putV(s: anytype, a: std.mem.Allocator, v: Value) ![]u8 {
+    const blk = try cbor.block(a, v);
+    try s.putBlock(blk.cid, blk.bytes);
+    return blk.cid;
+}
+
+fn entry(a: std.mem.Allocator, s: anytype, n: i64) ![]u8 {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("test-entry"));
+    try m.put("n", cbor.int(n));
+    return putV(s, a, m.value());
+}
+
+fn emitting(a: std.mem.Allocator, at: i64, input: []const u8, emitted: []const []const u8) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("state", cbor.string("finished"));
+    try m.put("at", cbor.int(at));
+    try m.put("input", cbor.cidv(input));
+    try m.put("emitted", (try cbor.cidArray(a, emitted)).?);
+    return m.value();
+}
+
+test "index: the event index (0.5.0) — facts by name and place; prefix, after, limit, latest; intentions and other apps' names apart; import = incremental" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = Mem.init(gpa);
+    defer mem.deinit();
+    const ix = try index.Index.init(gpa, mem.backend(), false);
+    defer ix.deinit();
+    const s = ix.store();
+
+    const t1 = try s.chainOpen(a, try thread(a, 1, "a"));
+    const t2 = try s.chainOpen(a, try thread(a, 2, "b"));
+    const e3 = try entry(a, s, 3);
+    const e4 = try entry(a, s, 4);
+    const x1 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 1));
+    const y1 = try putV(s, a, try evRec(a, "amm/pool/y", "amm", 1));
+    const o1 = try putV(s, a, try evRec(a, "amm/output/o", "amm", 1));
+    const sub = try putV(s, a, try evRec(a, "subscribe", "amm", 1)); // an intention: not indexed
+    const stray = try putV(s, a, try evRec(a, "chain/tx/z", "amm", 1)); // not under its app: not indexed
+    const bare = try putV(s, a, try evRec(a, "amm/pool/x", null, 9)); // no app: not indexed
+    const x2 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 2));
+    _ = try s.chainAppend(a, t1, try emitting(a, 10, e3, &.{ x1, sub, y1, stray, bare }));
+    _ = try s.chainAppend(a, t2, try emitting(a, 11, e3, &.{o1}));
+    _ = try s.chainAppend(a, t1, try emitting(a, 12, e4, &.{x2}));
+    try std.testing.expectEqual(@as(usize, 4), (try ix.all(a, .events)).len);
+
+    const x = try s.events(a, .{ .name = "amm/pool/x" });
+    try std.testing.expectEqual(@as(usize, 2), x.len);
+    try std.testing.expectEqualSlices(u8, x1, x[0].record);
+    try std.testing.expectEqualSlices(u8, x2, x[1].record);
+    try std.testing.expectEqual(@as(i64, 3), x[0].place.n);
+    try std.testing.expectEqual(@as(i64, 1), x[0].place.seq);
+    try std.testing.expectEqual(@as(i64, 0), x[0].place.i);
+    try std.testing.expectEqualSlices(u8, t1, x[0].place.thread);
+    try std.testing.expectEqual(@as(i64, 4), x[1].place.n);
+    try std.testing.expectEqual(@as(i64, 2), x[1].place.seq);
+    // An exact name is not a prefix: amm/pool/x does not take amm/pool/xy (none here) nor amm/pool.
+    try std.testing.expectEqual(@as(usize, 0), (try s.events(a, .{ .name = "amm/pool" })).len);
+    // A prefix: every name it starts, newest last (by place, not by name).
+    const pool = try s.events(a, .{ .name = "amm/pool/", .prefix = true });
+    try std.testing.expectEqual(@as(usize, 3), pool.len);
+    try std.testing.expectEqualSlices(u8, x1, pool[0].record);
+    try std.testing.expectEqualSlices(u8, y1, pool[1].record);
+    try std.testing.expectEqualSlices(u8, x2, pool[2].record);
+    const all = try s.events(a, .{ .name = "", .prefix = true });
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+    // By (n, seq, i, thread): t2's i 0 in entry 3 sorts before t1's i 2 there (the place, not the order the steps ran).
+    try std.testing.expect(std.mem.eql(u8, o1, all[0].record) or std.mem.eql(u8, o1, all[1].record));
+    try std.testing.expectEqualSlices(u8, y1, all[2].record);
+    try std.testing.expectEqualSlices(u8, x2, all[3].record);
+    // latest: the last per name.
+    const latest = try s.events(a, .{ .name = "amm/", .prefix = true, .latest = true });
+    try std.testing.expectEqual(@as(usize, 3), latest.len);
+    try std.testing.expectEqualSlices(u8, x2, latest[2].record);
+    // after: strictly after a place; limit: the first n.
+    const after = try s.events(a, .{ .name = "amm/pool/", .prefix = true, .after = pool[0].place });
+    try std.testing.expectEqual(@as(usize, 2), after.len);
+    try std.testing.expectEqualSlices(u8, y1, after[0].record);
+    const one = try s.events(a, .{ .name = "amm/pool/", .prefix = true, .after = pool[0].place, .limit = 1 });
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualSlices(u8, y1, one[0].record);
+    try std.testing.expectEqual(@as(usize, 0), (try s.events(a, .{ .name = "amm/pool/", .prefix = true, .after = pool[2].place })).len);
+
+    // The rebuild path comes to the same state record.
+    try s.cursorSet(5);
+    const want = try ix.stateCid(a);
+    var mem2 = Mem.init(gpa);
+    defer mem2.deinit();
+    var it = mem.blocks.iterator();
+    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    const ix2 = try index.Index.init(gpa, mem2.backend(), false);
+    defer ix2.deinit();
+    for ([_][]const u8{ t2, t1 }) |t| {
+        const ups = (try s.chainUpdates(a, t)).?;
+        try ix2.importChain(t, ups, (try s.chainTip(a, t)).?, @intCast(ups.len));
+    }
+    ix2.setCursor(5);
+    try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
+}

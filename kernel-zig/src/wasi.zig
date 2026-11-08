@@ -216,6 +216,7 @@ pub const Fn = enum {
     call,
     edges,
     authfetch,
+    events,
     take,
     @"error",
 };
