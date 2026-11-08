@@ -1285,8 +1285,6 @@ pub const Runtime = struct {
             if (isBroadcast(m) or isEvent(m)) {
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
                 try rt.handOverEvent(a, mc, m, thread);
-                // 0.5.0: a fact steps the handler of the event route its name takes (an app's subscription).
-                if (logm.indexedName(m)) |name| try rt.subscriber(a, ctx, mc, name, thread);
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
@@ -1311,45 +1309,6 @@ pub const Runtime = struct {
             rt.say("message {s} in {s} to {s} → delivery {s}", .{ short(a, mc), Value.str(m.get("box")) orelse "?", shortKey(to), short(a, t) });
             try rt.run(a, t);
         }
-    }
-
-    /// 0.5.0: a fact a step emitted, `ev` under `name`, steps the handler of the event route its name
-    /// takes (dispatch.forEvent: the exact name, then the longest prefix — an app's subscription, of
-    /// its own names or another app's): a thread launched by the event record under the entry that
-    /// drove the emitting step, its args {event, box: <the name>, fn?, place: {n, seq, i, thread}}
-    /// (the place makes two like records two threads). As processEvent does for a host's event:
-    /// a kernel route, or a gated function (an event has no principal), runs nothing. A function of
-    /// the update and the state: replay launches the same threads.
-    fn subscriber(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
-        const row = dispatch.forEvent((try dispatch.current(a, rt.store)) orelse &.{}, name) orelse return;
-        const handler = row.program orelse return;
-        if (grants.gate(null, try rt.gatingRoles(a, row), null) != .pass) {
-            rt.say("event {s} {s}: {s} is gated, and an event has no principal; nothing runs", .{ name, short(a, ev), row.func orelse "the handler" });
-            return;
-        }
-        const place = (try rt.placeOf(a, ev, thread)) orelse return;
-        var p = cbor.MapBuilder.init(a);
-        try p.put("n", cbor.int(place.n));
-        try p.put("seq", cbor.int(place.seq));
-        try p.put("i", cbor.int(place.i));
-        try p.put("thread", cbor.cidv(place.thread));
-        var info = cbor.MapBuilder.init(a);
-        try info.put("event", cbor.cidv(ev));
-        try info.put("box", cbor.string(name));
-        if (row.func) |f| try info.put("fn", cbor.string(f));
-        try info.put("place", p.value());
-        var origin = cbor.MapBuilder.init(a);
-        try origin.put("kind", cbor.string("thread"));
-        try origin.put("program", cbor.cidv(handler));
-        try origin.put("args", info.value());
-        try origin.put("launchedBy", cbor.cidv(ev));
-        try origin.put("input", cbor.cidv(ctx.cid));
-        try origin.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
-        const t = try rt.store.chainOpen(a, origin.value());
-        // A step run again (cut off before it ended, resumed) emits the same fact: its handler is under way.
-        if (try rt.store.chainTip(a, t)) |tip| if (!std.mem.eql(u8, tip, t)) return;
-        rt.say("event {s} {s} → {s} {s}", .{ name, short(a, ev), try rt.programName(a, handler), short(a, t) });
-        try rt.run(a, t);
     }
 
     /// A request thread's origin (#68), from its entry alone: the transport's

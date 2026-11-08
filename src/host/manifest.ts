@@ -20,13 +20,10 @@
 //               program"), its modules and support files this tree's
 //   routes[]    the routes the app asks for (#143; the kernel's route table, docs/APPS.md §2):
 //               {transport?: "mailbox" (default) | "event" | "http" | "libp2p", address, prefix?: true,
-//                filters?: [<filter>], handler?: <handler>, …settings}. A mailbox route's
+//                filters?: [<filter>], handler?: <handler>, …settings}. A mailbox or event route's
 //               address is a box relative to the app (#128): "" or the app's name is the app's own
 //               box `<name>`, "x" the box `<name>/x` (an empty, "." or ".." segment, whitespace or a
-//               control character is refused: no box outside the app's); an event route's (0.5.0) is
-//               an event's NAME as written — a fact's name starts with its app's (any app's: reads
-//               are global, so an app subscribes to another's names), a host's event's its box ("" is
-//               the app's own name) — exact, or with `prefix: true` every name it starts; an http route's a path
+//               control character is refused: no box outside the app's); an http route's a path
 //               relative to /<name>/ (a leading "/" too: "/submit" → "/<name>/submit", "/" →
 //               "/<name>/"; a ".." or "." segment, an encoded dot or slash (%2e, %2f), a backslash, a
 //               NUL or a URL is refused), `prefix: true` for a prefix; a libp2p route's a topic or
@@ -173,25 +170,9 @@ export function appBox(app: string, b: string): string {
   return box;
 }
 
-/**
- * An event route's address (0.5.0): an event's name, or a prefix of names, as written ("" is the
- * app's own name) — no whitespace or control character, no empty, "." or ".." segment (a prefix may
- * end in "/"), at most 128 bytes.
- */
-export function eventAddress(app: string, b: string, prefix = false): string {
-  if (typeof b !== "string") throw new Error("not text");
-  if (b === "") return app;
-  if (/[\s\0-\x1f\x7f]/.test(b)) throw new Error(`event ${JSON.stringify(b)}: whitespace or a control character`);
-  const segs = b.split("/");
-  if (prefix && segs.length > 1 && segs.at(-1) === "") segs.pop();
-  if (segs.some((x) => x === "" || x === "." || x === "..")) throw new Error(`event ${JSON.stringify(b)}: an empty, "." or ".." segment`);
-  if (new TextEncoder().encode(b).length > 128) throw new Error(`event ${JSON.stringify(b)}: more than 128 bytes`);
-  return b;
-}
-
-/** A route's address as served: an http path under /<app>/ (appPath); a box under the app's (appBox); an event's name as written (eventAddress); a libp2p name as written. */
-export function rowAddress(app: string, r: { transport: string; address: string; prefix?: boolean }): string {
-  return r.transport === "http" ? appPath(app, r.address) : r.transport === "mailbox" ? appBox(app, r.address) : r.transport === "event" ? eventAddress(app, r.address, r.prefix === true) : r.address;
+/** A route's address as served: an http path under /<app>/ (appPath); a box under the app's (appBox); a libp2p name as written. */
+export function rowAddress(app: string, r: { transport: string; address: string }): string {
+  return r.transport === "http" ? appPath(app, r.address) : r.transport === "mailbox" || r.transport === "event" ? appBox(app, r.address) : r.address;
 }
 
 /** A route's key as the kernel's table knows it (dispatch.ts rowKey): `<transport> <address as served>[ prefix]`. */
@@ -235,12 +216,9 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: (f: st
   const t = r.transport ?? "mailbox";
   if (t !== "mailbox" && t !== "event" && t !== "http" && t !== "libp2p") return `transport ${JSON.stringify(t)} is not mailbox, event, http or libp2p`;
   if (typeof r.address !== "string" || (!r.address && (t === "http" || t === "libp2p"))) return "address is not text";
-  if (t === "mailbox") {
+  if (t === "mailbox" || t === "event") {
     try { appBox(app, r.address); } catch (e) { return (e as Error).message; }
     if (r.prefix !== undefined) return `a ${t} route has no prefix`;
-  } else if (t === "event") {
-    if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
-    try { eventAddress(app, r.address, r.prefix === true); } catch (e) { return (e as Error).message; }
   } else if (t === "http") {
     try { appPath(app, r.address); } catch (e) { return (e as Error).message; }
     if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";

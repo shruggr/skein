@@ -502,10 +502,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     no fact). An emit naming `kind` or `app` itself is refused. Handed over
     once (a host recovers by reading the event index, not by a re-offer).
     At commit the kernel puts it in the instance's **event index** (index.zig
-    `events`: name ‖ place → the record; "The index", below) and steps the
-    handler of the event route its name takes (an app's subscription:
-    docs/MESSAGES.md "The event index (0.5.0)"). Replay puts the same
-    records, the same index and launches the same threads. The intentions
+    `events`: name ‖ place → the record; "The index", below). Replay puts
+    the same records and the same index. The intentions
     below (`subscribe`, `beacon`, `liveness`, `fetch`, `deliver`, `payment`,
     the `deadline` the kernel records, and `want`, the un-s) are not under
     the name rule and not in the index.

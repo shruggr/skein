@@ -10,7 +10,7 @@
 // order: a route's key is (transport, address, prefix); `add` replaces the
 // route with that key in place, else appends; `remove` deletes it.
 //
-//   route  {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true (http and, 0.5.0, event),
+//   route  {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true (http only),
 //           filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"], program?: <cid> | "kernel", fn?, app?, price?,
 //           …settings}
 //
@@ -116,23 +116,14 @@ const atBox = (r: DispatchRow, box: string) => r.address === "*" || r.address ==
 /** Whether a mailbox route takes a message in `box` (dispatch.zig forMail). */
 export const takesMail = (r: DispatchRow, box: string): boolean => r.transport === "mailbox" && atBox(r, box);
 
-/** Whether an event route takes an event in `box` exactly (dispatch.zig forEvent's first rule; 0.5.0: or a prefix route the name starts with). */
-export const takesEvent = (r: DispatchRow, box: string): boolean => r.transport === "event" && (r.prefix === true ? box.startsWith(r.address) : atBox(r, box));
+/** Whether an event route takes an event in `box` (dispatch.zig forEvent). */
+export const takesEvent = (r: DispatchRow, box: string): boolean => r.transport === "event" && atBox(r, box);
 
 /** The first route a message in `box` routes to, with its index, or undefined (dispatch.zig forMail). */
 export const forMail = (rows: DispatchRow[], box: string) => found(rows, rows.findIndex((r) => takesMail(r, box)));
 
-/** The route an event in `box` (0.5.0: an event's name) routes to (dispatch.zig forEvent): the first exact (or `*`), then the longest prefix it starts with. */
-export function forEvent(rows: DispatchRow[], box: string): { i: number; row: DispatchRow } | undefined {
-  const exact = rows.findIndex((r) => r.transport === "event" && r.prefix !== true && atBox(r, box));
-  if (exact >= 0) return found(rows, exact);
-  let best = -1;
-  rows.forEach((r, i) => {
-    if (r.transport !== "event" || r.prefix !== true || !box.startsWith(r.address)) return;
-    if (best < 0 || r.address.length > rows[best]!.address.length) best = i;
-  });
-  return found(rows, best);
-}
+/** The first route an event in `box` routes to (dispatch.zig forEvent). */
+export const forEvent = (rows: DispatchRow[], box: string) => found(rows, rows.findIndex((r) => takesEvent(r, box)));
 
 /** A request's http route (dispatch.zig forHttp): the exact path first, then the longest prefix the path starts with. */
 export function forHttp(rows: DispatchRow[], path: string): { i: number; row: DispatchRow } | undefined {

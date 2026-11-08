@@ -692,7 +692,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | `liveness` (#138) | `{kind: "event", event: "liveness", app, topic, window}` | its liveness tool: the node subscribes `topic` without admitting its messages and keeps the verified beacon beats newer than `window` ms, the latest per sender, served at `GET /<app>/.live/<topic>` — "Liveness (#138)", below |
   | `unliveness` (#138) | `{kind: "event", event: "unliveness", app, topic}` | `app`'s liveness on `topic` ends: its set is gone, the node leaves the topic when nothing else takes it |
-  | a fact (any other name, under its app's: `<app>/…`) | `{kind: "event", event: <name>, app, …fields}` | the application host's `appEvent` when it has one, else a log line; the kernel indexes it and steps the event route its name takes — "The event index (0.5.0)", below |
+  | a fact (any other name, under its app's: `<app>/…`) | `{kind: "event", event: <name>, app, …fields}` | the application host's `appEvent` when it has one, else a log line; the kernel indexes it — "The event index (0.5.0)", below |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
   fields}`: `app` is the kernel's, the `app` of the emitting program's record
@@ -1593,16 +1593,6 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     instance, in memory, closed when it stops and when the host shuts down.
     The `/<app>/.events?event=&topic=` stream of #148 is removed, and an
     event needs no `topic`.
-  - **Subscriptions**: an app's event route `{transport: "event", address:
-    <a name or a prefix>, prefix?: true, handler: "<role>.<fn>"}` (docs/APPS.md).
-    After the emitting step, under the entry that drove it, the kernel steps
-    the handler of the route the fact's name takes — dispatch.zig forEvent:
-    the exact name (or `*`) first, then the longest prefix — as a thread
-    launched by the event record, its args `{event: <the record's CID>, box:
-    <the name>, fn?, place: {n, seq, i, thread}}` (a logged step; replay
-    launches the same threads). An app may subscribe to another app's names
-    (reads are global). A kernel route, or a gated function (an event has no
-    principal), runs nothing; the route's filters are not run on a fact.
 - **An application host's reads** (open-exchange 0.11.0). A host built on
   the Router as a library (its `appEvent` takes the events no stock wiring
   takes, #164) may also answer GETs at an instance itself: the Router option

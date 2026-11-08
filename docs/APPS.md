@@ -121,9 +121,9 @@ way.
 
 | field | meaning |
 |---|---|
-| `transport` | `mailbox` (the default: a message in a box), `event` (an event by its name: the host's wiring into a box — a feed's header, a broadcaster's proof, what a libp2p route admits — or, 0.5.0, a fact a step emitted: the app's **subscription**; never a message), `http`, `libp2p` |
-| `address` | for `event` (0.5.0) an event's **name as written** — a fact's name starts with its app's (any app's: reads are global, so an app subscribes to another's names, `"evx/"` with `prefix`), a host's box its own (`"chain"`); `""` is the app's own name; whitespace, a control character, an empty, `.` or `..` segment (a prefix may end in `/`) or over 128 bytes is refused. A box **relative to the app** for `mailbox` (#128: `""` or the app's name is the app's box `<name>`, `"x"` the box `<name>/x`; an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes); for `http` a path **relative to `/<name>/`** (`"/swap"` is `/amm/swap`, `"/"` is `/amm/`; a `.`/`..` segment, an encoded dot or slash, a backslash, a NUL, a query or a URL is refused); for `libp2p` a pubsub topic or `/<protocol>`, exact — global, not namespaced |
-| `prefix` | `true`: the http address (or, 0.5.0, the event address: a prefix of names) is a prefix (the exact path or name first, then the longest prefix) |
+| `transport` | `mailbox` (the default: a message in a box), `event` (the host's wiring into a box — a feed's header, a broadcaster's proof, what a libp2p route admits; never a message), `http`, `libp2p` |
+| `address` | a box **relative to the app** for `mailbox` and `event` (#128: `""` or the app's name is the app's box `<name>`, `"x"` the box `<name>/x`; an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes); for `http` a path **relative to `/<name>/`** (`"/swap"` is `/amm/swap`, `"/"` is `/amm/`; a `.`/`..` segment, an encoded dot or slash, a backslash, a NUL, a query or a URL is refused); for `libp2p` a pubsub topic or `/<protocol>`, exact — global, not namespaced |
+| `prefix` | `true`: the http address is a prefix (the exact path first, then the longest prefix) |
 | `filters` | the filters run on the request, in order, before anything is recorded (below): `"kernel.brc104"`, `"kernel.beef"`, one of this app's (`"quote"`: a name its `filters` declares) or another app's (`"<app>.<filter>"`). An `event` route may name `"kernel.beef"` and nothing else (#121, #164: an event has no sender — its record validated at the door, docs/VM.md "The door"); a `local` route none |
 | `handler` | `"<role>.<fn>"`: a function of one of `programs` (the stored route names the role's program record and `fn`); for an app with one program, `"<fn>"`; a `mailbox` or `event` route may name just `"<role>"` (the program stepped, no function named — nothing can gate it). **No handler: a read route** (http, or a libp2p `/<protocol>`: a transport that carries an answer, #154; a topic route names its handler): its filters answer, the last one — on a stream, the answer's body is the frame written back; nothing is logged |
 | anything else | the handler's (or the filters') own settings, carried as `match` (`root`, `index`) |
@@ -132,15 +132,9 @@ Who may send is not a route's business: an `http` route lists only what it
 names — possibly no filter at all, open to anyone signed or not; a `libp2p`
 route starts with the transport's own check (the GossipSub signature: the
 publisher's key is the principal); a `mailbox` route's principal is the
-message's sender (its carrier proved it); an `event` route has no principal
-(a gated function on it runs nothing). A fact a step emits steps the handler
-of the event route its name takes, after the emitting step, under the entry
-that drove it, the step's args `{event: <the record>, box: <the name>, fn?,
-place: {n, seq, i, thread}}` (docs/MESSAGES.md "The event index (0.5.0)").
-The same key (transport, address
+message's sender (its carrier proved it). The same key (transport, address
 as served, prefix) twice is refused. An app's routes are under its own
-addresses — boxes under `<app>`, http under `/<app>/` (an event route's
-address is a name, any app's) — and root may add
+addresses — boxes under `<app>`, http under `/<app>/` — and root may add
 routes of its own anywhere (no `app`: an app's upgrade or uninstall leaves
 them; the site at `/` is one, below).
 

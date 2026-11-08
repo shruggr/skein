@@ -1,13 +1,11 @@
 // The kernel's event index (skein 0.5.0) end to end: one router, one instance
 // `ix`, two apps installed by the owner's messages — programs/test/event-demo's
-// module as `evx` (a mailbox route) and `evy` (a mailbox route and an event
-// route on the prefix `evx/`, its subscription to evx's names):
+// module as `evx` and `evy` (a mailbox route each):
 //
 //   - a name not under the emitting app's own (`evy/x` from evx, `pool`) is
 //     refused as it is emitted: the step errors with the kernel's reason;
 //   - evx emits facts under three names (evx/pool/a, evx/pool/b, evx/output/o,
-//     some twice): evy's prefix route is stepped once per fact, in order, its
-//     head `evy/heard` chaining each (the name, the record, the place);
+//     some twice), evy one under its own;
 //   - the host's read GET /@ix/events/<name path> (a name, a prefix, latest,
 //     after, limit) answers what the index holds, and evy's in-step read (the
 //     `events` import, head `evy/read`) the same rows: the same places, the
@@ -97,7 +95,7 @@ try {
     check(o.code === 0, `skein install ${app}: exit ${o.code} ${o.err.join(" ")}`);
   };
   await install("evx");
-  await install("evy", [{ transport: "event", address: "evx/", prefix: true, handler: "demo" }]);
+  await install("evy");
   const box = new RawBox(ownerWallet, base);
   const send = async (app: string, body: Record<string, unknown>) => { await box.send(identity, app, body); await r.settled(); };
   const emit = (names: string[], value: number) => send("evx", { kind: "event-demo-emit", names, value });
@@ -125,11 +123,11 @@ try {
   check(refused.length >= 2, `a name not under the app's own is refused as it is emitted (${refused.length} refusals logged)`);
   check((await read("", "")).length === 0, "nothing indexed by a refused emit");
 
-  // ------------------------------------------------ facts under three names; evy's prefix route stepped per fact
+  // ------------------------------------------------ facts under three names
   await emit(["evx/pool/a", "evx/pool/b"], 1);
   await emit(["evx/output/o"], 2);
   await emit(["evx/pool/a"], 3);
-  await send("evy", { kind: "event-demo-emit", names: ["evy/own"], value: 4 }); // evy's own fact: indexed; evy's route (evx/) does not take it
+  await send("evy", { kind: "event-demo-emit", names: ["evy/own"], value: 4 }); // evy's own fact: indexed
 
   const all = await read("");
   check(all.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/a=1,evx/pool/b=1,evx/output/o=2,evx/pool/a=3,evy/own=4", `GET /events/: every fact, newest last: ${all.map((x) => `${x.event}=${x.record.value}`).join(",")}`);
@@ -142,14 +140,6 @@ try {
   check(latest.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/b=1,evx/pool/a=3", `latest: the last per name: ${latest.map((x) => `${x.event}=${x.record.value}`).join(",")}`);
   const after = await read("evx/", `after=${all[0]!.id}&limit=2`);
   check(after.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/b=1,evx/output/o=2", "after a place, the first two");
-
-  // evy heard each of evx's facts, once, in order, with its place.
-  const heard: Array<Record<string, unknown>> = [];
-  for (let h = await headRecord("evy/heard"); h; h = h.prev ? await recordOf(h.prev as CID) : undefined) heard.unshift(h);
-  const evxIds = all.filter((x) => x.event.startsWith("evx/")).map((x) => x.id);
-  const heardIds = heard.map((h) => idOfPlace(h.place as { n: number; seq: number; i: number; thread: CID }));
-  check(heardIds.join(" ") === evxIds.join(" "), `evy's prefix route stepped once per fact of evx's, in order, with its place (${heard.length} heard of ${evxIds.length})`);
-  check(heard.every((h, i) => h.box === all.filter((x) => x.event.startsWith("evx/"))[i]!.event), "each step told the fact's name");
 
   // ------------------------------------------------ the in-step read = the host's read
   const stepRead = async (query: Record<string, unknown>) => {
