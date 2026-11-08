@@ -63,7 +63,7 @@ export function foldLiveness(events: Iterable<LivenessEvent>, into: Live[] = [])
   return into;
 }
 
-/** The liveness standing, folded from the store's log as the beacons are (p2p.ts beaconsOf). Read only. */
+/** The liveness standing, folded from the store's log as the subscriptions and beacons are (p2p.ts subscriptionsOf). Read only. */
 export async function livenessOf(store: Pick<Store, "get" | "chains" | "edges">): Promise<Live[]> {
   return foldLiveness(await emittedEvents(store, (rec) => { const e = livenessEvent(rec); return "refused" in e ? undefined : e; }));
 }

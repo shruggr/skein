@@ -67,7 +67,7 @@ import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
-import { peerIdOf } from "../../src/host/p2p.ts";
+import { peerIdOf, subscriptionsOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -418,8 +418,7 @@ try {
   // ------------------------------------------------ register / deregister (skein-overlay 0.7.0, #119, #128): the owner registers tm_reg in overlay2, box overlay2/register (0.7.7)
   const identity = (await rA.hydrate("ov")).identity;
   const toBox = async (body: unknown) => { await new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@ov`).send(identity, "overlay2/register", body); await rA.settled(); };
-  // 0.5.1: the subscriptions fold is removed (a libp2p subscription is a libp2p route); skein-overlay's register still emits `subscribe`, refused on this kernel — these checks fail until the overlay is reworked.
-  const folded = async () => "(no subscriptions fold since skein 0.5.1)";
+  const folded = async () => { const s = openStoreFile(store, { readOnly: true }); try { return (await subscriptionsOf(s)).filter((x) => x.app === "overlay2").map((x) => `${x.topic} ${x.program}.${x.fn}${x.filter ? ` (filter ${x.filter})` : ""}`).sort().join("; "); } finally { s.close(); } };
   await toBox({ fn: "register", args: { topic: "tm_reg", program: "topic-demo" } });
   const subsReg = await folded();
   const regSet = await record("overlay2/topics") as { kind?: string; topics?: Array<{ topic: string; program: string }> } | undefined;
