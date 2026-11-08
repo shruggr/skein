@@ -123,7 +123,8 @@ way.
 |---|---|
 | `transport` | `mailbox` (the default: a message in a box), `event` (an event by its name: the host's wiring into a box — a feed's header, a broadcaster's proof, what a libp2p route admits — or, 0.5.0, a fact a step emitted: the app's **subscription**; never a message), `http`, `libp2p` |
 | `address` | for `event` (0.5.0) an event's **name as written** — a fact's name starts with its app's (any app's: reads are global, so an app subscribes to another's names, `"evx/"` with `prefix`), a host's box its own (`"chain"`); `""` is the app's own name; whitespace, a control character, an empty, `.` or `..` segment (a prefix may end in `/`) or over 128 bytes is refused. A box **relative to the app** for `mailbox` (#128: `""` or the app's name is the app's box `<name>`, `"x"` the box `<name>/x`; an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes); for `http` a path **relative to `/<name>/`** (`"/swap"` is `/amm/swap`, `"/"` is `/amm/`; a `.`/`..` segment, an encoded dot or slash, a backslash, a NUL, a query or a URL is refused); for `libp2p` a pubsub topic or `/<protocol>`, exact — global, not namespaced |
-| `prefix` | `true`: the http address (or, 0.5.0, the event address: a prefix of names) is a prefix (the exact path or name first, then the longest prefix) |
+| `prefix` | `true` (any transport, 0.5.1): the address is a prefix — the exact address first, then the longest prefix the asked one starts with at a path segment (the whole address, or ending just before or after a `/`) |
+| `dynamic` | `true` (0.5.1): an **allowance** root approves at install, wired to nothing — it matches no request and the host joins no topic for it. A program of the instance may create routes under its address in its step with the kernel call `route {transport, address, prefix?}` (skein-sdk `sk.route`); each takes this row's handler, filters and settings, the program choosing only the address. Without it a row is live from install, as always |
 | `filters` | the filters run on the request, in order, before anything is recorded (below): `"kernel.brc104"`, `"kernel.beef"`, one of this app's (`"quote"`: a name its `filters` declares) or another app's (`"<app>.<filter>"`). An `event` route may name `"kernel.beef"` and nothing else (#121, #164: an event has no sender — its record validated at the door, docs/VM.md "The door"); a `local` route none |
 | `handler` | `"<role>.<fn>"`: a function of one of `programs` (the stored route names the role's program record and `fn`); for an app with one program, `"<fn>"`; a `mailbox` or `event` route may name just `"<role>"` (the program stepped, no function named — nothing can gate it). **No handler: a read route** (http, or a libp2p `/<protocol>`: a transport that carries an answer, #154; a topic route names its handler): its filters answer, the last one — on a stream, the answer's body is the frame written back; nothing is logged |
 | anything else | the handler's (or the filters') own settings, carried as `match` (`root`, `index`) |
@@ -540,9 +541,9 @@ other)`; the manifest is read from `<app>/app`. A function gets an
 `app.Call`: its `args` (checked), `sender`, the app record, and the writes
 — `put`, `putBlock`, `keep`, `advance`, `setState`, `emit`/`send`,
 `launch`, `deadline`, `awaitRecord`; `sk.fetch` / `sk.authfetch` for HTTP
-(#126). (There is no `subscribe` import: the dispatch table is the
-kernel's; an app takes a libp2p topic, or beats a beacon, by emitting the
-event.)
+(#126). (0.5.1: an app takes a libp2p topic, or an event name, by a route —
+a live row, or one its step creates with `sk.route` under an allowance;
+it beats a beacon by emitting the event.)
 
 **`writes: false`** functions answer from the app's head as it stands;
 their request is still an entry (§2). Each write through the `Call` is
@@ -633,11 +634,11 @@ writes under its program's name (`overlay/…`, the tree's `scopes`).
 
 **An overlay may list no topics** (#120): `topics` absent or `{}` is
 accepted. A dynamic overlay (Mandala, an AMM) has no topics in its manifest:
-its topics are registered and deregistered by a call at runtime, which
-emits a subscription (`subscribe {topic, program, fn}`) or ends one
-(`unsubscribe {topic}`, #119): the kernel delivers the topic's messages by
-the subscription, and no row is added (docs/OVERLAY.md "How an overlay app
-activates a token topic live"). The install derives the box
+its topics are registered at runtime. (Until skein 0.5.0 it emitted a
+subscription, `subscribe {topic, program, fn}`, #119; 0.5.1 removed that
+emit — a topic is a libp2p route, created in a step with `route` under an
+allowance the manifest asks for, `"dynamic": true`; skein-overlay is
+reworked onto it in its own build.) The install derives the box
 rows, `/submit` and `/lookup` as below, and no per-topic rows. A manifest
 may still pre-configure topics (OpNS: one global topic). There are no prefix
 declarations: `prefixes`, here or in a lookup service, is refused as an
@@ -910,7 +911,7 @@ bounded at 64 MiB).
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
 | the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; installed by message (#152) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
 | root's own http route to an app's handler (`skein routes add --transport http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125, #143: src/client/admin.ts `planRoute`) |
-| libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
+| libp2p rows installed by apps or created under an allowance (0.5.1); the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record `<app>/app`, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72, #79: skein-overlay 0.3.0 `src/config.zig`) |

@@ -671,7 +671,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   (transport `event`, address the name); the host acts on it by its wiring,
   or ignores it with a log line (the step is not told). Two kinds of name
   (0.5.0): the **intentions** below (`broadcast`, `fetch`, `deadline`,
-  `deliver`, `payment`, `subscribe` / `unsubscribe`, `beacon` / `unbeacon`,
+  `deliver`, `payment`, `beacon` / `unbeacon`,
   `liveness` / `unliveness`, `want` / `unwant`) — requests the runtime
   answers, unchanged — and everything else, a **fact**: its name a slash
   path of segments (no empty segment, no space or NUL) whose first segment
@@ -684,8 +684,6 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | event | record | the host |
   |---|---|---|
   | `broadcast` (#65) | `{kind: "broadcast", tx, beef?}` | its broadcaster posts the transaction to Arcade — below, "Broadcast out, proofs and statuses in"; re-offered at a start while the thread awaits it |
-  | `subscribe` (#119) | `{kind: "event", event: "subscribe", app, topic, program, fn, filter?}` | a subscription: its libp2p node subscribes `topic`; the kernel delivers a message on it to `app`'s `program` at `fn` — "libp2p (#51)", below |
-  | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | `app`'s subscription to `topic` ends; the node leaves the topic when nothing else takes it |
   | `deadline` (#126) | `{kind: "event", event: "deadline", at, thread, step, app?}` — the kernel records it (the `deadline` import, a shell's sleep), never an emit | an intention: its waker answers at `at` (below, "Intentions"); re-offered at a start while the thread awaits it |
   | `fetch` (#126) | `{kind: "event", event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?, thread, step, app?}` (`sk.fetch`; the kernel adds `thread`, `step`) | an intention: its HTTP proxy performs it and answers (below, "Intentions"); re-offered at a start while the thread awaits it |
   | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes a new frame on `topic` every `every` ms — `body`, the beat's time, the instance's signature — logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
@@ -702,13 +700,10 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   a fact with no app fails the name rule — only an intention may be emitted
   so). An emit naming `kind` or `app` is refused. It is handed over once; a host that needs it
   after a restart reads it from the log (the kernel writes nothing else).
-  The kernel checks `subscribe` / `unsubscribe` as they are emitted — the
-  emit fails with its reason, and nothing is listed: the emitting program is
-  an installed app's; `topic` is text with no space or NUL and not a
-  `/<protocol>`; a subscribe's `program` is a role in the app's record at
-  `<app>/app` and its `fn` is not empty (`filter`, if any, a door filter the
-  kernel has); an unsubscribe names a subscription the app has (an app
-  unsubscribes only its own). It checks a `beacon` (an installed app's;
+  0.5.1: `subscribe` / `unsubscribe` are no intentions any more (a libp2p
+  subscription is a libp2p route: "libp2p (#51)", below); their emit is
+  refused by the name rule. The kernel checks, as they are emitted — the
+  emit fails with its reason, and nothing is listed — a `beacon` (an installed app's;
   a topic; `every` from 1 000 ms to a day; `body` bytes, at most 64 KiB)
   and an `unbeacon` (an installed app's; a topic), a `liveness` (an
   installed app's; a topic; `window` an integer from 1 000 ms to a day) and
@@ -719,11 +714,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}, {event:
   "broadcast", tx: <cid>, beef?: bytes} or {event: <name>, …fields}` ·
   ``emit: event <name>: a name is not empty and has no space or NUL`` ·
-  ``emit: an event's `kind` and `app` are the kernel's to set`` · `emit:
-  subscribe names its program: …` | `emit: subscribe: "<role>" is not a
-  program of app <app> …` | `emit: subscribe names the function delivered to
-  …` | `emit: <subscribe|unsubscribe>: topic "<t>" is not a topic …` | `emit:
-  unsubscribe: app <app> has no subscription to <t> …` | `emit: <…>: the
+  ``emit: an event's `kind` and `app` are the kernel's to set`` · ``emit:
+  event "<name>": an app emits under its own name`` · `emit: <…>: the
   emitting program is not installed …` · `emit: the
   message is not dag-cbor` · ``emit: `to` is not an identity key (33
   bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
@@ -1383,33 +1375,21 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   topic, `address: "/<protocol>"` for a stream protocol (from
   `etc/dispatch.json`; a protocol's handler named in
   `etc/config.json` `libp2p.protocols` becomes its row; or installed by an
-  app, #72: a manifest's pre-configured topic, OpNS style). A topic no row
-  is at is matched by a **subscription** (below). Neither: `ignore`. The
+  app, #72: a manifest's pre-configured topic, OpNS style; or, 0.5.1,
+  created by a step under an allowance with `route`, docs/VM.md "The route
+  table"). A topic no row is at: `ignore`. The
   handler gets `match`, the row that matched, as an HTTP row's handler does.
-- **Subscriptions** (#119). An app takes a topic at run time by emitting
-  `subscribe {topic, program, fn, filter?}` (an event: "Outbound: emit",
-  above), and gives it up with `unsubscribe {topic}`; nothing is declared in
-  its manifest. A subscription is the delivery record: the kernel delivers a
-  message on that exact topic to the app's `program` (a role in its record
-  at `<app>/app`, resolved when the message comes) at `fn` — the front door
-  is handed `{transport: "libp2p", address: <topic>, program: <the role's
-  record>, fn, app, filters?}` as `match` (a subscription's `filter`, the
-  SDK's `"beef"`, is `kernel.beef`), and the door, its filters and the
-  handler's call run exactly as for a route. No row is needed
-  or consulted for it. A subscription is the app's own, keyed by (app,
-  topic): an app's subscribe replaces its own; another app's subscribe of the
-  same topic is that app's and does not take the topic — the first standing
-  subscription delivers; an unsubscribe ends only the emitting app's. **A
-  topic with both a row and a subscription: the row wins** (a row at the
-  topic, whatever its sender rule, and the subscription delivers nothing).
-  The subscriptions are derived, never written: the fold, in log order, of
-  every `subscribe` / `unsubscribe` record the steps' updates list in
-  `emitted` — by the processed entry's `n`, the step's `at`, the thread's
-  `at`, the thread's CID, the step's place in its thread, the event's place
-  in `emitted` (kernel-zig/src/subscriptions.zig `fold`). The kernel keeps
-  the fold in memory and folds again after a step that subscribed or
-  unsubscribed; replay folds the same. A subscription whose app's record no
-  longer names the role (an uninstall) delivers nothing.
+- **Subscriptions are routes** (0.5.1; #119's `subscribe` / `unsubscribe`
+  emits and their fold are removed). An app takes a topic by a libp2p route:
+  a live row its manifest asks for, or — at run time — one its step creates
+  with the kernel call `route {transport: "libp2p", address: <topic>}`
+  under an allowance (a manifest row `{"transport": "libp2p", "address":
+  "<prefix>", "dynamic": true, "handler": "<role>.<fn>"}` root approved at
+  install); the created route takes the allowance's handler and filters.
+  The host reads the libp2p rows from the route table after each commit and
+  its node joins their topics (an allowance and a prefix row join none);
+  the front door is handed the row as `match`, as for any route. An overlay
+  that still emits `subscribe` fails on this kernel.
 - **Beacons** (#126). An app declares once `beacon {topic, every: <ms>,
   body: bytes}` (an event, checked as it is emitted: an installed app's, a
   topic, `every` from 1 000 ms to a day, `body` at most 64 KiB) and stops it
@@ -1593,11 +1573,14 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     instance, in memory, closed when it stops and when the host shuts down.
     The `/<app>/.events?event=&topic=` stream of #148 is removed, and an
     event needs no `topic`.
-  - **Subscriptions**: an app's event route `{transport: "event", address:
-    <a name or a prefix>, prefix?: true, handler: "<role>.<fn>"}` (docs/APPS.md).
-    After the emitting step, under the entry that drove it, the kernel steps
-    the handler of the route the fact's name takes — dispatch.zig forEvent:
-    the exact name (or `*`) first, then the longest prefix — as a thread
+  - **Delivery through the route table** (0.5.1): an event-transport route —
+    a live row `{transport: "event", address: <a name or a prefix>, prefix?:
+    true, handler: "<role>.<fn>"}` (docs/APPS.md), or one a step created with
+    `route` under an allowance (`dynamic: true`; docs/VM.md "The route
+    table"). After the emitting step, under the entry that drove it, the
+    kernel steps the handler of the route the fact's name takes — the exact
+    name first, then the longest prefix row at a path segment (an allowance
+    matches nothing) — as a thread
     launched by the event record, its args `{event: <the record's CID>, box:
     <the name>, fn?, place: {n, seq, i, thread}}` (a logged step; replay
     launches the same threads). An app may subscribe to another app's names
