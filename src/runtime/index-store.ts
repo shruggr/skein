@@ -33,7 +33,7 @@ import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
 type Obj = Record<string, unknown>;
-export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "events"] as const;
+export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "events", "routes"] as const;
 export type MapName = typeof MAPS[number];
 export const STATE_KIND = "skein-state";
 
@@ -177,6 +177,10 @@ export interface EventPlace { n: number; seq: number; i: number; thread: CID }
 export interface EventsQuery { name: string; prefix?: boolean; after?: EventPlace; limit?: number; latest?: boolean }
 /** One indexed event. */
 export interface EventRow { name: string; place: EventPlace; record: CID }
+
+/** The routes map's key (dispatch.zig `key`, 0.5.1): transport ‖ 0 ‖ address ‖ 0 ‖ kind (0 exact, 1 prefix, 2 an allowance). */
+export const routeKey = (r: { transport: string; address: string; prefix?: unknown; dynamic?: unknown }): Uint8Array =>
+  cat(new TextEncoder().encode(r.transport), Uint8Array.of(0), new TextEncoder().encode(r.address), Uint8Array.of(0, r.dynamic === true ? 2 : r.prefix === true ? 1 : 0));
 
 /** A place as the index orders it: n ‖ seq ‖ i ‖ thread. */
 export const placeKey = (p: EventPlace): Uint8Array => cat(be64(p.n), be64(p.seq), be64(p.i), p.thread.bytes);
@@ -335,8 +339,19 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       pairs.edges.push([k, [e.rel, e.locator]]);
     });
     edges(0, originEdges(o));
+    // 0.5.1: the dispatch chain's updates, applied in order, keyed (index.zig writeRoute; the kernel's rowOf).
+    const routes = new Map<string, [Uint8Array, unknown]>();
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
+      if (kind === "dispatch") {
+        const du = decode<Obj>(await store.bytes(c));
+        const row = du.row;
+        if (isObj(row) && typeof row.transport === "string" && typeof row.address === "string" && row.sender === undefined && (row.program === undefined || row.program === "kernel" || isCID(row.program)) && typeof du.op === "string") {
+          const k = routeKey(row as { transport: string; address: string });
+          const ks = Buffer.from(k).toString("hex");
+          if (du.op === "add") routes.set(ks, [k, row]); else if (du.op === "remove") routes.delete(ks);
+        }
+      }
       const u = (await store.get(c)) as unknown as Obj;
       if (kind === "thread" && isRequestThread(o)) for (const r of routed(u)) mark(r, nOf.get(fmt(u.input as CID)) ?? Infinity, u.input as CID);
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
@@ -363,6 +378,7 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
         });
       }
     }
+    for (const kv of routes.values()) pairs.routes.push(kv);
     const t = ups.length ? (await store.get(tipCid)) as unknown as Obj : undefined;
     if (kind === "thread") {
       const at = be64(numKey(o.at));

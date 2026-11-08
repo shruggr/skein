@@ -1,13 +1,23 @@
-// The kernel's event index (skein 0.5.0) end to end: one router, one instance
-// `ix`, two apps installed by the owner's messages — programs/test/event-demo's
-// module as `evx` (a mailbox route) and `evy` (a mailbox route and an event
-// route on the prefix `evx/`, its subscription to evx's names):
+// The kernel's event index (skein 0.5.0) and routes as the one concept (0.5.1)
+// end to end: one router (with a libp2p node), one instance `ix`, two apps
+// installed by the owner's messages — programs/test/event-demo's module as
+// `evx` (a mailbox route) and `evy` (a mailbox route, a live event route on the
+// prefix `evx/output/`, an allowance — `dynamic: true` — on `evx/pool/` and one
+// on the libp2p `evdemo/`):
+//
+//   - 0.5.1: evy creates the event route `evx/pool/a` in its step (the `route`
+//     call, skein-sdk 0.16.0) under its allowance; a route outside any allowance
+//     (`evz/x`, or an http path) is refused with the kernel's reason; a libp2p
+//     route `evdemo/t1` under the libp2p allowance: the host's node joins that
+//     topic after the commit (the allowance itself joins nothing);
 //
 //   - a name not under the emitting app's own (`evy/x` from evx, `pool`) is
 //     refused as it is emitted: the step errors with the kernel's reason;
 //   - evx emits facts under three names (evx/pool/a, evx/pool/b, evx/output/o,
-//     some twice): evy's prefix route is stepped once per fact, in order, its
-//     head `evy/heard` chaining each (the name, the record, the place);
+//     some twice): evy is stepped once per fact its routes take, in order —
+//     evx/pool/a by the created exact route, evx/output/o by the prefix row,
+//     never evx/pool/b (the allowance matches nothing) — its head `evy/heard`
+//     chaining each (the name, the record, the place);
 //   - the host's read GET /@ix/events/<name path> (a name, a prefix, latest,
 //     after, limit) answers what the index holds, and evy's in-step read (the
 //     `events` import, head `evy/read`) the same rows: the same places, the
@@ -21,6 +31,7 @@
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/event-index.ts
 
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -77,8 +88,14 @@ const handle = "ix";
 const hdb = new HostDb(join(home, "host.db"));
 hdb.add(handle, { store: storeFor(home, handle) });
 const lines: string[] = [];
+const p2pPort = await new Promise<number>((resolve, reject) => {
+  const sv = createServer();
+  sv.once("error", reject);
+  sv.listen(0, "127.0.0.1", () => { const p = (sv.address() as { port: number }).port; sv.close(() => resolve(p)); });
+});
 const r = new Router({
-  db: hdb, home, owner, idleMs: 0, walletFor: (row: { handle: string }) => signer.wallet(row.handle),
+  db: hdb, home, owner, idleMs: 0,
+  libp2p: { listen: [`/ip4/127.0.0.1/tcp/${p2pPort}`], bootstrap: [], dht: "off", relays: [], mdns: false }, walletFor: (row: { handle: string }) => signer.wallet(row.handle),
   providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000,
   kernel: { command: kernel, env: { SKEIN_HOME: home } }, ...routerStore(home),
   log: (s: string, l: string) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
@@ -97,7 +114,11 @@ try {
     check(o.code === 0, `skein install ${app}: exit ${o.code} ${o.err.join(" ")}`);
   };
   await install("evx");
-  await install("evy", [{ transport: "event", address: "evx/", prefix: true, handler: "demo" }]);
+  await install("evy", [
+    { transport: "event", address: "evx/output/", prefix: true, handler: "demo" },
+    { transport: "event", address: "evx/pool/", dynamic: true, handler: "demo" },
+    { transport: "libp2p", address: "evdemo/", dynamic: true, handler: "demo.topic" },
+  ]);
   const box = new RawBox(ownerWallet, base);
   const send = async (app: string, body: Record<string, unknown>) => { await box.send(identity, app, body); await r.settled(); };
   const emit = (names: string[], value: number) => send("evx", { kind: "event-demo-emit", names, value });
@@ -125,7 +146,23 @@ try {
   check(refused.length >= 2, `a name not under the app's own is refused as it is emitted (${refused.length} refusals logged)`);
   check((await read("", "")).length === 0, "nothing indexed by a refused emit");
 
-  // ------------------------------------------------ facts under three names; evy's prefix route stepped per fact
+  // ------------------------------------------------ 0.5.1: routes a step creates under an allowance
+  const served = () => r.p2p?.served(handle)?.topics.slice().sort() ?? [];
+  check(!served().some((t) => t.startsWith("evdemo")), `an allowance joins nothing (${served().join(", ") || "no topics"})`);
+  const nR = lines.length;
+  await send("evy", { kind: "event-demo-route", transport: "event", address: "evz/x" });
+  await send("evy", { kind: "event-demo-route", transport: "http", address: "/evx/pool/a" });
+  const outside = lines.slice(nR).filter((l) => /route: .*under no allowance/.test(l));
+  check(outside.length === 2, `a route under no allowance (another name, another transport) is refused as it is asked (${outside.length} refusals logged)`);
+  await send("evy", { kind: "event-demo-route", transport: "event", address: "evx/pool/a" });
+  await send("evy", { kind: "event-demo-route", transport: "libp2p", address: "evdemo/t1" });
+  const rows = (await (await r.hydrate(handle)).kernel.dispatch()).rows as Array<Record<string, unknown>>;
+  const made = rows.find((x) => x.transport === "event" && x.address === "evx/pool/a");
+  check(!!made && made.app === "evy" && made.dynamic === undefined && made.prefix === undefined && !!made.program, `the created route takes the allowance's handler and app, at the asked address: ${JSON.stringify(made && { ...made, program: String(made.program) })}`);
+  const joined = await until("the node joins evdemo/t1", () => served().includes("evdemo/t1") ? served() : undefined).catch(() => served());
+  check(joined.includes("evdemo/t1") && !joined.includes("evdemo/"), `a libp2p route under the allowance: the host's node joins its topic after the commit (${joined.join(", ")})`);
+
+  // ------------------------------------------------ facts under three names; evy stepped per fact its routes take
   await emit(["evx/pool/a", "evx/pool/b"], 1);
   await emit(["evx/output/o"], 2);
   await emit(["evx/pool/a"], 3);
@@ -143,13 +180,13 @@ try {
   const after = await read("evx/", `after=${all[0]!.id}&limit=2`);
   check(after.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/b=1,evx/output/o=2", "after a place, the first two");
 
-  // evy heard each of evx's facts, once, in order, with its place.
+  // evy heard each fact its routes take, once, in order, with its place: the created exact route's, the prefix row's — never evx/pool/b.
   const heard: Array<Record<string, unknown>> = [];
   for (let h = await headRecord("evy/heard"); h; h = h.prev ? await recordOf(h.prev as CID) : undefined) heard.unshift(h);
-  const evxIds = all.filter((x) => x.event.startsWith("evx/")).map((x) => x.id);
+  const taken = all.filter((x) => x.event === "evx/pool/a" || x.event.startsWith("evx/output/"));
   const heardIds = heard.map((h) => idOfPlace(h.place as { n: number; seq: number; i: number; thread: CID }));
-  check(heardIds.join(" ") === evxIds.join(" "), `evy's prefix route stepped once per fact of evx's, in order, with its place (${heard.length} heard of ${evxIds.length})`);
-  check(heard.every((h, i) => h.box === all.filter((x) => x.event.startsWith("evx/"))[i]!.event), "each step told the fact's name");
+  check(heardIds.join(" ") === taken.map((x) => x.id).join(" "), `evy stepped once per fact its routes take, in order, with its place (${heard.length} heard of ${taken.length}: ${heard.map((h) => h.box).join(", ")})`);
+  check(heard.every((h, i) => h.box === taken[i]!.event) && !heard.some((h) => h.box === "evx/pool/b"), "each step told the fact's name; evx/pool/b (under the allowance only) never");
 
   // ------------------------------------------------ the in-step read = the host's read
   const stepRead = async (query: Record<string, unknown>) => {
@@ -173,9 +210,13 @@ try {
     const d = await derive(st);
     const want = st.state().roots.events;
     const got = buildTree(d.pairs.events).root;
-    return { ok: (want === null && got === null) || (!!want && !!got && want.equals(got)), n: d.pairs.events.length };
+    const wantR = st.state().roots.routes;
+    const gotR = buildTree(d.pairs.routes).root;
+    const eq = (x: CID | null, y: CID | null) => (x === null && y === null) || (!!x && !!y && x.equals(y));
+    return { ok: eq(want, got), n: d.pairs.events.length, routes: eq(wantR, gotR), nr: d.pairs.routes.length };
   });
   check(same.ok && same.n === all.length + 0, `index-store.ts derives the kernel's events map from the chains (${same.n} keys, the same root)`);
+  check(same.routes, `index-store.ts derives the kernel's routes map from the dispatch chain (${same.nr} keys, the same root)`);
 
   // ------------------------------------------------ the stream: the same read, then live
   const got: Array<{ id: string; event: string; data: Record<string, unknown> }> = [];

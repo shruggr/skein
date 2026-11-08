@@ -19,7 +19,7 @@
 //               description?} — the record the kernel's shell runs (docs/APPS.md, "A shell
 //               program"), its modules and support files this tree's
 //   routes[]    the routes the app asks for (#143; the kernel's route table, docs/APPS.md §2):
-//               {transport?: "mailbox" (default) | "event" | "http" | "libp2p", address, prefix?: true,
+//               {transport?: "mailbox" (default) | "event" | "http" | "libp2p", address, prefix?: true (any transport, 0.5.1), dynamic?: true (0.5.1: an allowance — matches nothing; a program may create routes under it with the kernel call `route`, taking its handler and filters),
 //                filters?: [<filter>], handler?: <handler>, …settings}. A mailbox route's
 //               address is a box relative to the app (#128): "" or the app's name is the app's own
 //               box `<name>`, "x" the box `<name>/x` (an empty, "." or ".." segment, whitespace or a
@@ -67,7 +67,7 @@
 
 export type RouteTransport = "mailbox" | "event" | "http" | "libp2p";
 /** A route as the manifest writes it (#143). */
-export interface RouteIn { transport?: RouteTransport; address: string; prefix?: true; filters?: string[]; handler?: string; [setting: string]: unknown }
+export interface RouteIn { transport?: RouteTransport; address: string; prefix?: true; dynamic?: true; filters?: string[]; handler?: string; [setting: string]: unknown }
 export interface FunctionDecl { writes: boolean; args?: unknown; answer?: unknown }
 export interface Provide { interface: string; functions: Record<string, FunctionDecl> }
 
@@ -190,13 +190,13 @@ export function eventAddress(app: string, b: string, prefix = false): string {
 }
 
 /** A route's address as served: an http path under /<app>/ (appPath); a box under the app's (appBox); an event's name as written (eventAddress); a libp2p name as written. */
-export function rowAddress(app: string, r: { transport: string; address: string; prefix?: boolean }): string {
-  return r.transport === "http" ? appPath(app, r.address) : r.transport === "mailbox" ? appBox(app, r.address) : r.transport === "event" ? eventAddress(app, r.address, r.prefix === true) : r.address;
+export function rowAddress(app: string, r: { transport: string; address: string; prefix?: boolean; dynamic?: boolean }): string {
+  return r.transport === "http" ? appPath(app, r.address) : r.transport === "mailbox" ? appBox(app, r.address) : r.transport === "event" ? eventAddress(app, r.address, r.prefix === true || r.dynamic === true) : r.address;
 }
 
 /** A route's key as the kernel's table knows it (dispatch.ts rowKey): `<transport> <address as served>[ prefix]`. */
-export function routeKey(app: string, r: { transport: string; address: string; prefix?: boolean }): string {
-  return `${r.transport} ${rowAddress(app, r)}${r.prefix ? " prefix" : ""}`;
+export function routeKey(app: string, r: { transport: string; address: string; prefix?: boolean; dynamic?: boolean }): string {
+  return `${r.transport} ${rowAddress(app, r)}${r.prefix ? " prefix" : ""}${r.dynamic ? " dynamic" : ""}`;
 }
 
 /**
@@ -235,18 +235,19 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: (f: st
   const t = r.transport ?? "mailbox";
   if (t !== "mailbox" && t !== "event" && t !== "http" && t !== "libp2p") return `transport ${JSON.stringify(t)} is not mailbox, event, http or libp2p`;
   if (typeof r.address !== "string" || (!r.address && (t === "http" || t === "libp2p"))) return "address is not text";
+  // 0.5.1: a prefix on any transport; `dynamic: true` an allowance (root approves that a program may create routes under it).
+  if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
+  if (r.dynamic !== undefined && r.dynamic !== true) return "dynamic is true or absent";
   if (t === "mailbox") {
     try { appBox(app, r.address); } catch (e) { return (e as Error).message; }
-    if (r.prefix !== undefined) return `a ${t} route has no prefix`;
   } else if (t === "event") {
     if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
-    try { eventAddress(app, r.address, r.prefix === true); } catch (e) { return (e as Error).message; }
+    try { eventAddress(app, r.address, r.prefix === true || r.dynamic === true); } catch (e) { return (e as Error).message; }
   } else if (t === "http") {
     try { appPath(app, r.address); } catch (e) { return (e as Error).message; }
     if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
   } else {
     if (/[\s\0]/.test(r.address)) return `address ${JSON.stringify(r.address)} is not a topic or /protocol`;
-    if (r.prefix !== undefined) return "a libp2p route has no prefix";
   }
   const filters = r.filters ?? [];
   if (!Array.isArray(filters) || filters.some((f) => typeof f !== "string")) return "filters is a list of filter names";
