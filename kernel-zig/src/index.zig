@@ -632,7 +632,8 @@ pub const Index = struct {
     }
 
     /// 0.5.2: an update of the {kind: "on"} chain into the `on` map (on.zig): an `on` at
-    /// name ‖ 0 ‖ seq, an `off` deleting the name's keys whose update names the app.
+    /// name ‖ 0 ‖ seq, an `off` (0.5.3) deleting the name's key whose update names the same app,
+    /// role and fn.
     fn writeOn(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, cid: []const u8, u: Value) !void {
         const row = (try ix.mapGet(a, .chains, origin)) orelse return;
         if (!std.mem.eql(u8, Value.str(row.get("kind")) orelse "", onm.KIND)) return;
@@ -641,10 +642,14 @@ pub const Index = struct {
         const op = Value.str(u.get("op")) orelse return;
         if (std.mem.eql(u8, op, "on")) return ix.mapPut(.on, try cat(a, .{ name, &[_]u8{0}, seq }), .{ .cid = cid });
         if (!std.mem.eql(u8, op, "off")) return;
+        const role = Value.str(u.get("role")) orelse return;
+        const func = Value.str(u.get("fn")) orelse return;
         for (try ix.scanPrefix(a, .on, try cat(a, .{ name, &[_]u8{0} }))) |kv| {
             const uc = Value.cidOf(kv.value) orelse continue;
             const was = try ix.blockValue(a, uc);
-            if (std.mem.eql(u8, Value.str(was.get("app")) orelse "", app)) try ix.mapDel(.on, kv.key);
+            if (std.mem.eql(u8, Value.str(was.get("app")) orelse "", app) and
+                std.mem.eql(u8, Value.str(was.get("role")) orelse "", role) and
+                std.mem.eql(u8, Value.str(was.get("fn")) orelse "", func)) try ix.mapDel(.on, kv.key);
         }
     }
 

@@ -50,8 +50,9 @@
 //                                  with one program) of the calling app is stepped on each fact
 //                                  named `name` exactly that lands after this step; kept when
 //                                  the step ends without error (on.zig)
-//   off(name, len) → 0             (0.5.2) the calling app's subscriptions to `name` end, when
-//                                  the step ends without error
+//   off(name, len, fn, fn_len) → 0 (0.5.3) the calling app's one subscription of `fn` to
+//                                  `name` ends (the same two arguments as `on`; its others to
+//                                  `name` stay), when the step ends without error
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -100,15 +101,15 @@ pub const Host = struct {
     events: *const fn (imp: *Imports, query: []const u8) Err![]const u8 = noEvents,
     /// 0.5.2: subscribe a function of the calling app to a fact's name (on.zig).
     on: *const fn (imp: *Imports, name: []const u8, func: []const u8) Err!void = noOn,
-    /// 0.5.2: end the calling app's subscriptions to a name (on.zig).
-    off: *const fn (imp: *Imports, name: []const u8) Err!void = noOff,
+    /// 0.5.3: end the calling app's one subscription of a function to a name (on.zig).
+    off: *const fn (imp: *Imports, name: []const u8, func: []const u8) Err!void = noOff,
 };
 
 fn noOn(imp: *Imports, _: []const u8, _: []const u8) Err!void {
     return imp.failWith("on: this host keeps no subscriptions");
 }
 
-fn noOff(imp: *Imports, _: []const u8) Err!void {
+fn noOff(imp: *Imports, _: []const u8, _: []const u8) Err!void {
     return imp.failWith("off: this host keeps no subscriptions");
 }
 
@@ -325,7 +326,8 @@ pub const Imports = struct {
                 return 0;
             },
             .off => {
-                try h.off(imp, try imp.strAt(p, a[0], a[1]));
+                const name = try imp.strAt(p, a[0], a[1]);
+                try h.off(imp, name, try imp.strAt(p, a[2], a[3]));
                 return 0;
             },
             .take => {

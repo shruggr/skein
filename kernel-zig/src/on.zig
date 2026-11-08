@@ -3,18 +3,19 @@
 //   on(name, fn)    the calling app subscribes `fn` (a function of one of its own programs:
 //                   "<role>.<fn>", or "<fn>" for an app with one program) to the facts named
 //                   `name` exactly
-//   off(name)       the calling app's subscriptions to `name` end
+//   off(name, fn)   (0.5.3) the calling app's one subscription of `fn` to `name` ends (the
+//                   same two arguments as `on`); its other subscriptions to `name` stay
 //
 // No manifest entry, no permission, no filters, no prefix, no history: a subscription hears the
 // facts that land after it exists. Kernel state, replayable: one chain, origin {kind: "on"}, whose
 // updates are the calls as the steps made them —
 //
 //   {op: "on", name, app, role, fn, thread, input, at}
-//   {op: "off", name, app, thread, input, at}
+//   {op: "off", name, app, role, fn, thread, input, at}
 //
 // — and the index's `on` map (index.zig: name ‖ 0 ‖ the update's seq → the update) is that chain
-// applied in order: an `on` puts its update at its key, an `off` deletes every key under the name
-// whose update names the app. So the subscriptions to a name, in key order, are in the order they
+// applied in order: an `on` puts its update at its key, an `off` deletes the key under the name
+// whose update names the same app, role and fn. So the subscriptions to a name, in key order, are in the order they
 // were made. A fact (log.zig indexedName) steps each, the scheduler's `deliverFact`.
 const std = @import("std");
 const cbor = @import("cbor");
@@ -54,26 +55,19 @@ pub fn subOf(u: Value, seq: i64) ?Sub {
 pub const By = struct { thread: ?[]const u8, input: []const u8, at: i64 };
 
 /// Apply one call; the update written, or null when it changes nothing (an `on` the app already
-/// has — same name, role and fn — or an `off` of a name the app has no subscription to).
+/// has — same name, role and fn — or an `off` of a subscription the app does not have).
 pub fn apply(a: std.mem.Allocator, s: Store, op: Op, name: []const u8, app: []const u8, role: []const u8, func: []const u8, by: By) !?[]u8 {
     const now = try s.subscribers(a, name);
-    switch (op) {
-        .on => for (now) |x| if (std.mem.eql(u8, x.app, app) and std.mem.eql(u8, x.role, role) and std.mem.eql(u8, x.func, func)) return null,
-        .off => {
-            var any = false;
-            for (now) |x| any = any or std.mem.eql(u8, x.app, app);
-            if (!any) return null;
-        },
-    }
+    var has = false;
+    for (now) |x| has = has or (std.mem.eql(u8, x.app, app) and std.mem.eql(u8, x.role, role) and std.mem.eql(u8, x.func, func));
+    if (has == (op == .on)) return null;
     const o = try s.chainOpen(a, try originValue(a));
     var m = cbor.MapBuilder.init(a);
     try m.put("op", cbor.string(@tagName(op)));
     try m.put("name", cbor.string(name));
     try m.put("app", cbor.string(app));
-    if (op == .on) {
-        try m.put("role", cbor.string(role));
-        try m.put("fn", cbor.string(func));
-    }
+    try m.put("role", cbor.string(role));
+    try m.put("fn", cbor.string(func));
     try m.put("thread", cbor.optCid(by.thread));
     try m.put("input", cbor.cidv(by.input));
     try m.put("at", cbor.int(by.at));

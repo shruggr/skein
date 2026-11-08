@@ -338,14 +338,15 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       pairs.edges.push([k, [e.rel, e.locator]]);
     });
     edges(0, originEdges(o));
-    // 0.5.2: the {kind: "on"} chain's updates, applied in order (index.zig writeOn): name ‖ 0 ‖ seq → the update.
-    const on = new Map<string, [Uint8Array, CID, string, string]>();
+    // 0.5.2: the {kind: "on"} chain's updates, applied in order (index.zig writeOn): name ‖ 0 ‖ seq → the update;
+    // an `off` (0.5.3) deletes the one whose update names the same app, role and fn.
+    const on = new Map<string, [Uint8Array, CID, string, string, unknown, unknown]>();
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
       const u = (await store.get(c)) as unknown as Obj;
       if (kind === "on" && typeof u.name === "string" && typeof u.app === "string") {
-        if (u.op === "on") { const k = onKey(u.name, i + 1); on.set(Buffer.from(k).toString("hex"), [k, c, u.name, u.app]); }
-        else if (u.op === "off") for (const [ks, x] of on) if (x[2] === u.name && x[3] === u.app) on.delete(ks);
+        if (u.op === "on") { const k = onKey(u.name, i + 1); on.set(Buffer.from(k).toString("hex"), [k, c, u.name, u.app, u.role, u.fn]); }
+        else if (u.op === "off") for (const [ks, x] of on) if (x[2] === u.name && x[3] === u.app && x[4] === u.role && x[5] === u.fn) on.delete(ks);
       }
       if (kind === "thread" && isRequestThread(o)) for (const r of routed(u)) mark(r, nOf.get(fmt(u.input as CID)) ?? Infinity, u.input as CID);
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];

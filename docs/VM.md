@@ -1324,7 +1324,7 @@ latest?: bool}` · `events: the query is not dag-cbor`. The host reads the same
 map from the store, no step (docs/MESSAGES.md "The event index (0.5.0)":
 `GET /events/<name path>`).
 
-### Subscriptions (0.5.2)
+### Subscriptions (0.5.2, 0.5.3)
 
 A program subscribes its app to a fact's name, and ends that, with two calls
 in its step:
@@ -1332,8 +1332,8 @@ in its step:
 ```
 on(name, len, fn, fn_len) → 0   preview1: skein.on(name, len, fn, fn_len)
                                 WIT:      on: func(name: string, fn: string) -> result<_, string>
-off(name, len) → 0              preview1: skein.off(name, len)
-                                WIT:      off: func(name: string) -> result<_, string>
+off(name, len, fn, fn_len) → 0  preview1: skein.off(name, len, fn, fn_len)
+                                WIT:      off: func(name: string, fn: string) -> result<_, string>
 ```
 
 `name` is a fact's name exactly — a slash path of segments, no empty
@@ -1344,8 +1344,9 @@ names one program. The calling app is the app of the program running (the
 thread's, or an in-VM callee's) when its record is installed. No manifest
 entry, no permission, no filters. Kept when the step ends without error, in
 the order made; an `on` the app already has (the same name, role and fn) and
-an `off` of a name the app has no subscription to change nothing; `off` ends
-every subscription of the app to the name. Refused in a kernel `call`.
+an `off` of a subscription the app does not have change nothing; `off` takes
+the same two arguments as `on` and ends that one subscription (0.5.3): the
+app's others to the name stay. Refused in a kernel `call`.
 Errors: ``on: "<name>" is not a fact's name (…)`` · ``on: "<role>" is not
 a program of app <app> (…)`` · ``on: fn "<fn>": name its program,
 "<role>.<fn>" (…)`` · ``on: the calling program is not installed (…)`` ·
@@ -1353,9 +1354,9 @@ the same for `off` · ``on: a call reads only (no entry, no writes)``.
 
 Kernel state, replayed: one chain, origin `{kind: "on"}`, its updates the
 calls as made — `{op: "on", name, app, role, fn, thread, input, at}`, `{op:
-"off", name, app, thread, input, at}` — and the `on` map, that chain applied
+"off", name, app, role, fn, thread, input, at}` — and the `on` map, that chain applied
 in order: name ‖ 0 ‖ the update's seq → the update (an `off` deletes the
-name's keys whose update names the app). So the subscriptions to a name, in
+name's key whose update names the same app, role and fn). So the subscriptions to a name, in
 key order, are in the order they were made.
 
 **Delivery.** A fact a step emits (the event index's, above), after the

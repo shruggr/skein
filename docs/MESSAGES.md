@@ -1572,7 +1572,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   place; `limit` = the first n.
   - In a step: the `events` import (docs/VM.md), a read of the index as the
     log stands before this step's update.
-  - **Subscriptions** (0.5.2): a step's `on(name, fn)` / `off(name)` calls
+  - **Subscriptions** (0.5.2, 0.5.3): a step's `on(name, fn)` / `off(name, fn)` calls
     (docs/VM.md "Subscriptions"): each fact landing after an `on`, under that
     exact name, steps the subscribing app's `fn` — every subscription to the
     name, in the order made, a fresh step at the emitting entry with args

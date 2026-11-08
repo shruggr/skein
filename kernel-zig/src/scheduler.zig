@@ -3219,13 +3219,18 @@ pub const Runtime = struct {
         }
     }
 
-    /// 0.5.2: `off(name)` — the calling app's subscriptions to `name` end, when the step ends
-    /// without error (on.zig).
-    fn hOff(imp: *program.Imports, name: []const u8) program.Err!void {
+    /// 0.5.3: `off(name, fn)` — the calling app's one subscription of `fn` to `name` ends (the
+    /// same two arguments as `on`), when the step ends without error (on.zig).
+    fn hOff(imp: *program.Imports, name: []const u8, func: []const u8) program.Err!void {
         const st = stepOf(imp);
+        const a = st.a;
         try onName(imp, "off", name);
         const app = (try callingApp(st, imp)) orelse return imp.failWith("off: the calling program is not installed (an app's program), so it has no subscriptions");
-        try st.ons.append(.{ .op = .off, .name = try st.a.dupe(u8, name), .app = app });
+        const ps = subsm.programsOf(a, st.rt.store, app) catch return imp.failWith("store error");
+        switch (onm.handlerOf(a, func, app, ps) catch return error.OutOfMemory) {
+            .bad => |why| return imp.failWith(why),
+            .ok => |h| try st.ons.append(.{ .op = .off, .name = try a.dupe(u8, name), .app = app, .role = h.role, .func = h.func }),
+        }
     }
 
     /// 0.5.0: the event index read (program.zig eventsRead), as the log stands before this step's update.
@@ -3600,7 +3605,7 @@ pub const Runtime = struct {
     fn cOn(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
         return readOnly(imp, "on");
     }
-    fn cOff(imp: *program.Imports, _: []const u8) program.Err!void {
+    fn cOff(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
         return readOnly(imp, "off");
     }
     fn cEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {

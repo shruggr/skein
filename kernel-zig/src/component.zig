@@ -1095,7 +1095,8 @@ const Session = struct {
                 return vOk(null);
             },
             .sk_off => {
-                try h.off(imp, try A.dupe(u8, str(&a[0])));
+                const n = try A.dupe(u8, str(&a[0]));
+                try h.off(imp, n, try A.dupe(u8, str(&a[1])));
                 return vOk(null);
             },
             .sk_deadline => {
