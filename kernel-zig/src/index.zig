@@ -47,6 +47,13 @@
 //                                                              its step processed, the update's seq
 //                                                              in its thread, the record's index in
 //                                                              `emitted`, the thread's origin)
+//   on        name ‖ 0 ‖ seq             → update CID          (0.5.2: the subscriptions the steps made,
+//                                                              on.zig — the {kind: "on"} chain's updates
+//                                                              applied in order: an `on` puts its update
+//                                                              at the name and its seq, an `off` deletes
+//                                                              every key under the name whose update
+//                                                              names its app; so in key order, the
+//                                                              order they were made)
 //
 // Every map is a function of the chains and the log (the derivation is
 // sqlite.ts's, key for key), and the trees are canonical, so the state
@@ -67,6 +74,7 @@ const mst = @import("mst");
 const storem = @import("store.zig");
 const bitcoin = @import("bitcoin.zig");
 const logm = @import("log.zig");
+const onm = @import("on.zig");
 const Value = cbor.Value;
 
 /// What the index needs of a store: blocks by CID, and one named pointer.
@@ -88,7 +96,7 @@ pub const Backend = struct {
     };
 };
 
-pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events };
+pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events, on };
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
@@ -620,6 +628,38 @@ pub const Index = struct {
         try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
         try ix.writeKeptBitcoin(a, u);
         try ix.writeEvents(a, origin, seq, u);
+        try ix.writeOn(a, origin, seq, cid, u);
+    }
+
+    /// 0.5.2: an update of the {kind: "on"} chain into the `on` map (on.zig): an `on` at
+    /// name ‖ 0 ‖ seq, an `off` deleting the name's keys whose update names the app.
+    fn writeOn(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, cid: []const u8, u: Value) !void {
+        const row = (try ix.mapGet(a, .chains, origin)) orelse return;
+        if (!std.mem.eql(u8, Value.str(row.get("kind")) orelse "", onm.KIND)) return;
+        const name = Value.str(u.get("name")) orelse return;
+        const app = Value.str(u.get("app")) orelse return;
+        const op = Value.str(u.get("op")) orelse return;
+        if (std.mem.eql(u8, op, "on")) return ix.mapPut(.on, try cat(a, .{ name, &[_]u8{0}, seq }), .{ .cid = cid });
+        if (!std.mem.eql(u8, op, "off")) return;
+        for (try ix.scanPrefix(a, .on, try cat(a, .{ name, &[_]u8{0} }))) |kv| {
+            const uc = Value.cidOf(kv.value) orelse continue;
+            const was = try ix.blockValue(a, uc);
+            if (std.mem.eql(u8, Value.str(was.get("app")) orelse "", app)) try ix.mapDel(.on, kv.key);
+        }
+    }
+
+    /// 0.5.2: the subscriptions to `name` exactly, in key order (the order they were made).
+    pub fn subscribersOf(ix: *Index, a: std.mem.Allocator, name: []const u8) ![]storem.Subscriber {
+        const s = ix.scratch();
+        const prefix = try cat(s, .{ name, &[_]u8{0} });
+        var out = std.array_list.Managed(storem.Subscriber).init(a);
+        for (try ix.scanPrefix(s, .on, prefix)) |kv| {
+            if (kv.key.len != prefix.len + 8) continue;
+            const uc = Value.cidOf(kv.value) orelse return error.BadIndex;
+            const sub = onm.subOf(try ix.blockValue(s, uc), readBe64(kv.key[prefix.len..][0..8])) orelse return error.BadIndex;
+            try out.append(.{ .app = try a.dupe(u8, sub.app), .role = try a.dupe(u8, sub.role), .func = try a.dupe(u8, sub.func), .seq = sub.seq });
+        }
+        return out.items;
     }
 
     /// 0.5.0: the facts an update lists in `emitted` (log.zig indexedName) into the event index,
@@ -766,7 +806,12 @@ pub const Index = struct {
         .processedState = processedStateFn,
         .size = sizeFn,
         .events = eventsFn,
+        .subscribers = subscribersFn,
     };
+
+    fn subscribersFn(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![]storem.Subscriber {
+        return self(ctx).subscribersOf(a, name);
+    }
 
     fn eventsFn(ctx: *anyopaque, a: std.mem.Allocator, q: storem.EventsQuery) anyerror![]storem.EventRow {
         return self(ctx).eventsRead(a, q);

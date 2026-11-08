@@ -142,6 +142,8 @@ const F = enum(u32) {
     sk_edges,
     sk_authfetch,
     sk_events,
+    sk_on,
+    sk_off,
 };
 
 const Def = struct { name: []const u8, f: F };
@@ -263,6 +265,8 @@ const interfaces = [_]Iface{
         .{ .name = "edges", .f = .sk_edges },
         .{ .name = "authfetch", .f = .sk_authfetch },
         .{ .name = "events", .f = .sk_events },
+        .{ .name = "on", .f = .sk_on },
+        .{ .name = "off", .f = .sk_off },
     } },
 };
 
@@ -907,7 +911,7 @@ const Session = struct {
             },
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
-            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_wallet, .sk_emit, .sk_deadline, .sk_call, .sk_edges, .sk_authfetch, .sk_events => return s.skein(f, a),
+            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_wallet, .sk_emit, .sk_deadline, .sk_call, .sk_edges, .sk_authfetch, .sk_events, .sk_on, .sk_off => return s.skein(f, a),
         }
     }
 
@@ -1085,6 +1089,15 @@ const Session = struct {
             .sk_emit => return vOk(vBytes(try h.emit(imp, try listBytes(A, &a[0])))),
             .sk_authfetch => return vOk(vBytes(try h.authfetch(imp, try listBytes(A, &a[0])))),
             .sk_events => return vOk(vBytes(try h.events(imp, try listBytes(A, &a[0])))),
+            .sk_on => {
+                const n = try A.dupe(u8, str(&a[0]));
+                try h.on(imp, n, try A.dupe(u8, str(&a[1])));
+                return vOk(null);
+            },
+            .sk_off => {
+                try h.off(imp, try A.dupe(u8, str(&a[0])));
+                return vOk(null);
+            },
             .sk_deadline => {
                 try h.deadline(imp, a[0].of.s64);
                 return vOk(null);

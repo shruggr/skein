@@ -68,6 +68,7 @@ const engine = @import("engine.zig");
 const doorm = @import("door.zig");
 const grants = @import("grants.zig");
 const subsm = @import("subscriptions.zig");
+const onm = @import("on.zig");
 const authfetch = @import("authfetch.zig");
 const billing = @import("billing.zig");
 const bitcoin = @import("bitcoin.zig");
@@ -1285,6 +1286,8 @@ pub const Runtime = struct {
             if (isBroadcast(m) or isEvent(m)) {
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
                 try rt.handOverEvent(a, mc, m, thread);
+                // 0.5.2: a fact steps every subscription to its name (on.zig), in the order they were made.
+                if (logm.indexedName(m)) |name| try rt.deliverFact(a, ctx, mc, name, thread);
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
@@ -1307,6 +1310,51 @@ pub const Runtime = struct {
             // A step run again (cut off before it ended, resumed) emits the same message: its delivery is under way.
             if (try rt.store.chainTip(a, t)) |tip| if (!std.mem.eql(u8, tip, t)) continue;
             rt.say("message {s} in {s} to {s} → delivery {s}", .{ short(a, mc), Value.str(m.get("box")) orelse "?", shortKey(to), short(a, t) });
+            try rt.run(a, t);
+        }
+    }
+
+    /// 0.5.2: a fact a step emitted, `ev` under `name`, steps every subscription to the name (an
+    /// `on` a step made, on.zig), in the order they were made: each a thread launched by the event
+    /// record under the entry that drove the emitting step, its program the subscribing app's
+    /// role as its record names it now (`<app>/app`; none: nothing runs), its args {event, box:
+    /// <the name>, fn, place: {n, seq, i, thread}} (the place makes two like records two threads).
+    /// The subscriptions as they stand after the emitting step. No gate: the app chose its own
+    /// function. A function of the update and the state: replay launches the same threads; a step
+    /// run again (an entry reprocessed after a crash: everything it derived is committed with the
+    /// entry, the cursor with it) finds its threads under way and launches none twice.
+    fn deliverFact(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
+        const subs = try rt.store.subscribers(a, name);
+        if (subs.len == 0) return;
+        const place = (try rt.placeOf(a, ev, thread)) orelse return;
+        for (subs) |sub| {
+            if (rt.stopped) return;
+            const ps = try subsm.programsOf(a, rt.store, sub.app);
+            const handler = if (ps) |x| if (x == .map) Value.cidOf(x.get(sub.role)) else null else null;
+            const prog = handler orelse {
+                rt.say("event {s} {s}: app {s} names no program {s} now; nothing runs", .{ name, short(a, ev), sub.app, sub.role });
+                continue;
+            };
+            var p = cbor.MapBuilder.init(a);
+            try p.put("n", cbor.int(place.n));
+            try p.put("seq", cbor.int(place.seq));
+            try p.put("i", cbor.int(place.i));
+            try p.put("thread", cbor.cidv(place.thread));
+            var info = cbor.MapBuilder.init(a);
+            try info.put("event", cbor.cidv(ev));
+            try info.put("box", cbor.string(name));
+            try info.put("fn", cbor.string(sub.func));
+            try info.put("place", p.value());
+            var origin = cbor.MapBuilder.init(a);
+            try origin.put("kind", cbor.string("thread"));
+            try origin.put("program", cbor.cidv(prog));
+            try origin.put("args", info.value());
+            try origin.put("launchedBy", cbor.cidv(ev));
+            try origin.put("input", cbor.cidv(ctx.cid));
+            try origin.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
+            const t = try rt.store.chainOpen(a, origin.value());
+            if (try rt.store.chainTip(a, t)) |tip| if (!std.mem.eql(u8, tip, t)) continue;
+            rt.say("event {s} {s} → {s}.{s} {s}", .{ name, short(a, ev), sub.app, sub.func, short(a, t) });
             try rt.run(a, t);
         }
     }
@@ -2405,6 +2453,8 @@ pub const Runtime = struct {
         emitted: std.array_list.Managed([]const u8),
         /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
         subscribed: bool = false,
+        /// 0.5.2: the `on` / `off` calls the step made, in order (on.zig): kept when it ends without error.
+        ons: std.array_list.Managed(OnCall),
         /// #130: the `fetch` intentions it recorded (a billable event each).
         fetches: u64 = 0,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
@@ -2552,6 +2602,7 @@ pub const Runtime = struct {
             .children = .init(a),
             .progs = .init(a),
             .emitted = .init(a),
+            .ons = .init(a),
         };
         try st.progs.append(.{ .record = prog, .cid = Value.cidOf(o.get("program")).? });
         st.clock.drive(time.ns());
@@ -2583,6 +2634,8 @@ pub const Runtime = struct {
             .edges = hEdges,
             .authfetch = hAuthfetch,
             .events = hEvents,
+            .on = hOn,
+            .off = hOff,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -2620,6 +2673,10 @@ pub const Runtime = struct {
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
         if (!errored) for (st.moves.items) |m| try head_updates.append(try heads.advanceHead(a, rt.store, m[0], m[1], .{ .thread = origin, .input = ctx.cid, .at = at }));
+        // 0.5.2: the subscriptions the step made, in order (on.zig).
+        if (!errored) for (st.ons.items) |c| {
+            _ = try onm.apply(a, rt.store, c.op, c.name, c.app, c.role, c.func, .{ .thread = origin, .input = ctx.cid, .at = at });
+        };
         const waiting = std.mem.eql(u8, state, "waiting");
 
         var u = cbor.MapBuilder.init(a);
@@ -3132,6 +3189,45 @@ pub const Runtime = struct {
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
     }
+    const OnCall = struct { op: onm.Op, name: []const u8, app: []const u8, role: []const u8 = "", func: []const u8 = "" };
+
+    /// 0.5.2: the app of the program running now (the thread's, or an in-VM callee's) when its
+    /// record is installed (#114's rule, as for an emit), else null.
+    fn callingApp(st: *StepState, imp: *program.Imports) program.Err!?[]const u8 {
+        const run_ = &st.progs.items[st.progs.items.len - 1];
+        if (run_.install == null) run_.install = st.rt.installedAs(st.a, run_.cid, run_.record) catch return imp.failWith("store error");
+        return if (run_.install.? == .none) null else Value.str(run_.record.get("app"));
+    }
+
+    /// 0.5.2: a fact's name a subscription may take: an event name (a slash path, no empty
+    /// segment, no space or NUL), no intention's.
+    fn onName(imp: *program.Imports, what: []const u8, name: []const u8) program.Err!void {
+        if (logm.isIntention(name) or !logm.isEventName(name)) return imp.failFmt("{s}: {s} is not a fact's name (a slash path of segments: no empty segment, no space or NUL; no intention)", .{ what, try json.quoted(stepOf(imp).a, name) });
+    }
+
+    /// 0.5.2: `on(name, fn)` — the calling app subscribes `fn` of one of its programs to the facts
+    /// named `name`; kept when the step ends without error (on.zig).
+    fn hOn(imp: *program.Imports, name: []const u8, func: []const u8) program.Err!void {
+        const st = stepOf(imp);
+        const a = st.a;
+        try onName(imp, "on", name);
+        const app = (try callingApp(st, imp)) orelse return imp.failWith("on: the calling program is not installed (an app's program), so it has no subscriptions");
+        const ps = subsm.programsOf(a, st.rt.store, app) catch return imp.failWith("store error");
+        switch (onm.handlerOf(a, func, app, ps) catch return error.OutOfMemory) {
+            .bad => |why| return imp.failWith(why),
+            .ok => |h| try st.ons.append(.{ .op = .on, .name = try a.dupe(u8, name), .app = app, .role = h.role, .func = h.func }),
+        }
+    }
+
+    /// 0.5.2: `off(name)` — the calling app's subscriptions to `name` end, when the step ends
+    /// without error (on.zig).
+    fn hOff(imp: *program.Imports, name: []const u8) program.Err!void {
+        const st = stepOf(imp);
+        try onName(imp, "off", name);
+        const app = (try callingApp(st, imp)) orelse return imp.failWith("off: the calling program is not installed (an app's program), so it has no subscriptions");
+        try st.ons.append(.{ .op = .off, .name = try st.a.dupe(u8, name), .app = app });
+    }
+
     /// 0.5.0: the event index read (program.zig eventsRead), as the log stands before this step's update.
     fn hEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -3432,6 +3528,8 @@ pub const Runtime = struct {
         .edges = cEdges,
         .authfetch = cAuthfetch,
         .events = cEvents,
+        .on = cOn,
+        .off = cOff,
     };
 
     fn callOf(imp: *program.Imports) *CallState {
@@ -3498,6 +3596,12 @@ pub const Runtime = struct {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
+    }
+    fn cOn(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
+        return readOnly(imp, "on");
+    }
+    fn cOff(imp: *program.Imports, _: []const u8) program.Err!void {
+        return readOnly(imp, "off");
     }
     fn cEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);

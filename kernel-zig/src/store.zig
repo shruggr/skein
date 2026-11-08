@@ -45,6 +45,10 @@ pub const EventsQuery = struct { name: []const u8, prefix: bool = false, after: 
 /// One indexed event: its name, its place, its record's CID.
 pub const EventRow = struct { name: []u8, place: Place, record: []u8 };
 
+/// One subscription to a name (0.5.2, the `on` map: on.zig): the app, its program's role and the
+/// function, and the seq of the {kind: "on"} chain's update that made it — the order they were made.
+pub const Subscriber = struct { app: []u8, role: []u8, func: []u8, seq: i64 };
+
 pub const VTable = struct {
     bytes: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
     has: *const fn (ctx: *anyopaque, cid: []const u8) anyerror!bool,
@@ -86,6 +90,8 @@ pub const VTable = struct {
     size: *const fn (ctx: *anyopaque) anyerror!u64,
     /// 0.5.0: the event index read (index.zig `events`), newest last.
     events: *const fn (ctx: *anyopaque, a: std.mem.Allocator, q: EventsQuery) anyerror![]EventRow,
+    /// 0.5.2: the subscriptions to `name` exactly (index.zig `on`), in the order they were made.
+    subscribers: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![]Subscriber,
 };
 
 pub const Store = struct {
@@ -187,5 +193,8 @@ pub const Store = struct {
     }
     pub fn events(s: Store, a: std.mem.Allocator, q: EventsQuery) ![]EventRow {
         return s.vt.events(s.ctx, a, q);
+    }
+    pub fn subscribers(s: Store, a: std.mem.Allocator, name: []const u8) ![]Subscriber {
+        return s.vt.subscribers(s.ctx, a, name);
     }
 };

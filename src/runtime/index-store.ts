@@ -33,7 +33,7 @@ import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
 type Obj = Record<string, unknown>;
-export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "events"] as const;
+export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "events", "on"] as const;
 export type MapName = typeof MAPS[number];
 export const STATE_KIND = "skein-state";
 
@@ -177,6 +177,9 @@ export interface EventPlace { n: number; seq: number; i: number; thread: CID }
 export interface EventsQuery { name: string; prefix?: boolean; after?: EventPlace; limit?: number; latest?: boolean }
 /** One indexed event. */
 export interface EventRow { name: string; place: EventPlace; record: CID }
+
+/** A subscription's key in the `on` map (0.5.2, index.zig writeOn): the name, a 0, the {kind: "on"} chain's update seq. */
+export const onKey = (name: string, seq: number): Uint8Array => cat(new TextEncoder().encode(name), Uint8Array.of(0), be64(seq));
 
 /** A place as the index orders it: n ‖ seq ‖ i ‖ thread. */
 export const placeKey = (p: EventPlace): Uint8Array => cat(be64(p.n), be64(p.seq), be64(p.i), p.thread.bytes);
@@ -335,9 +338,15 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       pairs.edges.push([k, [e.rel, e.locator]]);
     });
     edges(0, originEdges(o));
+    // 0.5.2: the {kind: "on"} chain's updates, applied in order (index.zig writeOn): name ‖ 0 ‖ seq → the update.
+    const on = new Map<string, [Uint8Array, CID, string, string]>();
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
       const u = (await store.get(c)) as unknown as Obj;
+      if (kind === "on" && typeof u.name === "string" && typeof u.app === "string") {
+        if (u.op === "on") { const k = onKey(u.name, i + 1); on.set(Buffer.from(k).toString("hex"), [k, c, u.name, u.app]); }
+        else if (u.op === "off") for (const [ks, x] of on) if (x[2] === u.name && x[3] === u.app) on.delete(ks);
+      }
       if (kind === "thread" && isRequestThread(o)) for (const r of routed(u)) mark(r, nOf.get(fmt(u.input as CID)) ?? Infinity, u.input as CID);
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
       const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
@@ -363,6 +372,7 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
         });
       }
     }
+    for (const [k, c] of on.values()) pairs.on.push([k, c]);
     const t = ups.length ? (await store.get(tipCid)) as unknown as Obj : undefined;
     if (kind === "thread") {
       const at = be64(numKey(o.at));

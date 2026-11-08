@@ -46,6 +46,12 @@
 //                                  name with `latest`, the first `limit`. A read: a pure
 //                                  function of the log up to this step (this step's own
 //                                  emits are indexed when its update is written)
+//   on(name, len, fn, fn_len) → 0  (0.5.2) subscribe: `fn` ("<role>.<fn>", or "<fn>" for an app
+//                                  with one program) of the calling app is stepped on each fact
+//                                  named `name` exactly that lands after this step; kept when
+//                                  the step ends without error (on.zig)
+//   off(name, len) → 0             (0.5.2) the calling app's subscriptions to `name` end, when
+//                                  the step ends without error
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -92,7 +98,19 @@ pub const Host = struct {
     authfetch: *const fn (imp: *Imports, req: []const u8) Err![]const u8 = noAuthfetch,
     /// 0.5.0: the event index read: dag-cbor query → dag-cbor rows (eventsRead).
     events: *const fn (imp: *Imports, query: []const u8) Err![]const u8 = noEvents,
+    /// 0.5.2: subscribe a function of the calling app to a fact's name (on.zig).
+    on: *const fn (imp: *Imports, name: []const u8, func: []const u8) Err!void = noOn,
+    /// 0.5.2: end the calling app's subscriptions to a name (on.zig).
+    off: *const fn (imp: *Imports, name: []const u8) Err!void = noOff,
 };
+
+fn noOn(imp: *Imports, _: []const u8, _: []const u8) Err!void {
+    return imp.failWith("on: this host keeps no subscriptions");
+}
+
+fn noOff(imp: *Imports, _: []const u8) Err!void {
+    return imp.failWith("off: this host keeps no subscriptions");
+}
 
 fn noEvents(imp: *Imports, _: []const u8) Err![]const u8 {
     return imp.failWith("events: this host keeps no index");
@@ -301,6 +319,15 @@ pub const Imports = struct {
             },
             .authfetch => return imp.out(p, try h.authfetch(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .events => return imp.out(p, try h.events(imp, try imp.alloc.dupe(u8, p.slice(a[0], a[1]) catch return error.OutOfMemory)), a[2], a[3]),
+            .on => {
+                const name = try imp.strAt(p, a[0], a[1]);
+                try h.on(imp, name, try imp.strAt(p, a[2], a[3]));
+                return 0;
+            },
+            .off => {
+                try h.off(imp, try imp.strAt(p, a[0], a[1]));
+                return 0;
+            },
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");

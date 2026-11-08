@@ -308,6 +308,9 @@ these imports:
 - **`events`** (0.5.0): the instance's event index read — the facts its
   steps emitted, by name or name prefix, after a place, the last per name
   (below, "emit" and "The index");
+- **`on`** / **`off`** (0.5.2): the calling app's subscriptions — a function
+  of one of its programs stepped on each fact of a name (below,
+  "Subscriptions");
 - `authfetch` (#126) is **gone** (#157): a step never waits on the outside
   world. The import stays for the modules built against it, and a log that
   made one replays it from its witness (below, "authfetch");
@@ -1268,7 +1271,8 @@ range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
 (record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
 (name → tree), `events` (0.5.0, below: name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → a
-fact's record).
+fact's record), `on` (0.5.2, below "Subscriptions": name ‖ 0 ‖ seq → the
+subscription's update).
 
 A map is a **Merkle search tree** of dag-cbor nodes (fan-out ~32; a key's
 level is the leading zero 5-bit groups of its sha2-256). It is canonical —
@@ -1319,6 +1323,56 @@ A read, a pure function of the log as it stands before this step's update
 latest?: bool}` · `events: the query is not dag-cbor`. The host reads the same
 map from the store, no step (docs/MESSAGES.md "The event index (0.5.0)":
 `GET /events/<name path>`).
+
+### Subscriptions (0.5.2)
+
+A program subscribes its app to a fact's name, and ends that, with two calls
+in its step:
+
+```
+on(name, len, fn, fn_len) → 0   preview1: skein.on(name, len, fn, fn_len)
+                                WIT:      on: func(name: string, fn: string) -> result<_, string>
+off(name, len) → 0              preview1: skein.off(name, len)
+                                WIT:      off: func(name: string) -> result<_, string>
+```
+
+`name` is a fact's name exactly — a slash path of segments, no empty
+segment, no space or NUL, no intention's; no prefix, no wildcard — of any
+app (reads are global). `fn` is a function of the calling app's own
+programs: `"<role>.<fn>"`, or `"<fn>"` when the app's record (`<app>/app`)
+names one program. The calling app is the app of the program running (the
+thread's, or an in-VM callee's) when its record is installed. No manifest
+entry, no permission, no filters. Kept when the step ends without error, in
+the order made; an `on` the app already has (the same name, role and fn) and
+an `off` of a name the app has no subscription to change nothing; `off` ends
+every subscription of the app to the name. Refused in a kernel `call`.
+Errors: ``on: "<name>" is not a fact's name (…)`` · ``on: "<role>" is not
+a program of app <app> (…)`` · ``on: fn "<fn>": name its program,
+"<role>.<fn>" (…)`` · ``on: the calling program is not installed (…)`` ·
+the same for `off` · ``on: a call reads only (no entry, no writes)``.
+
+Kernel state, replayed: one chain, origin `{kind: "on"}`, its updates the
+calls as made — `{op: "on", name, app, role, fn, thread, input, at}`, `{op:
+"off", name, app, thread, input, at}` — and the `on` map, that chain applied
+in order: name ‖ 0 ‖ the update's seq → the update (an `off` deletes the
+name's keys whose update names the app). So the subscriptions to a name, in
+key order, are in the order they were made.
+
+**Delivery.** A fact a step emits (the event index's, above), after the
+emitting step's update, under the entry that drove it, steps every
+subscription to its name, in that order, as the subscriptions stand after the
+emitting step: each a thread launched by the fact's record, its program the
+app's role as `<app>/app` names it now (none: nothing runs, a log line), its
+args `{event: <the record's CID>, box: <the name>, fn, place: {n, seq, i,
+thread}}` — a fresh step at the emitting entry, no new log entry; the
+handler reads its context from state. A subscription hears only the facts
+that land after it exists (no history); one that never fires costs its key.
+What a delivery derives is committed with the emitting entry, as everything
+the entry's processing derives, and the cursor (the entries processed) with
+it: so the cursor is the delivery mark — a kernel stopped in the middle of a
+delivery commits nothing of the entry, and at its start it processes the
+entry again from the cursor, each subscription stepped once. Replay launches
+the same threads.
 
 ### Edges and their relation kinds
 
