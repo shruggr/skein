@@ -44,7 +44,7 @@ test("the stock names never reach appEvent: the libp2p node's go to topicEvent",
   const got: string[] = [];
   const { p, lines } = providers((_h, r) => got.push(String(r.event)));
   p.deliver("tok", ev("beacon", { topic: "t", every: 1000, body: new Uint8Array() }));
-  p.deliver("tok", ev("subscribe", { topic: "t", program: "x", fn: "y" }));
+  p.deliver("tok", ev("liveness", { topic: "t", window: 5000 }));
   assert.deepEqual(got, []);
   assert.equal(lines.filter((l) => l === "topicEvent").length, 2);
 });

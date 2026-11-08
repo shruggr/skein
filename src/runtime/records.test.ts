@@ -70,7 +70,9 @@ test("dispatch row: the kernel's rule (dispatch.zig problem)", () => {
   assert.ok(!isDispatchRow({ transport: "event", address: "chain", filters: ["kernel.brc104"], program: wasm }), "an event has no sender: only kernel.beef on an event route");
   assert.ok(!isDispatchRow({ transport: "event", address: "chain", filters: ["kernel.beef", "x.y"], program: wasm }), "only kernel.beef on an event route");
   assert.ok(!isDispatchRow({ transport: "http", address: "/x", filters: ["kernel.nope"], program: wasm, fn: "x" }), "no such kernel filter");
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", prefix: true, program: wasm }), "prefix: http only");
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "run", prefix: true, program: wasm }), "0.5.1: a prefix on any transport");
+  assert.ok(isDispatchRow({ transport: "event", address: "evx/", dynamic: true, program: wasm }), "0.5.1: an allowance");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "objects", dynamic: true, program: "kernel", fn: "objects" }), "a kernel route is no allowance");
   assert.ok(!isDispatchRow({ transport: "mailbox", address: "objects", program: "kernel", fn: "reboot" }), "no such kernel operation");
   assert.ok(!isDispatchRow({ transport: "http", address: "/x", program: "kernel", fn: "objects" }), "a kernel route is a mailbox route");
   assert.ok(!isDispatchRow({ transport: "smtp", address: "run", program: wasm }));
