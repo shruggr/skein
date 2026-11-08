@@ -168,7 +168,7 @@ test "deadlineRecord (#126): an event the wait owns — at, thread, step, the ap
 /// requests of their own — not facts. They are not under the name rule (an app emits them by
 /// these names) and not in the event index (index.zig `events`); everything else a program emits
 /// as {event: <name>} is a fact, indexed by name.
-pub const intentions = [_][]const u8{ "fetch", "deadline", "deliver", "payment", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant" };
+pub const intentions = [_][]const u8{ "fetch", "deadline", "deliver", "payment", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant" };
 
 pub fn isIntention(name: []const u8) bool {
     for (intentions) |x| if (std.mem.eql(u8, x, name)) return true;
@@ -214,7 +214,7 @@ test "event names (0.5.0): segments, the app's own first segment, intentions apa
     try std.testing.expect(underApp("amm", "amm"));
     try std.testing.expect(!underApp("ammx/pool", "amm"));
     try std.testing.expect(!underApp("pool", "amm"));
-    try std.testing.expect(!isIntention("subscribe") and isIntention("fetch") and !isIntention("amm/fetch"));
+    try std.testing.expect(isIntention("subscribe") and isIntention("fetch") and !isIntention("amm/fetch"));
 }
 
 /// Whether a record is an emitted event of #119's kind ({kind: "event", event: <name>, …}).

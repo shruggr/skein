@@ -86,8 +86,6 @@ pub const VTable = struct {
     size: *const fn (ctx: *anyopaque) anyerror!u64,
     /// 0.5.0: the event index read (index.zig `events`), newest last.
     events: *const fn (ctx: *anyopaque, a: std.mem.Allocator, q: EventsQuery) anyerror![]EventRow,
-    /// 0.5.1: the route at a routes-map key (dispatch.zig `key`), or null (index.zig `routes`).
-    route: *const fn (ctx: *anyopaque, a: std.mem.Allocator, key: []const u8) anyerror!?Value,
 };
 
 pub const Store = struct {
@@ -189,8 +187,5 @@ pub const Store = struct {
     }
     pub fn events(s: Store, a: std.mem.Allocator, q: EventsQuery) ![]EventRow {
         return s.vt.events(s.ctx, a, q);
-    }
-    pub fn route(s: Store, a: std.mem.Allocator, key: []const u8) !?Value {
-        return s.vt.route(s.ctx, a, key);
     }
 };

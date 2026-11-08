@@ -47,13 +47,6 @@
 //                                                              its step processed, the update's seq
 //                                                              in its thread, the record's index in
 //                                                              `emitted`, the thread's origin)
-//   routes    transport ‖ 0 ‖ address ‖ 0 ‖ kind → the route    (0.5.1: the dispatch table, keyed — the
-//                                                              {kind: "dispatch"} chain's updates
-//                                                              applied in order: `add` puts the row at
-//                                                              its key, `remove` deletes it; kind 0 an
-//                                                              exact address, 1 a prefix, 2 an
-//                                                              allowance (`dynamic`); dispatch.zig
-//                                                              `match` reads it)
 //
 // Every map is a function of the chains and the log (the derivation is
 // sqlite.ts's, key for key), and the trees are canonical, so the state
@@ -74,7 +67,6 @@ const mst = @import("mst");
 const storem = @import("store.zig");
 const bitcoin = @import("bitcoin.zig");
 const logm = @import("log.zig");
-const dispatch = @import("dispatch.zig");
 const Value = cbor.Value;
 
 /// What the index needs of a store: blocks by CID, and one named pointer.
@@ -96,7 +88,7 @@ pub const Backend = struct {
     };
 };
 
-pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events, routes };
+pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events };
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
@@ -628,18 +620,6 @@ pub const Index = struct {
         try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
         try ix.writeKeptBitcoin(a, u);
         try ix.writeEvents(a, origin, seq, u);
-        try ix.writeRoute(a, origin, u);
-    }
-
-    /// 0.5.1: a dispatch chain's update into the routes map (dispatch.zig fold, keyed).
-    fn writeRoute(ix: *Index, a: std.mem.Allocator, origin: []const u8, u: Value) !void {
-        const row = (try ix.mapGet(a, .chains, origin)) orelse return;
-        if (!std.mem.eql(u8, Value.str(row.get("kind")) orelse "", "dispatch")) return;
-        const op = Value.str(u.get("op")) orelse return;
-        const v = u.get("row") orelse return;
-        const r = dispatch.rowOf(v) orelse return;
-        const k = try dispatch.key(a, r.transport, r.address, dispatch.kindOf(r));
-        if (std.mem.eql(u8, op, "add")) try ix.mapPut(.routes, k, v) else if (std.mem.eql(u8, op, "remove")) try ix.mapDel(.routes, k);
     }
 
     /// 0.5.0: the facts an update lists in `emitted` (log.zig indexedName) into the event index,
@@ -786,14 +766,7 @@ pub const Index = struct {
         .processedState = processedStateFn,
         .size = sizeFn,
         .events = eventsFn,
-        .route = routeFn,
     };
-
-    fn routeFn(ctx: *anyopaque, a: std.mem.Allocator, key: []const u8) anyerror!?Value {
-        const ix = self(ctx);
-        const v = (try ix.mapGet(ix.scratch(), .routes, key)) orelse return null;
-        return try cbor.decode(a, try cbor.encode(a, v));
-    }
 
     fn eventsFn(ctx: *anyopaque, a: std.mem.Allocator, q: storem.EventsQuery) anyerror![]storem.EventRow {
         return self(ctx).eventsRead(a, q);

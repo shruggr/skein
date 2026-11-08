@@ -46,11 +46,6 @@
 //                                  name with `latest`, the first `limit`. A read: a pure
 //                                  function of the log up to this step (this step's own
 //                                  emits are indexed when its update is written)
-//   route(q, len) → 0              (0.5.1) create a route: dag-cbor {transport, address,
-//                                  prefix?: true}, under an allowance (a `dynamic` row of that
-//                                  transport whose address it falls under); it takes the
-//                                  allowance's handler and filters, and is written to the
-//                                  dispatch table when the step ends without error
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -97,14 +92,7 @@ pub const Host = struct {
     authfetch: *const fn (imp: *Imports, req: []const u8) Err![]const u8 = noAuthfetch,
     /// 0.5.0: the event index read: dag-cbor query → dag-cbor rows (eventsRead).
     events: *const fn (imp: *Imports, query: []const u8) Err![]const u8 = noEvents,
-    /// 0.5.1: create a route under an allowance (dag-cbor {transport, address, prefix?}): a state write
-    /// the step's update carries out.
-    route: *const fn (imp: *Imports, req: []const u8) Err!void = noRoute,
 };
-
-fn noRoute(imp: *Imports, _: []const u8) Err!void {
-    return imp.failWith("route: this host keeps no routes");
-}
 
 fn noEvents(imp: *Imports, _: []const u8) Err![]const u8 {
     return imp.failWith("events: this host keeps no index");
@@ -313,10 +301,6 @@ pub const Imports = struct {
             },
             .authfetch => return imp.out(p, try h.authfetch(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .events => return imp.out(p, try h.events(imp, try imp.alloc.dupe(u8, p.slice(a[0], a[1]) catch return error.OutOfMemory)), a[2], a[3]),
-            .route => {
-                try h.route(imp, try imp.alloc.dupe(u8, p.slice(a[0], a[1]) catch return error.OutOfMemory));
-                return 0;
-            },
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");

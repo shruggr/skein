@@ -221,6 +221,10 @@ pub const Runtime = struct {
     /// Messages for the host to carry out (#70), handed over after the next
     /// commit (gpa-owned copies).
     outbox: std.array_list.Managed(Outgoing),
+    /// The apps' libp2p subscriptions (#119, subscriptions.zig): the fold of the log's subscribe /
+    /// unsubscribe events, kept in `life` — derived, never written; null until needed, and again
+    /// after a step that subscribed or unsubscribed (folded again from the store when next needed).
+    subs: ?[]subsm.Sub = null,
     /// #130: what the entry being processed used — its steps' fuel and the billable events — for
     /// the meter (billingAfter); reset as each entry starts.
     usage: billing.Usage = .{},
@@ -701,10 +705,11 @@ pub const Runtime = struct {
         const transport = Value.str(entry.get("transport")).?;
         const at = logm.stampOf(entry.get("time")).?.ms();
         var ch = Chain{ .request = record, .ran = .init(a), .beefs = .init(a), .blocks = .init(a) };
+        const rows = (try dispatch.current(a, rt.store)) orelse &.{};
         if (std.mem.eql(u8, transport, "local")) return rt.mailDoor(a, entry, record, at, &ch);
         var route: ?dispatch.Row = null;
         if (std.mem.eql(u8, transport, "http")) {
-            route = (try dispatch.match(a, rt.store, "http", Value.str(record.get("route")) orelse "/")) orelse return .{ .answered = reject(404, "ERR_NOT_FOUND", "no route for this path") };
+            route = dispatch.forHttp(rows, Value.str(record.get("route")) orelse "/") orelse return .{ .answered = reject(404, "ERR_NOT_FOUND", "no route for this path") };
         } else if (std.mem.eql(u8, transport, "libp2p")) {
             // The transport's own check (#143: inherent to libp2p): the publisher's signature, by the middleware.
             if (middlewareOf(g, transport)) |mw| {
@@ -754,7 +759,8 @@ pub const Runtime = struct {
     fn eventDoor(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: Value, sent: bool) !DoorOut {
         const box = Value.str(entry.get("box")).?;
         const at = logm.stampOf(entry.get("time")).?.ms();
-        const route = try dispatch.match(a, rt.store, "event", box);
+        const rows = (try dispatch.current(a, rt.store)) orelse &.{};
+        const route = dispatch.forEvent(rows, box);
         const filters: []const Value = if (route) |r| r.filters else &.{};
         // #157: a delivery's answer stands on its own, wherever it arrives: the server's signature
         // over it, for this instance's own `deliver` event. Anything else: nothing written.
@@ -1058,7 +1064,7 @@ pub const Runtime = struct {
         if (!std.mem.eql(u8, recipient, rt.identity())) return pass(rt, a, entry, record, ch);
         const body = cbor.decode(a, bytes) catch return pass(rt, a, entry, record, ch);
         if (body.get("replyTo") != null) return pass(rt, a, entry, record, ch);
-        const route = (try dispatch.match(a, rt.store, "mailbox", Value.str(m.get("box")) orelse "")) orelse return pass(rt, a, entry, record, ch);
+        const route = dispatch.forMail((try dispatch.current(a, rt.store)) orelse &.{}, Value.str(m.get("box")) orelse "") orelse return pass(rt, a, entry, record, ch);
         if (route.filters.len == 0) return pass(rt, a, entry, record, ch);
         // The filters run over the body (a carried message's package is its body: the record is the signature's).
         ch.request = body;
@@ -1315,7 +1321,7 @@ pub const Runtime = struct {
     /// a kernel route, or a gated function (an event has no principal), runs nothing. A function of
     /// the update and the state: replay launches the same threads.
     fn subscriber(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
-        const row = (try dispatch.match(a, rt.store, "event", name)) orelse return;
+        const row = dispatch.forEvent((try dispatch.current(a, rt.store)) orelse &.{}, name) orelse return;
         const handler = row.program orelse return;
         if (grants.gate(null, try rt.gatingRoles(a, row), null) != .pass) {
             rt.say("event {s} {s}: {s} is gated, and an event has no principal; nothing runs", .{ name, short(a, ev), row.func orelse "the handler" });
@@ -1402,15 +1408,27 @@ pub const Runtime = struct {
 
     /// The route a request record matches as the table stands (#115, #143: by its address only).
     fn matchOf(rt: *Runtime, a: std.mem.Allocator, transport: []const u8, req: Value) !Match {
+        const rows = (try dispatch.current(a, rt.store)) orelse &.{};
         if (std.mem.eql(u8, transport, "http")) {
-            const r = (try dispatch.match(a, rt.store, "http", Value.str(req.get("route")) orelse "/")) orelse return .{};
+            const r = dispatch.forHttp(rows, Value.str(req.get("route")) orelse "/") orelse return .{};
             return .{ .row = r.value };
         } else if (std.mem.eql(u8, transport, "libp2p")) {
-            // 0.5.1: a libp2p subscription is a libp2p route (a live row, or one a step created under an allowance).
             const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return .{};
-            if (try dispatch.match(a, rt.store, "libp2p", name)) |r| return .{ .row = r.value };
+            if (dispatch.forLibp2p(rows, name)) |r| return .{ .row = r.value };
+            // #119: a topic no route is at is delivered by the app that subscribed it (the first standing subscription).
+            const topic = Value.str(req.get("topic")) orelse return .{};
+            const sub = subsm.forTopic(try rt.subscriptions(a), topic) orelse return .{};
+            return .{ .row = try subsm.rowValue(a, rt.store, sub) };
         }
         return .{};
+    }
+
+    /// The subscriptions as the log stands (#119): the kept fold, else folded now from the store.
+    pub fn subscriptions(rt: *Runtime, a: std.mem.Allocator) ![]const subsm.Sub {
+        if (rt.subs) |x| return x;
+        const folded = try subsm.fold(a, rt.store);
+        rt.subs = try subsm.dupe(rt.life.allocator(), folded);
+        return rt.subs.?;
     }
 
     /// The compressed secp256k1 key a libp2p peer ID carries (identity multihash over the key's protobuf), or null.
@@ -1668,7 +1686,7 @@ pub const Runtime = struct {
                 },
             }
         }
-        const row = (try dispatch.match(a, rt.store, "mailbox", box)) orelse {
+        const row = dispatch.forMail((try dispatch.current(a, rt.store)) orelse &.{}, box) orelse {
             rt.say("{s}: no route; recorded, nothing runs", .{what});
             return;
         };
@@ -2135,7 +2153,7 @@ pub const Runtime = struct {
                 return;
             }
         };
-        const row = (try dispatch.match(a, rt.store, "event", box)) orelse {
+        const row = dispatch.forEvent((try dispatch.current(a, rt.store)) orelse &.{}, box) orelse {
             rt.say("{s}: no route; recorded, nothing runs", .{what});
             return;
         };
@@ -2426,8 +2444,8 @@ pub const Runtime = struct {
         progs: std.array_list.Managed(Running),
         /// The messages the step emitted (#70), in order: listed on its update, sent when it ends without error.
         emitted: std.array_list.Managed([]const u8),
-        /// 0.5.1: the routes the step created (`route`), each under an allowance: written when it ends without error.
-        routes: std.array_list.Managed(Value),
+        /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
+        subscribed: bool = false,
         /// #130: the `fetch` intentions it recorded (a billable event each).
         fetches: u64 = 0,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
@@ -2575,7 +2593,6 @@ pub const Runtime = struct {
             .children = .init(a),
             .progs = .init(a),
             .emitted = .init(a),
-            .routes = .init(a),
         };
         try st.progs.append(.{ .record = prog, .cid = Value.cidOf(o.get("program")).? });
         st.clock.drive(time.ns());
@@ -2607,7 +2624,6 @@ pub const Runtime = struct {
             .edges = hEdges,
             .authfetch = hAuthfetch,
             .events = hEvents,
-            .route = hRoute,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -2645,10 +2661,6 @@ pub const Runtime = struct {
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
         if (!errored) for (st.moves.items) |m| try head_updates.append(try heads.advanceHead(a, rt.store, m[0], m[1], .{ .thread = origin, .input = ctx.cid, .at = at }));
-        // 0.5.1: the routes the step created, into the dispatch table (as a head move: a state write).
-        if (!errored) for (st.routes.items) |v| {
-            _ = try dispatch.apply(a, rt.store, "add", v, .{ .thread = origin, .input = ctx.cid, .at = at });
-        };
         const waiting = std.mem.eql(u8, state, "waiting");
 
         var u = cbor.MapBuilder.init(a);
@@ -2662,6 +2674,7 @@ pub const Runtime = struct {
         if (waiting) if (st.until) |t| try u.put("until", cbor.int(t));
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         if (!errored) try u.put("emitted", try cbor.cidArray(a, st.emitted.items));
+        if (!errored and st.subscribed) rt.subs = null;
         try u.put("launched", try cbor.cidArray(a, st.launched.items));
         try u.put("kept", try cbor.cidArray(a, st.kept.items));
         try u.put("heads", try cbor.cidArray(a, head_updates.items));
@@ -2956,6 +2969,13 @@ pub const Runtime = struct {
             if (!logm.isEventName(name)) return imp.failFmt("emit: event {s}: a name is a slash path of segments: no empty segment, no space or NUL", .{try json.quoted(a, name)});
             if (app == null or !logm.underApp(name, app.?)) return imp.failFmt("emit: event {s}: an app emits under its own name", .{try json.quoted(a, name)});
         }
+        // #119: a subscription is checked as it is emitted (subscriptions.zig problem).
+        const kind: ?subsm.Kind = if (std.mem.eql(u8, name, "subscribe")) .subscribe else if (std.mem.eql(u8, name, "unsubscribe")) .unsubscribe else null;
+        if (kind) |k| {
+            const bad = st.rt.subscriptionProblem(st, k, m, app) catch return imp.failWith("emit: the subscriptions cannot be read (a store error)");
+            if (bad) |why| return imp.failWith(why);
+            st.subscribed = true;
+        }
         // #126: a beacon is declared by an installed app, its shape checked as it is emitted.
         if (std.mem.eql(u8, name, "beacon") or std.mem.eql(u8, name, "unbeacon")) {
             if (subsm.beaconProblem(a, name, m, app) catch return error.OutOfMemory) |why| return imp.failWith(why);
@@ -3053,6 +3073,17 @@ pub const Runtime = struct {
         try b.put("thread", cbor.cidv(origin));
         try b.put("step", cbor.int(n));
         return b.value();
+    }
+
+    /// Why a subscribe / unsubscribe this step emits is refused, or null: against the subscriptions as
+    /// the log stands with this step's own earlier ones applied, and the app's record at `<app>/app`.
+    fn subscriptionProblem(rt: *Runtime, st: *StepState, kind: subsm.Kind, m: Value, app: ?[]const u8) !?[]u8 {
+        const a = st.a;
+        var now = std.array_list.Managed(subsm.Sub).init(a);
+        try now.appendSlice(try rt.subscriptions(a));
+        for (st.emitted.items) |c| if (rt.store.getOpt(a, c)) |rec| if (subsm.eventOf(rec)) |e| try subsm.apply(&now, e);
+        const ps = if (app) |x| try subsm.programsOf(a, rt.store, x) else null;
+        return subsm.problem(a, kind, m, app, ps, now.items);
     }
 
     /// A `deadline` event (#126): {kind: "event", event: "deadline", at: <ms>, thread: <origin>,
@@ -3157,41 +3188,6 @@ pub const Runtime = struct {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("events: {s}", .{@errorName(err)}),
         };
-    }
-
-    /// 0.5.1: a route the step creates — dag-cbor {transport, address, prefix?} — under an allowance:
-    /// the `dynamic` row of that transport whose address the asked one falls under (the whole address
-    /// or one of its path-segment prefixes, the longest). The route takes that row's handler, filters
-    /// and settings; the program chooses only the address (and `prefix`). Written to the dispatch
-    /// table when the step ends without error (a state write, not an emit). No removal.
-    fn hRoute(imp: *program.Imports, q: []const u8) program.Err!void {
-        const st = stepOf(imp);
-        const a = st.a;
-        const want = "route: want {transport, address, prefix?: true}";
-        const v = cbor.decode(a, q) catch return imp.failWith("route: the request is not dag-cbor");
-        if (v != .map) return imp.failWith(want);
-        const transport = Value.str(v.get("transport")) orelse return imp.failWith(want);
-        const address = Value.str(v.get("address")) orelse return imp.failWith(want);
-        var prefix = false;
-        if (v.get("prefix")) |p| switch (p) {
-            .bool => |b| prefix = b,
-            .null => {},
-            else => return imp.failWith(want),
-        };
-        if (!dispatch.isTransport(transport)) return imp.failFmt("route: transport {s}: want mailbox, event, http, libp2p or local", .{try json.quoted(a, transport)});
-        if (!dispatch.isBox(address)) return imp.failFmt("route: address {s}: empty, or has a space or NUL", .{try json.quoted(a, address)});
-        const allowance = (dispatch.covering(a, st.rt.store, transport, address) catch return imp.failWith("route: the dispatch table cannot be read (a store error)")) orelse
-            return imp.failFmt("route: {s} {s}: under no allowance (a row of that transport with \"dynamic\": true whose address it falls under)", .{ transport, try json.quoted(a, address) });
-        var row = cbor.MapBuilder.init(a);
-        for (allowance.value.map) |e| {
-            if (std.mem.eql(u8, e.key, "dynamic") or std.mem.eql(u8, e.key, "prefix") or std.mem.eql(u8, e.key, "address")) continue;
-            try row.put(e.key, e.value);
-        }
-        try row.put("address", cbor.string(address));
-        if (prefix) try row.put("prefix", .{ .bool = true });
-        const rv = row.value();
-        if (try dispatch.problem(a, rv)) |why| return imp.failFmt("route: {s}", .{why});
-        try st.routes.append(rv);
     }
 
     fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
@@ -3477,7 +3473,6 @@ pub const Runtime = struct {
         .edges = cEdges,
         .authfetch = cAuthfetch,
         .events = cEvents,
-        .route = cRoute,
     };
 
     fn callOf(imp: *program.Imports) *CallState {
@@ -3544,9 +3539,6 @@ pub const Runtime = struct {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("edges: {s}", .{@errorName(err)}),
         };
-    }
-    fn cRoute(imp: *program.Imports, _: []const u8) program.Err!void {
-        return readOnly(imp, "route");
     }
     fn cEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
