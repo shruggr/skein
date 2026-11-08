@@ -1,8 +1,8 @@
-// The kernel's subscriptions (skein 0.5.2) end to end: one router, one instance
+// The kernel's subscriptions (skein 0.5.2, 0.5.3) end to end: one router, one instance
 // `ox`, three apps installed by the owner's messages — programs/test/event-demo's
 // module as `evx`, `evy` and `evz` (a mailbox route each, and evx an event route
 // `go` — the host's wiring into its box; nothing else in their manifests: a
-// subscription is made in a step, `on(name, fn)`, and ended there, `off(name)`):
+// subscription is made in a step, `on(name, fn)`, and ended there, `off(name, fn)`):
 //
 //   - refusals as the call is made: a name that is no fact's (a trailing `/`,
 //     an intention), a role the app has not;
@@ -12,7 +12,9 @@
 //   - a fact under a name nobody subscribed to (`evx/c`) steps nothing;
 //   - evy subscribes to `evx/late` after a fact under it: it hears the next
 //     one only (no history);
-//   - evy's `off(evx/a)`: the next fact under it steps evz alone;
+//   - evy's `off(evx/a, heard)`: the next fact under it steps evz alone;
+//   - two fns of one app on one name (evy's `heard` and `other` on `evx/two`),
+//     `off` one (0.5.3): the next fact steps only the other;
 //   - a crash in the middle of a delivery: evy ("slow") and evz subscribe to
 //     `evx/slow`; a host's event in `evx/go` emits it; the kernel is killed
 //     while evy's step runs; nothing of the
@@ -96,7 +98,7 @@ try {
   const send = async (app: string, body: Record<string, unknown>) => { await box.send(identity, app, body); await r.settled(); };
   const emit = (names: string[], value: number, spin?: number) => send("evx", { kind: "event-demo-emit", names, value, ...(spin !== undefined ? { spin } : {}) });
   const on = (app: string, name: string, fn: string) => send(app, { kind: "event-demo-on", name, fn });
-  const off = (app: string, name: string) => send(app, { kind: "event-demo-off", name });
+  const off = (app: string, name: string, fn: string) => send(app, { kind: "event-demo-off", name, fn });
   const read = async (path: string): Promise<Array<{ id: string; event: string; record: Record<string, unknown> }>> => {
     const res = await fetch(`${base}/events/${path}`);
     if (res.status !== 200) throw new Error(`GET /events/${path}: ${res.status} ${await res.text()}`);
@@ -154,13 +156,24 @@ try {
   check(late.length === 1 && lateRec?.value === 5, "an on made after a fact does not hear it; it hears the next");
 
   // ------------------------------------------------ off
-  await off("evy", "evx/a");
+  await off("evy", "evx/a", "heard");
   n1 = lines.length;
   await emit(["evx/a"], 6);
   check(delivered(n1).join(", ") === "evx/a evz.heard", `off: the next fact steps the others only (${delivered(n1).join(", ")})`);
   const n2 = lines.length;
-  await off("evy", "evx/a"); // none left: nothing to end
+  await off("evy", "evx/a", "heard"); // none left: nothing to end
   check(!lines.slice(n2).some((l) => /errored/.test(l)), "an off of a name the app has no subscription to changes nothing");
+
+  // ------------------------------------------------ off(name, fn) ends that one subscription only (0.5.3)
+  await on("evy", "evx/two", "heard");
+  await on("evy", "evx/two", "other");
+  n1 = lines.length;
+  await emit(["evx/two"], 8);
+  check(delivered(n1).join(", ") === "evx/two evy.heard, evx/two evy.other", `two fns of one app on one name: both stepped (${delivered(n1).join(", ")})`);
+  await off("evy", "evx/two", "other");
+  n1 = lines.length;
+  await emit(["evx/two"], 9);
+  check(delivered(n1).join(", ") === "evx/two evy.heard", `off(name, fn): only the other fn is stepped (${delivered(n1).join(", ")})`);
 
   // ------------------------------------------------ a crash in the middle of a delivery
   await on("evy", "evx/slow", "slow");
@@ -199,7 +212,7 @@ try {
     const got = buildTree(d.pairs.on).root;
     return { ok: !!want && !!got && want.equals(got), n: d.pairs.on.length };
   });
-  check(same.ok && same.n === 6, `index-store.ts derives the kernel's on map from the chains (${same.n} subscriptions, the same root)`);
+  check(same.ok && same.n === 7, `index-store.ts derives the kernel's on map from the chains (${same.n} subscriptions, the same root)`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

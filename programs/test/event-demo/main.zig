@@ -1,4 +1,4 @@
-//! event-demo (skein 0.5.0, 0.5.2): a test program for the kernel's event index and its
+//! event-demo (skein 0.5.0, 0.5.2, 0.5.3): a test program for the kernel's event index and its
 //! subscriptions. kernel-zig/equiv/event-index.ts installs this module as two apps (`evx`, `evy`),
 //! kernel-zig/equiv/on-off.ts as three (`evx`, `evy`, `evz`). Its steps, by what drives them:
 //!
@@ -11,15 +11,15 @@
 //!                  {kind: "event-demo-read", answer: <the read's dag-cbor bytes>}
 //!   a message {kind: "event-demo-on", name, fn}: subscribes (`sk.on`, skein 0.5.2) — the step
 //!                  errors with the kernel's refusal; finishes "on <name>"
-//!   a message {kind: "event-demo-off", name}: ends the app's subscriptions to `name` (`sk.off`);
-//!                  finishes "off <name>"
+//!   a message {kind: "event-demo-off", name, fn}: ends the app's one subscription of `fn` to
+//!                  `name` (`sk.off`, skein 0.5.3); finishes "off <name>"
 //!   a subscription's delivery (args {event, box, fn, place}): moves `<app>/heard` to
 //!                  {kind: "event-demo-heard", box, fn, event, place, prev} — every fact heard,
 //!                  newest first, chained by `prev`. With fn "slow", first it hashes the fact's
 //!                  `spin` times (a step that takes a while: equiv/on-off.ts stops the kernel in it)
 //!
 //! `<app>` is the app of the thread's program record (the install names it). The imports are
-//! skein-sdk 0.17.0's (`sk.events`, `sk.on`, `sk.off`).
+//! skein-sdk 0.17.1's (`sk.events`, `sk.on`, `sk.off`).
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -65,8 +65,8 @@ fn run(a: Allocator) !void {
         return out(a, "on {s}", .{name});
     }
     if (eql(u8, kind, "event-demo-off")) {
-        const name = Value.str(body.get("name")) orelse return sk.report("event-demo-off wants {name}");
-        sk.off(name) catch return sk.report(sk.lastError());
+        const name = Value.str(body.get("name")) orelse return sk.report("event-demo-off wants {name, fn}");
+        sk.off(name, Value.str(body.get("fn")) orelse return sk.report("event-demo-off wants {name, fn}")) catch return sk.report(sk.lastError());
         return out(a, "off {s}", .{name});
     }
     return sk.report("event-demo: want event-demo-emit, -read, -on or -off");
