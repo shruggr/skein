@@ -669,8 +669,17 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   …fields})`, addressed to no one, unsigned. The kernel lists the record on
   the update (`emitted`) and hands it to the host after the commit
   (transport `event`, address the name); the host acts on it by its wiring,
-  or ignores it with a log line (the step is not told). Any name is
-  accepted; the events the reference host wires:
+  or ignores it with a log line (the step is not told). Two kinds of name
+  (0.5.0): the **intentions** below (`broadcast`, `fetch`, `deadline`,
+  `deliver`, `payment`, `subscribe` / `unsubscribe`, `beacon` / `unbeacon`,
+  `liveness` / `unliveness`, `want` / `unwant`) — requests the runtime
+  answers, unchanged — and everything else, a **fact**: its name a slash
+  path of segments (no empty segment, no space or NUL) whose first segment
+  is the emitting app's own name (the record's `app`), else the emit fails
+  (``emit: event "<name>": an app emits under its own name`` — an app emits
+  under its own name as it writes heads under its own name). A fact is put
+  in the instance's **event index** at commit ("The event index", below).
+  The events the reference host wires:
 
   | event | record | the host |
   |---|---|---|
@@ -683,14 +692,15 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | `liveness` (#138) | `{kind: "event", event: "liveness", app, topic, window}` | its liveness tool: the node subscribes `topic` without admitting its messages and keeps the verified beacon beats newer than `window` ms, the latest per sender, served at `GET /<app>/.live/<topic>` — "Liveness (#138)", below |
   | `unliveness` (#138) | `{kind: "event", event: "unliveness", app, topic}` | `app`'s liveness on `topic` ends: its set is gone, the node leaves the topic when nothing else takes it |
-  | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing but a log line — and, like every event, it reaches the pages subscribed to it: "Event streams (#148)", below |
+  | a fact (any other name, under its app's: `<app>/…`) | `{kind: "event", event: <name>, app, …fields}` | the application host's `appEvent` when it has one, else a log line; the kernel indexes it and steps the event route its name takes — "The event index (0.5.0)", below |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
   fields}`: `app` is the kernel's, the `app` of the emitting program's record
   when that record is installed (#114: a genesis program, a dispatch row's,
   or one listed at `<app>/app`); an uninstalled record's event names no app,
-  and a host that follows events by app (the libp2p node) ignores it. An emit naming
-  `kind` or `app` is refused. It is handed over once; a host that needs it
+  and a host that follows events by app (the libp2p node) ignores it (0.5.0:
+  a fact with no app fails the name rule — only an intention may be emitted
+  so). An emit naming `kind` or `app` is refused. It is handed over once; a host that needs it
   after a restart reads it from the log (the kernel writes nothing else).
   The kernel checks `subscribe` / `unsubscribe` as they are emitted — the
   emit fails with its reason, and nothing is listed: the emitting program is
@@ -1542,36 +1552,57 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   - **No wants.** An overlay before 0.20.0 emits `{event: "want" |
     "unwant", …}`; the host ignores them.
   - Unbilled.
-- **Event streams (#148).** A page follows its app's emitted events live,
-  served by the host on the instance's origin, beside the liveness read
-  (src/host/events.ts), no program in between:
+- **The event index (0.5.0).** Every fact a step emits (a name under its
+  app's own, no intention's) is put by the kernel, at commit, in ONE map of
+  the instance's state — index.zig `events`, held like `heads` among the
+  index maps, part of the state CID, replayed byte for byte:
 
-      GET /<app>/.events?event=<name>&topic=<t1>&topic=<t2>…     (http://<handle>.localhost:<port>/… or /@<handle>/…)
-      200 text/event-stream, one message per event record:
-          id: <n>.<seq>.<i>.<thread>    the event's place in the log: the entry its step processed, the
-                                        step's place in its thread, the record's place in `emitted`, the
-                                        thread's origin (one entry can step several threads)
-          event: <name>
-          data: <the record as DAG-JSON>   (as the explorer renders it: a link {"/": cid}, bytes {"/": {"bytes": b64}})
-      400 without `event` (one name) or a `topic` (repeated, one per topic); a Last-Event-ID that is no place
-      404 when <app> is not installed
+      name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread  →  the record's CID
 
-  Generic: any name an app's programs emit (a price is one more event).
-  Sent: only `<app>`'s events (the record's `app`, the kernel's) of that
-  name whose `topic` is one of those asked. On connect, without
-  Last-Event-ID, first the **current value** — the last such event per
-  topic, in log order — then each as its step is committed: the kernel
-  hands every event over after the commit with its place in the log beside
-  the record (the `emit` notice's `place: {n, seq, i, thread}`; the record
-  is unchanged), and the host sends it at once, its id made from that, no
-  log read; one handed over again (a start) is not sent again. With Last-Event-ID (an
-  EventSource's reconnect): every such event after that place, folded from
-  the log, then live; a place not in the log resumes after its entry. No
-  new logged state: the stream reads what the log records; an unsigned
-  read, no entry; each message metered as a read. The open streams are one
-  registry per instance, in memory: an app's close at its uninstall (no row
-  of it left), all of an instance's when it stops and when the host shuts
-  down. Beats are not events and are not served here.
+  `name` raw (no NUL in a name, so a prefix of names is a prefix of keys);
+  the place as the stream ids it: the entry its step processed (`n`), the
+  update's `seq` in its thread, the record's index in `emitted` (`i`), the
+  thread's origin — numbers as every map's (8 bytes big-endian, the sign
+  bit flipped), so byte order is (n, seq, i, thread): the log's entry order,
+  and within one entry by seq, index and thread (not the order the steps
+  ran). An event nothing reads costs its index entry and nothing else.
+  **One read**, the same everywhere: `{name | prefix, after?, limit?,
+  latest?}` → the matching records newest last with their places; `latest`
+  = the last per distinct name under the prefix; `after` = strictly after a
+  place; `limit` = the first n.
+  - In a step: the `events` import (docs/VM.md), a read of the index as the
+    log stands before this step's update.
+  - The host, from the store by CID, no step and no fuel (src/host/events.ts),
+    on the instance's origin beside the liveness read, no program:
+
+        GET /events/<name path>?after=<place>&limit=<n>&latest=1   (http://<handle>.localhost:<port>/… or /@<handle>/…)
+        200 application/json [{id: "<n>.<seq>.<i>.<thread>", event: <name>, record: <the record as DAG-JSON>}]
+        400 a bad name (an empty segment, a space), `after` that is no place, `limit` not 1 or more, `latest` not 1/0
+
+    The path after `/events/` is a name (its segments URI-decoded), or with a
+    trailing `/` a prefix (`/events/` alone: every name). With `Accept:
+    text/event-stream` the same read as a Server-Sent Events stream, then
+    live: `id: <place>`, `event: <name>`, `data: <the record as DAG-JSON>`
+    (as the explorer renders it: a link {"/": cid}, bytes {"/": {"bytes":
+    b64}}); Last-Event-ID (an EventSource's reconnect) is `after`. Live: the
+    kernel hands every event over after the commit with its place beside the
+    record (the `emit` notice's `place: {n, seq, i, thread}`), and the host
+    sends a fact at once, its id from that, no store read; one handed over
+    again (a start) is not sent again. Unsigned, no entry; each answer or
+    message metered as a read. The open streams are one registry per
+    instance, in memory, closed when it stops and when the host shuts down.
+    The `/<app>/.events?event=&topic=` stream of #148 is removed, and an
+    event needs no `topic`.
+  - **Subscriptions**: an app's event route `{transport: "event", address:
+    <a name or a prefix>, prefix?: true, handler: "<role>.<fn>"}` (docs/APPS.md).
+    After the emitting step, under the entry that drove it, the kernel steps
+    the handler of the route the fact's name takes — dispatch.zig forEvent:
+    the exact name (or `*`) first, then the longest prefix — as a thread
+    launched by the event record, its args `{event: <the record's CID>, box:
+    <the name>, fn?, place: {n, seq, i, thread}}` (a logged step; replay
+    launches the same threads). An app may subscribe to another app's names
+    (reads are global). A kernel route, or a gated function (an event has no
+    principal), runs nothing; the route's filters are not run on a fact.
 - **An application host's reads** (open-exchange 0.11.0). A host built on
   the Router as a library (its `appEvent` takes the events no stock wiring
   takes, #164) may also answer GETs at an instance itself: the Router option
@@ -1579,14 +1610,13 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   (every method since 0.3.2: it reads `req.method` itself; `req.signal`
   aborts when the client's connection closes before the answer is written)
   (its hostname, `/@<handle>/`, or the root instance's hostname) after the
-  host's own reads there (the instance card, `/<app>/.live/<topic>`) and
+  host's own reads there (the instance card, `/<app>/.live/<topic>`, `/events/…`) and
   before the request goes to the instance's program; it answers a response
   or `undefined` (forwarded as before). A response with `stream` is held
   open on its socket (an event stream): the host writes chunks until either
   side ends it. What such a host reads is the Router's public surface:
   `dispatch` (an instance's reads, in process), `p2p.live.live(handle,
-  topic)` (the beats kept), `events.subscribe` (the emitted events, as this
-  stream serves them), `o.db.list("enabled")` (the instances). Nothing is
+  topic)` (the beats kept), `events.subscribe` / `events.read` (the event index, as `/events/…` serves it), `o.db.list("enabled")` (the instances). Nothing is
   logged; the instance's program never sees these requests.
 - **An application host's own calls** (0.3.1: the open-exchange host relays
   a swap itself; the instance logs facts, never attempts). Host code, outside

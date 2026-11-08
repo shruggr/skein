@@ -305,6 +305,9 @@ these imports:
   or an event — an intention the runtime answers (#126: a `deadline`, a
   `fetch`) or one it acts on (a broadcast, a subscription, a beacon) — the
   way out (below, "emit");
+- **`events`** (0.5.0): the instance's event index read — the facts its
+  steps emitted, by name or name prefix, after a place, the last per name
+  (below, "emit" and "The index");
 - `authfetch` (#126) is **gone** (#157): a step never waits on the outside
   world. The import stays for the modules built against it, and a log that
   made one replays it from its witness (below, "authfetch");
@@ -486,16 +489,26 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     from #65: the transaction proves itself). The host's broadcaster posts
     it to Arcade; the step awaits the transaction's CID, and at a start a
     broadcast still awaited is handed over again.
-  - Any other name: `{event: <name>, …fields}` → the record `{kind: "event",
-    event: <name>, app?: <app>, …fields}` — the emit's other fields as they
-    are, and `app` set by the kernel: the `app` of the emitting program's
-    record (the thread's, or an in-VM callee's) **when that record is
-    installed** (#114's rule: a genesis program, a dispatch row's program,
-    or one listed in its app's record at `<app>/app`). An uninstalled
-    record's event — one a step put and launched or called — carries no
-    `app`, and a host following events by app ignores it. An emit naming `kind` or
-    `app` itself is refused. Handed over once (the host recovers by reading
-    the log, not by a re-offer). Replay puts the same records.
+  - Any other name — a **fact** (0.5.0): `{event: <name>, …fields}` → the
+    record `{kind: "event", event: <name>, app: <app>, …fields}` — the emit's
+    other fields as they are, and `app` set by the kernel: the `app` of the
+    emitting program's record (the thread's, or an in-VM callee's) **when
+    that record is installed** (#114's rule: a genesis program, a dispatch
+    row's program, or one listed in its app's record at `<app>/app`). The
+    NAME is a slash path of segments (no empty segment, no space or NUL)
+    whose first segment is that app's name, else the emit fails (``emit:
+    event "<name>": an app emits under its own name``; an uninstalled
+    record — one a step put and launched or called — has no app, so it emits
+    no fact). An emit naming `kind` or `app` itself is refused. Handed over
+    once (a host recovers by reading the event index, not by a re-offer).
+    At commit the kernel puts it in the instance's **event index** (index.zig
+    `events`: name ‖ place → the record; "The index", below) and steps the
+    handler of the event route its name takes (an app's subscription:
+    docs/MESSAGES.md "The event index (0.5.0)"). Replay puts the same
+    records, the same index and launches the same threads. The intentions
+    below (`subscribe`, `beacon`, `liveness`, `fetch`, `deliver`, `payment`,
+    the `deadline` the kernel records, and `want`, the un-s) are not under
+    the name rule and not in the index.
   - `subscribe` / `unsubscribe` (#119) are **subscriptions**, and the kernel
     reads them too. `{event: "subscribe", topic, program: <role>, fn,
     filter?}` says: deliver a libp2p message on `topic` to this app's
@@ -534,7 +547,9 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
   <dag-cbor bytes>, subject?: <cid>}, {event: "broadcast", tx: <cid>, beef?:
   bytes} or {event: <name>, …fields}` · ``emit: event <name>: a name is not
-  empty and has no space or NUL`` · ``emit: an event's `kind` and `app` are
+  empty and has no space or NUL`` · ``emit: event <name>: a name is a slash
+  path of segments: no empty segment, no space or NUL`` · ``emit: event
+  <name>: an app emits under its own name`` (0.5.0, a fact) · ``emit: an event's `kind` and `app` are
   the kernel's to set`` · a refused subscription (`emit: subscribe names
   its program: …`, `emit: subscribe: "<role>" is not a program of app
   <app> …`, `emit: subscribe names the function delivered to …`, `emit:
@@ -1254,7 +1269,8 @@ range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p`
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
 (record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
-(name → tree).
+(name → tree), `events` (0.5.0, below: name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → a
+fact's record).
 
 A map is a **Merkle search tree** of dag-cbor nodes (fan-out ~32; a key's
 level is the leading zero 5-bit groups of its sha2-256). It is canonical —
@@ -1275,6 +1291,36 @@ function of the log: two machines that consumed the same log have the same
 state CID, and a bootstrap packet can ship the index for a reader to verify
 rather than rebuild. Old spine nodes and old state records are prunable like
 intermediate trees; the log and what live chains reach are not.
+
+### The event index (0.5.0)
+
+The `events` map is every fact the steps emitted (a `{kind: "event"}`
+record whose name is under its app's own and no intention's, above
+"emit"): `name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread` → the record's CID, written from
+each update's `emitted` when the update is recorded (the live path and a
+rebuild alike). The place is the event's in the log — the entry its step
+processed (the update's `input`'s `n`), the update's `seq`, the record's
+index in `emitted`, the thread's origin — numbers as every map's, so the
+key order is name, then (n, seq, i, thread). Programs read it with the
+**`events`** call:
+
+```
+events(q, len, out, cap) → n   preview1: skein.events(q, len, out, cap)
+                               WIT:      events: func(query: list<u8>) -> result<list<u8>, string>
+q        dag-cbor {name: <a name> | prefix: <a prefix of names>, after?: {n, seq, i, thread: <cid>},
+                   limit?: <n ≥ 1>, latest?: bool}
+answer   dag-cbor [{name, place: {n, seq, i, thread: <cid>}, cid: <the record's CID>, record: <the record>}]
+```
+
+Newest last: the facts under that name (or every name the prefix starts),
+strictly after `after`, with `latest` the last per name, the first `limit`.
+A read, a pure function of the log as it stands before this step's update
+(the step's own emits are indexed when its update is written); in a kernel
+`call` the committed index. Errors: `events: want {name: <a name> | prefix:
+<a name prefix>, after?: {n, seq, i, thread: <cid>}, limit?: <n > 0>,
+latest?: bool}` · `events: the query is not dag-cbor`. The host reads the same
+map from the store, no step (docs/MESSAGES.md "The event index (0.5.0)":
+`GET /events/<name path>`).
 
 ### Edges and their relation kinds
 
