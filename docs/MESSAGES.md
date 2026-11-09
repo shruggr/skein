@@ -1577,6 +1577,11 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     exact name, steps the subscribing app's `fn` — every subscription to the
     name, in the order made, a fresh step at the emitting entry with args
     `{event, box: <the name>, fn, place}`.
+  - **A thread resting on a name** (0.5.4): a step's `on(name)` with no fn
+    (docs/VM.md "A thread resting on an event name"): the thread rests on
+    the name; each fact under it wakes the thread (in the order the threads
+    began resting) with `event` `{event, box: <the name>, place}`, and it
+    rests on the name again.
   - The host, from the store by CID, no step and no fuel (src/host/events.ts),
     on the instance's origin beside the liveness read, no program:
 

@@ -381,6 +381,8 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       if (t?.state !== "finished") pairs.resting.push([cat(at, origin.bytes), null]);
       if (t && t.state === "waiting" && typeof t.until === "number") pairs.sleepers.push([cat(be64(numKey(t.until)), origin.bytes), null]);
       if (t && Array.isArray(t.awaits)) for (const c of t.awaits) if (isCID(c)) pairs.awaits.push([cat(c.bytes, at, origin.bytes), null]);
+      // 0.5.4: a waiting thread resting on event names (index.zig threadKeys): name ‖ 0 ‖ the entry it began resting at ‖ origin.
+      if (t && t.state === "waiting" && Array.isArray(t.restsOn)) for (const r of t.restsOn as Obj[]) if (isObj(r) && typeof r.name === "string") pairs.awaits.push([cat(new TextEncoder().encode(r.name), Uint8Array.of(0), be64(numKey(r.n)), origin.bytes), null]);
     } else if (kind === "head" && t && typeof o.name === "string" && isCID(t.tree)) pairs.heads.push([strKey(o.name), t.tree]);
   }
   for (const [, e, u] of unique.values()) pairs.unique.push([u, e]);

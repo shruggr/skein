@@ -29,7 +29,9 @@
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
 //   resting   at ‖ origin                → null                (threads not finished: what start resumes)
 //   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
-//   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject)
+//   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject;
+//             name ‖ 0 ‖ n ‖ origin                            0.5.4: and threads resting on an event name, `restsOn`,
+//                                                              n the entry it began resting at)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`;
 //                                                              and a kept bitcoin transaction's inputs, from the
@@ -554,11 +556,19 @@ pub const Index = struct {
                     keys.sleeper = try cat(a, .{ numOf(u), origin });
                 };
             }
+            var list = std.array_list.Managed([]u8).init(a);
             if (x.get("awaits")) |aw| if (aw == .array) {
-                var list = std.array_list.Managed([]u8).init(a);
                 for (aw.array) |c| if (c == .cid) try list.append(try cat(a, .{ c.cid, at, origin }));
-                keys.awaits = list.items;
             };
+            // 0.5.4: a waiting thread resting on event names (`restsOn` [{name, n}]): name ‖ 0 ‖ the
+            // entry it began resting at ‖ origin.
+            if (state != null and std.mem.eql(u8, state.?, "waiting")) if (x.get("restsOn")) |rs| if (rs == .array) {
+                for (rs.array) |r| {
+                    const nm = Value.str(r.get("name")) orelse continue;
+                    try list.append(try cat(a, .{ nm, &[_]u8{0}, numOf(r.get("n")), origin }));
+                }
+            };
+            keys.awaits = list.items;
         }
         return keys;
     }
@@ -812,7 +822,22 @@ pub const Index = struct {
         .size = sizeFn,
         .events = eventsFn,
         .subscribers = subscribersFn,
+        .restingOn = restingOnFn,
     };
+
+    /// 0.5.4: the threads resting on event name `name` (the waits index), in the order they began
+    /// resting (the entry, then the origin's bytes).
+    fn restingOnFn(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![][]u8 {
+        const ix = self(ctx);
+        const s = ix.scratch();
+        const prefix = try cat(s, .{ name, &[_]u8{0} });
+        var out = std.array_list.Managed([]u8).init(a);
+        for (try ix.scanPrefix(s, .awaits, prefix)) |kv| {
+            if (kv.key.len <= prefix.len + 8) continue;
+            try out.append(try a.dupe(u8, kv.key[prefix.len + 8 ..]));
+        }
+        return out.items;
+    }
 
     fn subscribersFn(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![]storem.Subscriber {
         return self(ctx).subscribersOf(a, name);

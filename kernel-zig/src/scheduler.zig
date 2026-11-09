@@ -1287,7 +1287,11 @@ pub const Runtime = struct {
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
                 try rt.handOverEvent(a, mc, m, thread);
                 // 0.5.2: a fact steps every subscription to its name (on.zig), in the order they were made.
-                if (logm.indexedName(m)) |name| try rt.deliverFact(a, ctx, mc, name, thread);
+                if (logm.indexedName(m)) |name| {
+                    try rt.deliverFact(a, ctx, mc, name, thread);
+                    // 0.5.4: then every thread resting on the name (on.zig), in the order they began resting.
+                    try rt.wakeResting(a, ctx, mc, name, thread);
+                }
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
@@ -1357,6 +1361,43 @@ pub const Runtime = struct {
             rt.say("event {s} {s} → {s}.{s} {s}", .{ name, short(a, ev), sub.app, sub.func, short(a, t) });
             try rt.run(a, t);
         }
+    }
+
+    /// 0.5.4: a fact a step emitted, `ev` under `name`, wakes every thread resting on the name (its
+    /// step called `on(name)` with no fn, on.zig): in the order they began resting (the waits index,
+    /// index.zig `awaits`, keyed name ‖ 0 ‖ the entry it began resting at ‖ origin), each stepped at
+    /// the emitting entry with `event` {event, box: <the name>, place: {n, seq, i, thread}} beside
+    /// its own context, and resting on the name again (stepBody carries `restsOn`). A function of
+    /// the update and the state: replay steps the same threads.
+    fn wakeResting(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
+        const ts = try rt.store.restingOn(a, name);
+        if (ts.len == 0) return;
+        const place = (try rt.placeOf(a, ev, thread)) orelse return;
+        for (ts) |t| {
+            if (rt.stopped) return;
+            const tip = rt.tipOf(a, t) catch null orelse continue;
+            if (!stateIs(tip, "waiting") or !restsOnName(tip, name)) continue;
+            var p = cbor.MapBuilder.init(a);
+            try p.put("n", cbor.int(place.n));
+            try p.put("seq", cbor.int(place.seq));
+            try p.put("i", cbor.int(place.i));
+            try p.put("thread", cbor.cidv(place.thread));
+            var info = cbor.MapBuilder.init(a);
+            try info.put("event", cbor.cidv(ev));
+            try info.put("box", cbor.string(name));
+            try info.put("place", p.value());
+            rt.say("event {s} {s} → {s} (rests on it)", .{ name, short(a, ev), short(a, t) });
+            rt.step_extra = .{ .key = "event", .value = info.value() };
+            try rt.step(a, t, ctx, null, null);
+        }
+    }
+
+    /// 0.5.4: whether a waiting update rests on `name` (its `restsOn`: [{name, n}]).
+    fn restsOnName(tip: Value, name: []const u8) bool {
+        const l = tip.get("restsOn") orelse return false;
+        if (l != .array) return false;
+        for (l.array) |x| if (std.mem.eql(u8, Value.str(x.get("name")) orelse "", name)) return true;
+        return false;
     }
 
     /// A request thread's origin (#68), from its entry alone: the transport's
@@ -2455,6 +2496,8 @@ pub const Runtime = struct {
         subscribed: bool = false,
         /// 0.5.2: the `on` / `off` calls the step made, in order (on.zig): kept when it ends without error.
         ons: std.array_list.Managed(OnCall),
+        /// 0.5.4: the names the step's `on(name)` (no fn) calls rest the thread on, in order, once each.
+        rests: std.array_list.Managed([]const u8),
         /// #130: the `fetch` intentions it recorded (a billable event each).
         fetches: u64 = 0,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
@@ -2603,6 +2646,7 @@ pub const Runtime = struct {
             .progs = .init(a),
             .emitted = .init(a),
             .ons = .init(a),
+            .rests = .init(a),
         };
         try st.progs.append(.{ .record = prog, .cid = Value.cidOf(o.get("program")).? });
         st.clock.drive(time.ns());
@@ -2657,7 +2701,23 @@ pub const Runtime = struct {
         };
 
         if (rt.stopped) return .{ .launched = &.{}, .rested = false };
-        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null) "waiting" else "finished";
+        // 0.5.4: the names the thread rests on — its tip's `restsOn`, then the names this step's
+        // `on(name)` added, each with the entry it began resting at; a woken thread rests again.
+        var rests = std.array_list.Managed(Value).init(a);
+        if (out.exit_code == 0) {
+            if (!std.mem.eql(u8, tip_cid, origin)) if (try rt.store.get(a, tip_cid)) |tv| if (tv.get("restsOn")) |l| if (l == .array) for (l.array) |x| try rests.append(x);
+            const en = Value.intOf(ctx.e.get("n")) orelse 0;
+            for (st.rests.items) |nm| {
+                var has = false;
+                for (rests.items) |x| has = has or std.mem.eql(u8, Value.str(x.get("name")) orelse "", nm);
+                if (has) continue;
+                var r = cbor.MapBuilder.init(a);
+                try r.put("name", cbor.string(nm));
+                try r.put("n", cbor.int(en));
+                try rests.append(r.value());
+            }
+        }
+        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null or rests.items.len > 0) "waiting" else "finished";
         const errored = std.mem.eql(u8, state, "errored");
         if (!errored) if (st.until) |until| {
             // #126: the deadline is an intention — the event {kind: "event", event: "deadline", at,
@@ -2688,6 +2748,7 @@ pub const Runtime = struct {
         if (waiting) try u.put("waitingOn", try cbor.cidArray(a, st.launched.items));
         if (waiting) try u.put("awaits", try cbor.cidArray(a, st.awaits.items));
         if (waiting) if (st.until) |t| try u.put("until", cbor.int(t));
+        if (waiting and rests.items.len > 0) try u.put("restsOn", .{ .array = rests.items });
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         if (!errored) try u.put("emitted", try cbor.cidArray(a, st.emitted.items));
         if (!errored and st.subscribed) rt.subs = null;
@@ -3211,6 +3272,11 @@ pub const Runtime = struct {
         const st = stepOf(imp);
         const a = st.a;
         try onName(imp, "on", name);
+        // 0.5.4: `on(name)` with no fn — the thread rests on the name; its step ends resting.
+        if (func.len == 0) {
+            for (st.rests.items) |x| if (std.mem.eql(u8, x, name)) return;
+            return st.rests.append(try a.dupe(u8, name));
+        }
         const app = (try callingApp(st, imp)) orelse return imp.failWith("on: the calling program is not installed (an app's program), so it has no subscriptions");
         const ps = subsm.programsOf(a, st.rt.store, app) catch return imp.failWith("store error");
         switch (onm.handlerOf(a, func, app, ps) catch return error.OutOfMemory) {

@@ -310,7 +310,8 @@ these imports:
   (below, "emit" and "The index");
 - **`on`** / **`off`** (0.5.2): the calling app's subscriptions — a function
   of one of its programs stepped on each fact of a name (below,
-  "Subscriptions");
+  "Subscriptions"); `on(name)` with no fn (0.5.4): the thread rests on the
+  name (below, "A thread resting on an event name");
 - `authfetch` (#126) is **gone** (#157): a step never waits on the outside
   world. The import stays for the modules built against it, and a log that
   made one replays it from its witness (below, "authfetch");
@@ -1269,7 +1270,8 @@ Each query shape is its own map, keyed so that the question is a lookup, a
 range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p` event record's CID → entry),
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
-(record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
+(record ‖ at ‖ origin; and, 0.5.4, name ‖ 0 ‖ n ‖ origin for a thread resting
+on an event name), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
 (name → tree), `events` (0.5.0, below: name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → a
 fact's record), `on` (0.5.2, below "Subscriptions": name ‖ 0 ‖ seq → the
 subscription's update).
@@ -1374,6 +1376,27 @@ it: so the cursor is the delivery mark — a kernel stopped in the middle of a
 delivery commits nothing of the entry, and at its start it processes the
 entry again from the cursor, each subscription stepped once. Replay launches
 the same threads.
+
+### A thread resting on an event name (0.5.4)
+
+`on(name)` with no fn — preview1 `fn_len` 0, WIT an empty `fn` — rests the
+calling THREAD on the name (the same name rule as above; refused in a kernel
+`call`): its step ends with the thread `waiting`, its update listing
+`restsOn: [{name, n}]` (`n` the entry it began resting at). It waits forever
+by design: a resting thread is a stored record found by key, nothing scans
+it. Every fact emitted under the name after that — after the emitting step's
+update, under the entry that drove it, after the name's subscriptions —
+wakes it: a step of the same thread at the emitting entry, its input carrying
+`event: {event: <the record's CID>, box: <the name>, place: {n, seq, i,
+thread}}` beside its own context (its args, its tip). It rests on the name
+again: each step's update carries its tip's `restsOn` forward, so the
+woken step calls nothing to keep resting. Threads resting on one name wake
+in the order they began resting (the entry, then within one entry the
+origin's bytes). The entries live in the waits index, `awaits`: name ‖ 0 ‖
+n ‖ origin, beside the reply-keyed ones. A step that errors carries no
+`restsOn` (it is not woken again). Committed with the emitting entry, as a
+delivery is: a kernel stopped mid-wake commits nothing of the entry and wakes
+each once from the cursor. Replay steps the same threads.
 
 ### Edges and their relation kinds
 

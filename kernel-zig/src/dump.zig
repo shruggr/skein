@@ -168,11 +168,21 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
     try w.raw("],\"awaits\":[");
     for (try ix.all(a, .awaits), 0..) |kv, i| {
         try w.sep(i);
-        const l = cidLen(kv.key);
         try w.raw("[");
-        try w.cid(kv.key[0..l]);
-        try w.raw(",");
-        try w.cid(kv.key[l + 8 ..]);
+        if (kv.key.len > 0 and kv.key[0] >= 0x20) {
+            // 0.5.4: a thread resting on an event name — name ‖ 0 ‖ n ‖ origin.
+            const z = std.mem.indexOfScalar(u8, kv.key, 0) orelse kv.key.len;
+            try w.str(kv.key[0..z]);
+            try w.raw(",");
+            try w.int(num(kv.key[z + 1 ..]));
+            try w.raw(",");
+            try w.cid(kv.key[z + 9 ..]);
+        } else {
+            const l = cidLen(kv.key);
+            try w.cid(kv.key[0..l]);
+            try w.raw(",");
+            try w.cid(kv.key[l + 8 ..]);
+        }
         try w.raw("]");
     }
     try w.raw("],\"edges\":[");

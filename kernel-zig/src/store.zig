@@ -92,6 +92,8 @@ pub const VTable = struct {
     events: *const fn (ctx: *anyopaque, a: std.mem.Allocator, q: EventsQuery) anyerror![]EventRow,
     /// 0.5.2: the subscriptions to `name` exactly (index.zig `on`), in the order they were made.
     subscribers: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![]Subscriber,
+    /// 0.5.4: the threads resting on event name `name` (index.zig `awaits`), in the order they began resting.
+    restingOn: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![][]u8,
 };
 
 pub const Store = struct {
@@ -196,5 +198,8 @@ pub const Store = struct {
     }
     pub fn subscribers(s: Store, a: std.mem.Allocator, name: []const u8) ![]Subscriber {
         return s.vt.subscribers(s.ctx, a, name);
+    }
+    pub fn restingOn(s: Store, a: std.mem.Allocator, name: []const u8) ![][]u8 {
+        return s.vt.restingOn(s.ctx, a, name);
     }
 };
