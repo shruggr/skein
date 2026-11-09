@@ -203,6 +203,11 @@ echo "== subscriptions (skein 0.5.2): one router, three apps (programs/test/even
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/on-off.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/on-off.ts" || status=1
 
+echo "== a thread resting on an event name (skein 0.5.4): on(name) with no fn ends the step resting; each fact under the name wakes the resting threads in the order they began resting, never another name's, their context intact, and they rest again; a kernel killed mid-delivery commits nothing of the entry and, restarted, wakes each once; index-store.ts derives the waits index; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/rest-on.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/rest-on.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/rest-on.ts" || status=1
+
 echo "== liveness (#138): two routers; an app on the second emits liveness for a topic an app on the first beacons on; the second's node subscribes it without admitting; GET /<app>/.live/<topic> (served by the host) shows the first's beat within a beat and the second's own; a bad signature never shows; the window drops a silent sender; unliveness and uninstall end it; replayed"
 "${node[@]}" "$kz/equiv/liveness.ts" || status=1
 
