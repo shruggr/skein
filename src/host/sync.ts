@@ -9,17 +9,18 @@
 //   fetch           p2pInbound takes it, never delivers it to the instance):
 //                   unless the instance holds the txid (the engine's `holds`
 //                   read, by kernel call) or a fetch of it is under way, the
-//                   host asks that peer `{kind: "tx", topic, txid}` and hands
-//                   the BEEF to the overlay's receive row
-//                   /skein/overlay/beef/1.0.0 as from that peer, naming the
-//                   ONE topic it was fetched for (skein 0.6.0, D4). Per (handle,
+//                   host asks that peer `{kind: "tx", topic, txid}` and
+//                   submits the BEEF by the one submit path: the overlay's
+//                   submit message in `<app>/submit`, signed as the instance
+//                   itself, naming the ONE topic it was fetched for (skein
+//                   0.6.1, D10; 0.6.0 D4 the one topic). Per (handle,
 //                   txid) it keeps the SET of peers whose admit named it:
 //                   fetch from one; on a failure (no answer, no `beef`, the
 //                   delivery not taken) the next; the set exhausted, it stops
 //                   and waits for a new admit to add a peer (then one more
 //                   try, from that peer). A delivery taken (accepted, or the
 //                   transaction now held) drops the entry. Nothing logged in
-//                   the instance but the delivered BEEF.
+//                   the instance but the submit message.
 //   the beat        a beat newly kept from another peer on `<topic>-live`
 //                   starts a reconcile from it — at most one per (handle,
 //                   topic, peer) at a time, and a new one only when that
@@ -77,12 +78,10 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { MerklePath } from "@bsv/sdk";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import * as Digest from "multiformats/hashes/digest";
-import { RECEIVE_PROTOCOL, type InboundAnswer } from "./p2p.ts";
+import type { InboundAnswer } from "./p2p.ts";
 import type { LiveBeat } from "./liveness.ts";
 
 export const SYNC_PROTOCOL = "/skein/overlay/sync/1.0.0";
-/** The overlay's receive row (skein-overlay etc/app.json): the host's own entry, one Atomic BEEF per frame; never served to peers. */
-export const BEEF_PROTOCOL = RECEIVE_PROTOCOL;
 const LIVE = "-live";
 
 export interface SyncOptions {
@@ -95,10 +94,11 @@ export interface SyncOptions {
    */
   local(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown>;
   /**
-   * One BEEF into the overlay's receive row, as from `peer` (its peer ID), naming the ONE topic it was
-   * fetched for (skein 0.6.0, D4: the receive row judges only under it — the TaggedBEEF rule).
+   * One fetched BEEF submitted to `handle`'s overlay `app` (skein 0.6.1, D10): the submit message
+   * `{fn: "submit", args: {beef, topics: [topic]}}` in `<app>/submit`, signed as the instance itself,
+   * naming the ONE topic it was fetched for (the TaggedBEEF rule). → the front door's verdict.
    */
-  deliver(handle: string, peer: string, beef: Uint8Array, topic: string): Promise<InboundAnswer>;
+  submit(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer>;
   /** Whether `handle`'s chain state holds `txid` (the chain app's `txs`). */
   holdsTx(handle: string, txid: string): Promise<boolean>;
   /**
@@ -457,11 +457,13 @@ export class OverlaySync {
     return undefined;
   }
 
-  /** One transaction asked of `peer` and handed to the receive row as from it, for `topic`. → whether it was accepted. */
+  /** One transaction asked of `peer` and submitted to the topic's overlay for `topic` (D10). → whether it was accepted. */
   private async fetchInto(handle: string, peer: string, topic: string, txid: string): Promise<boolean> {
+    const app = this.o.overlayOf(handle, `${topic}${LIVE}`);
+    if (!app) { this.say(handle, `${topic}: ${txid}: no overlay beats on ${topic}${LIVE} here`); return false; }
     const a = await this.ask(handle, peer, { kind: "tx", topic, txid });
     if (!(a.beef instanceof Uint8Array)) return false;
-    const r = await this.o.deliver(handle, peer, a.beef, topic);
+    const r = await this.o.submit(handle, app, a.beef, topic);
     if (r.verdict !== "accept") this.say(handle, `${topic}: ${txid} from ${peer}: ${r.verdict}${r.reason ? ` (${r.reason})` : ""}`);
     return r.verdict === "accept";
   }

@@ -54,7 +54,7 @@ import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.0";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.1";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0";
 const TOPIC = "tm_ann";
@@ -234,7 +234,7 @@ try {
   mf.config.overlay.validator = { every: EVERY };
   mf.config.overlay.gossip = { tm_demo: false };
   writeFileSync(join(overlayDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.25.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}; beats every ${EVERY} ms`);
+  check(mf.version === "0.25.1", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}; beats every ${EVERY} ms`);
 
   for (const h of names) await bring(h);
   await until("a meshed with b and c on tm_ann", () => (subscribers("a", TOPIC) >= 2 && subscribers("b", TOPIC) > 0 && subscribers("c", TOPIC) > 0) || undefined);

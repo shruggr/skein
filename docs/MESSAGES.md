@@ -1513,15 +1513,15 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     each node announces its own admission, so bytes spread one hop at a
     time): unless the instance holds the txid (the engine's `holds`, by
     kernel call) or a fetch of it is under way, it asks the announcing peer
-    (`tx`) and hands the BEEF to the overlay's receive row
-    `/skein/overlay/beef/1.0.0` as a frame from that peer. Per (instance,
+    (`tx`) and submits the BEEF by the one submit path (skein 0.6.1, D10):
+    the overlay's submit message `{fn: "submit", args: {beef, topics:
+    [<the topic it was fetched for>]}}` in `<app>/submit` (the app beating
+    on `<topic>-live`), signed as the instance itself (Router.signMessage)
+    and appended as any message. Per (instance,
     txid) it keeps the set of peers whose admit named it: on a failure (no
     answer, no `beef`, the delivery not taken) the next; the set exhausted,
     it waits for a new admit to add a peer. A delivery taken drops the
     entry. Nothing of a peer's admit is logged in the instance.
-  - **The receive row** `/skein/overlay/beef/1.0.0` is the host's own
-    entry: no node handles it inbound, whatever rows an instance declares
-    (p2p.ts `RECEIVE_PROTOCOL`); a peer cannot open it.
   - **Catch-up.** A beat the liveness tool newly keeps from another peer
     on `<topic>-live` starts a reconcile with that peer — at most one per
     (instance, topic, peer) at a time, and a new one only when that peer's

@@ -76,7 +76,7 @@ import { ownerCli, signedSubmitter } from "../../src/testapps.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.0";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.1";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0";
 const here = dirname(fileURLToPath(import.meta.url));

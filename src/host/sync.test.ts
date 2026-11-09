@@ -5,7 +5,7 @@
 // (`engineSync`: the wire as skein-overlay's fn `sync` answers it, #154 — the
 // host answers nothing). Checked: a beat whose tip anchor is ours starts
 // nothing; one that is not runs the locator and pulls only what is lacking, in
-// height order, into the receive row as from the peer; a list whose BUMP does
+// height order, submitted to the overlay (D10: the submit message); a list whose BUMP does
 // not reach our header drops the peer before anything is fetched; an admit
 // fetches from the announcer unless held, a failure moves to the next
 // announcing peer and stops when none is left (no timer); the tail reconcile;
@@ -155,6 +155,8 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
   const asked: Record<string, string[]> = {};
   const byPeer = (p: string) => Object.keys(overlays).find((h) => peer(h) === p)!;
   const beats: Record<string, LiveBeat[]> = {};
+  // D10: a submission names no peer — the peer whose `tx` answer carried the BEEF, kept from the request.
+  const servedBy: Record<string, Record<string, string>> = {};
   for (const h of Object.keys(overlays)) {
     const ov = overlays[h]!;
     syncs[h] = new OverlaySync({
@@ -162,10 +164,11 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
       local: async (_h, _app, fn, q) => ov.read(`/${fn}`, q),
       holdsTx: async (_h, t) => ov.holdsTx(t),
       proof: async (_h, t, path) => ov.proven(t, path),
-      deliver: async (_h, from, beef, topic): Promise<InboundAnswer> => {
+      submit: async (_h, app, beef, topic): Promise<InboundAnswer> => {
         assert.equal(topic, "tm_t", "the one topic it was fetched for (D4)");
+        assert.equal(app, "overlay", "the topic's overlay, from its beats (D10)");
         const txid = Buffer.from(beef).toString("utf8");
-        ov.delivered.push({ peer: from, txid });
+        ov.delivered.push({ peer: servedBy[h]?.[txid] ?? "", txid });
         const height = Number(Object.keys(BLOCKS).find((k) => BLOCKS[Number(k)]!.includes(txid)) ?? 0);
         if (height) ov.have.push({ height, txid }); else if (!ov.tail.includes(txid)) ov.tail.push(txid);
         return { verdict: "accept" };
@@ -173,7 +176,9 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
       header: async (_h, height) => BLOCKS[height] ? { hash: hashOf(height), root: rootOf(height) } : undefined,
       request: async (_h, p, body) => {
         const other = byPeer(p);
-        (asked[h] ??= []).push(`${other} ${String((dagCbor.decode(body) as { kind?: unknown }).kind)}`);
+        const req = dagCbor.decode(body) as { kind?: unknown; txid?: unknown };
+        (asked[h] ??= []).push(`${other} ${String(req.kind)}`);
+        if (req.kind === "tx" && typeof req.txid === "string") (servedBy[h] ??= {})[req.txid] = p;
         const answer = engineSync(overlays[other]!, body);
         if (o.lie === other) { // a list whose BUMP reaches another root
           const a = dagCbor.decode(answer) as { kind: string; blocks?: Array<{ bump: string; txids: string[] }> };
@@ -467,9 +472,9 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
     local: async (_h, _app, fn, q) => c.read(`/${fn}`, q),
     holdsTx: async (_h, t) => c.holdsTx(t),
     proof: async (_h, t, path) => c.proven(t, path),
-    deliver: async (_h, from, beef): Promise<InboundAnswer> => {
+    submit: async (_h, _app, beef): Promise<InboundAnswer> => {
       const txid = Buffer.from(beef).toString("utf8");
-      c.delivered.push({ peer: from, txid });
+      c.delivered.push({ peer: peer("alpha"), txid }); // the one peer it asks
       const height = Number(Object.keys(BLOCKS).find((k) => BLOCKS[Number(k)]!.includes(txid)) ?? 0);
       if (height) c.have.push({ height, txid });
       return { verdict: "accept" };

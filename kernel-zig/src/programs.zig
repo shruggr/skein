@@ -24,7 +24,7 @@ pub const modules = [_]Module{
     // The skein's own mail in and out (issues #33, #40): Zig, wasm32-wasi (programs/mail).
     .{ .name = "mail", .cid = "bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreiga4f6yxmyfxqmyanyko25vkhgxupbgui4qkycnco4mygiiigh4fq" },
+    .{ .name = "frontdoor", .cid = "bafkreidsab4vl7wecca56g5idca6nnk7ikd6o6rptbbb5rmkunm6qicxni" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreifaksuagkwqclhbja7nkuwnxmlkfpv2lsqr2zvbod76qvia2mfdmq" },
 };

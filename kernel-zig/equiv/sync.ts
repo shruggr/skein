@@ -12,8 +12,8 @@
 //     in each; a back (a new router on the same store, the headers fed): a
 //     hears b's beat, runs the locator exchange on /skein/overlay/sync/1.0.0,
 //     pulls b's admitted lists above the agreed height, checks each block's
-//     BUMP against its headers, fetches each missing transaction and hands it
-//     to its overlay's receive row as from b — until the anchors are equal;
+//     BUMP against its headers, fetches each missing transaction and submits it
+//     as the overlay's submit message from a itself (0.6.1) — until the anchors are equal;
 //   - a third host c from genesis: an empty locator, the whole range, equal
 //     anchors;
 //   - a BEEF that does not stand alone (#121: "BEEF MUST be proven ALWAYS"):
@@ -54,7 +54,7 @@ import { txCid } from "../../src/host/feeds.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.0";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.1";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -243,7 +243,7 @@ try {
   mf.config.overlay.validator = { every: 1000 };
   mf.config.overlay.gossip = { tm_demo: false };
   writeFileSync(join(overlayDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.25.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
+  check(mf.version === "0.25.1", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
 
   await bring("a");
   await bring("b");
@@ -282,7 +282,7 @@ try {
   await feedHeaders("a", 3);
   const caught = await until("a catches up to b", () => sameTip("a", "b"), 90_000).catch(() => undefined);
   check(caught?.tip === 5, `a caught up from b: equal anchors at tip ${caught?.tip} (${caught?.anchor.slice(0, 16)}…)`);
-  for (const t of later) check(await admittedIn(storeOf("a"), t.id("hex")), `a admitted ${t.id("hex").slice(0, 8)}… (mined at ${t.merklePath!.blockHeight}) through its receive row`);
+  for (const t of later) check(await admittedIn(storeOf("a"), t.id("hex")), `a admitted ${t.id("hex").slice(0, 8)}… (mined at ${t.merklePath!.blockHeight}) through its submit message`);
 
   // ------------------------------------------------ a third host from genesis
   await bring("c");

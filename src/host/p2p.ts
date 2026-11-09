@@ -168,11 +168,6 @@ export interface InboundCall {
   seqno?: Uint8Array;
   signature?: Uint8Array;
   body: Uint8Array;
-  /**
-   * skein 0.6.0 (D4): a frame the host itself writes into its overlay's receive row names the ONE
-   * topic it was fetched for (the TaggedBEEF rule): on the frame record as `topic`.
-   */
-  overlayTopic?: string;
 }
 
 /** The front door's answer: the verdict for GossipSub; for a stream frame, what to write back and whether to close. */
@@ -189,16 +184,8 @@ export type Frame = { body: Uint8Array } | { closed: true; error?: string };
 /** The stream protocol a signed message travels on to an instance (#70). */
 export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
 
-/**
- * The overlay's receive row (skein-overlay etc/app.json; the settled sync design, David 2026-10-30):
- * the host's OWN entry for the BEEFs it fetched (sync.ts `deliver` → Router.p2pInbound), never served
- * to peers ("not a good door to have": a node takes BEEFs only from paths it chose). Whatever rows an
- * instance declares, no node handles it inbound.
- */
-export const RECEIVE_PROTOCOL = "/skein/overlay/beef/1.0.0";
-
-/** Whether a node handles `protocol` inbound for its handles' rows: not the receive row, not the host's own. */
-const inboundRow = (protocol: string, host: Record<string, unknown>) => protocol !== MESSAGE_PROTOCOL && protocol !== RECEIVE_PROTOCOL && !(protocol in host);
+/** Whether a node handles `protocol` inbound for its handles' rows: not the host's own. */
+const inboundRow = (protocol: string, host: Record<string, unknown>) => protocol !== MESSAGE_PROTOCOL && !(protocol in host);
 
 export interface P2POptions {
   host: P2PHostConfig;
@@ -342,7 +329,7 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * genesis topic row alone subscribes nothing, as a route alone did not — and
  * every stream protocol a `libp2p` row names (`/<protocol>`), whatever
  * installed it, the genesis included (#155: an image-born instance serves its
- * sync row; the overlay's receive row stays unserved, P2PHost), plus the
+ * sync row), plus the
  * topics the apps subscribed (#119, `subscribed`).
  * `beacons` (#126): an app's beacon (or its liveness, #138: P2PHost.liveness
  * subscribes those topics itself) needs the node, and adds no topic.

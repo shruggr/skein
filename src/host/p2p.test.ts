@@ -15,7 +15,7 @@ import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } f
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { anyPort, bootstrapDials, OVERLAY_BOOTSTRAP, overlayBootstrap, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, RECEIVE_PROTOCOL, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { anyPort, bootstrapDials, OVERLAY_BOOTSTRAP, overlayBootstrap, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -277,28 +277,6 @@ test("p2p: beacons publish on the timer only (the settled sync design, David 202
   await until(() => sent.length === n + 1, "the new interval's first tick", 3000);
   assert.equal(sent.at(-1), "v5");
   a.beacons("alpha", []);
-});
-
-test("p2p: the overlay's receive row /skein/overlay/beef/1.0.0 is never handled inbound, whatever the rows declare (the settled sync design: the host's own entry)", async (t) => {
-  const o = new Signer(PrivateKey.fromHex("48".repeat(32)));
-  const calls: InboundCall[] = [];
-  const mk = (bootstrap: string[] = []) => new P2PHost({
-    host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht: "off", relays: [], mdns: false },
-    keyOf: (h) => o.peerKey(h), inbound: async (_h, call) => { calls.push(call); return { verdict: "accept" }; }, discoveryMs: 300,
-  });
-  const a = mk();
-  t.after(() => a.stop());
-  await a.declare("alpha", { topics: [], protocols: [] });
-  const b = mk(a.addrs("alpha"));
-  t.after(() => b.stop());
-  await b.declare("beta", { topics: [], protocols: [RECEIVE_PROTOCOL, "/p/1"] });
-  assert.ok(!b.handledProtocols("beta").includes(RECEIVE_PROTOCOL), "not on the node's registry");
-  assert.ok(b.handledProtocols("beta").includes("/p/1"));
-  await b.declare("beta", { topics: ["one"], protocols: [RECEIVE_PROTOCOL, "/p/1", "/p/2"] });
-  assert.ok(!b.handledProtocols("beta").includes(RECEIVE_PROTOCOL), "nor after a declare again");
-  await until(() => a.node("alpha")!.getConnections().length > 0, "beta connects to alpha");
-  await assert.rejects(a.dial("alpha", b.peerId("beta"), RECEIVE_PROTOCOL, () => {}), "a peer cannot open it");
-  assert.equal(calls.length, 0);
 });
 
 test("p2p: the default listeners — TCP on every interface, IPv4 and IPv6, on the one fixed port; WebSocket on loopback", () => {

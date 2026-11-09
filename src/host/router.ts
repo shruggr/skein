@@ -136,7 +136,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
 import { chainHeader, chainHolds, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
-import { admitOf, BEEF_PROTOCOL, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
+import { admitOf, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
@@ -145,7 +145,7 @@ import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface
 import { foldLiveness, LIVENESS_MAX_MS, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsPath, eventsQuery, sseMessage, type Delivered, type EventStore } from "./events.ts";
 import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
-import { peerIdFromMultihash, peerIdFromString } from "@libp2p/peer-id";
+import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { Deliverer } from "./deliver.ts";
@@ -571,7 +571,8 @@ export class Router {
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
         local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
         ownBeat: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.body,
-        deliver: (h, peer, beef, topic) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef, overlayTopic: topic }),
+        // skein 0.6.1 (D10): a fetched BEEF goes in by the one submit path — the submit message to the instance itself.
+        submit: (h, app, beef, topic) => this.submitAsSelf(h, app, beef, topic),
         // skein 0.6.0 (D3): the pull's proof for a held transaction, as the broadcaster's proof event (arc.ts `proofOf`).
         holdsTx: async (h, txid) => {
           const row = this.o.db.get(h);
@@ -879,6 +880,26 @@ export class Router {
     return entry;
   }
 
+  /**
+   * skein 0.6.1 (D10, David 2026-11-09): a BEEF the host fetched for `topic` (sync.ts), submitted by the
+   * one submit path — the overlay's submit message `{fn: "submit", args: {beef, topics: [topic]}}` in
+   * box `<app>/submit`, signed as the instance itself (signMessage) and appended as any message
+   * (messageLocal: the front door checks the signature, the route's `kernel.beef` the BEEF). → the
+   * front door's verdict; turned away at the door, or not accepted, → reject (a bad BEEF) or ignore.
+   */
+  private async submitAsSelf(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer> {
+    const id = this.o.db.get(handle)?.identity;
+    if (!id) return { verdict: "ignore", reason: `no instance ${handle} with an identity here` };
+    const { message, body } = await this.signMessage(handle, { recipient: id, box: `${app}/submit`, body: dagCbor.encode({ fn: "submit", args: { beef, topics: [topic] } }) });
+    try {
+      await this.messageLocal(handle, dagCbor.encode(message), body);
+      return { verdict: "accept" };
+    } catch (e) {
+      if (e instanceof DoorAnswered) return { verdict: e.answer.status < 500 ? "reject" : "ignore", reason: e.answer.reason ?? "turned away at the door" };
+      return { verdict: "ignore", reason: (e as Error).message };
+    }
+  }
+
   /** Sign `data` with `handle`'s signer: [2, "metanet handles envelope"] / `send` / anyone — an intention request's signature (providers.ts), a beacon's beat (p2p.ts beaconFrame). */
   private async signAs(handle: string, data: Uint8Array): Promise<Uint8Array> {
     const row = this.o.db.get(handle);
@@ -945,7 +966,7 @@ export class Router {
     }
     const record = call.topic !== undefined
       ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
-      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body, ...(call.overlayTopic !== undefined ? { topic: call.overlayTopic } : {}) };
+      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
     let entry: CID;
     try {
       entry = await appendRequest(l.kernel, "libp2p", record, this.now());
@@ -1502,13 +1523,9 @@ export class Router {
       // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
       if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
       // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
-      // skein-amm#4: `beef` — an Atomic BEEF (the token's deploy) handed into the new instance once it is up.
-      if (b.beef != null && !(b.beef instanceof Uint8Array)) throw new Error("beef: an Atomic BEEF (bytes)");
       const topics = topicsArg(b.topics);
       const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
-      const answer: Record<string, unknown> = { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
-      if (b.beef instanceof Uint8Array) answer.delivered = await this.deliverBeef(c.handle, b.beef);
-      return answer;
+      return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
     }
     if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
     const row = this.o.db.get(handle);
@@ -1533,31 +1550,6 @@ export class Router {
     this.events.drop(handle);
     this.say("router", `${handle}: stopped by the instance manager`);
     return { handle, stopped: true };
-  }
-
-  /**
-   * A create's `beef` (skein-amm#4): the Atomic BEEF handed into the new instance's receive row
-   * (/skein/overlay/beef/1.0.0) exactly as a catch-up's fetched BEEF is (sync.ts `deliver`), from the
-   * host's own peer, and the answer → {verdict, reason?}. No topic is named here: the instance's engine
-   * judges it under the topics its config declares. Turned away at the door (unmined, a bad BUMP): reported,
-   * not retried; the instance stays created.
-   */
-  private async deliverBeef(handle: string, beef: Uint8Array): Promise<{ verdict: string; reason?: string }> {
-    let from = new Uint8Array();
-    try { if (this.p2p) from = peerIdFromString(this.p2p.peerId(handle)).toMultihash().bytes; } catch { /* no peer: the record names none */ }
-    // The door checks the BUMPs against chain/state: the host chain's event (#156, sent at the start, not awaited there) taken first.
-    await this.chainBirth(handle).catch(() => {});
-    const l = this.loaded.get(handle);
-    if (l) { await this.queues.get(handle); await l.kernel.idle().catch(() => {}); }
-    try {
-      const r = await this.p2pInbound(handle, { transport: "libp2p", protocol: BEEF_PROTOCOL, from, body: beef });
-      this.say("router", `${handle}: the create's BEEF delivered: ${r.verdict}${r.reason ? ` (${r.reason})` : ""}`);
-      return { verdict: r.verdict, ...(r.reason ? { reason: r.reason } : {}) };
-    } catch (e) {
-      const reason = (e as Error).message;
-      this.say("router", `${handle}: the create's BEEF not delivered: ${reason}`);
-      return { verdict: "ignore", reason };
-    }
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */

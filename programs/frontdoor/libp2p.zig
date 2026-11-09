@@ -116,9 +116,6 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     try h.put("transport", cbor.string("libp2p"));
     if (topic) |t| try h.put("topic", cbor.string(t));
     if (protocol) |p| try h.put("protocol", cbor.string(p));
-    // skein 0.6.0 (skein-overlay 0.25.0, the TaggedBEEF rule): a frame the host itself wrote may name
-    // the one overlay topic it is for (the receive row: the topic the host fetched the BEEF for).
-    if (protocol != null) if (Value.str(req.get("topic"))) |t| try h.put("topic", cbor.string(t));
     try h.put("from", .{ .bytes = from });
     try h.put("key", .{ .bytes = key });
     if (topic != null) {
