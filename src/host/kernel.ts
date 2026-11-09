@@ -23,7 +23,7 @@
 // `boxes`, `idle`. Log lines (stderr) go to `log`.
 //
 // Two ways to run kernels (#158): `Kernel` is one `skein-kernel serve`
-// process per instance (a SQLite file or an LMDB set); `KernelHost` is the one
+// process per instance (a SQLite file); `KernelHost` is the one
 // `skein-kernel host` process of a host whose instances are sets of a RocksDB
 // database (SKEIN_STORE_ROCKSDB), every frame tagged with the instance's
 // handle `h`, and `HostedKernel` its per-instance view with the same surface
@@ -32,7 +32,7 @@
 // kernel as a wasm module the host LOADS, one per active instance on a worker
 // thread of this process, over a set of the host's one SQLite database
 // (`sqlite:<path>`); what the npm package runs. These two are the native host,
-// kept for file, LMDB and RocksDB stores.
+// kept for file and RocksDB stores.
 
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
-import { parseLmdbSpec, parseRocksSpec } from "../runtime/index-store.ts";
+import { parseRocksSpec, refuseLmdb } from "../runtime/index-store.ts";
 import type { Entry, EntryBody } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
@@ -67,7 +67,7 @@ export type HostChainTip = { root: CID; height: number; hash: string; added?: nu
 export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
 export interface KernelOptions {
-  /** The store file, or a set of the host's LMDB environment, `lmdb:<env dir>#<handle>` (#96: the kernel gets SKEIN_STORE). */
+  /** The store file (the kernel gets SKEIN_DB). */
   db: string;
   handle: string;
   domain: string;
@@ -251,11 +251,10 @@ export class Kernel extends KernelSurface {
     this.o = o;
     if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
     if (parseRocksSpec(o.db)) throw new Error(`kernel ${o.handle}: a RocksDB set (${o.db}) runs in the host's one kernel process (KernelHost), not in serve`);
-    // #96: an LMDB set's kernel gets SKEIN_STORE (its set is its handle); a file's gets SKEIN_DB and never a SKEIN_STORE.
+    refuseLmdb(o.db);
+    // A file's kernel gets SKEIN_DB and never a SKEIN_STORE (which serve refuses: LMDB is no longer supported).
     const env: Record<string, string | undefined> = { ...process.env, ...o.env, SKEIN_HANDLE: `${o.handle}@${o.domain}` };
-    const lmdb = parseLmdbSpec(o.db);
-    if (lmdb && lmdb.set !== o.handle) throw new Error(`kernel ${o.handle}: its LMDB set is its handle, not ${lmdb.set}`);
-    if (lmdb) { env.SKEIN_STORE = lmdb.dir; delete env.SKEIN_DB; } else { env.SKEIN_DB = o.db; delete env.SKEIN_STORE; }
+    env.SKEIN_DB = o.db; delete env.SKEIN_STORE;
     this.proc = spawn(o.command ?? KERNEL_BIN, ["serve"], {
       env,
       stdio: ["pipe", "pipe", "pipe"],

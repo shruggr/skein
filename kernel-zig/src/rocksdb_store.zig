@@ -1,7 +1,6 @@
 // The store in one RocksDB database per host (#158, #96): the one-process
-// kernel's backend (`skein-kernel host`, host.zig). The same shape as the
-// LMDB environment (lmdb_store.zig, #133) — one block table, a member set per
-// instance as the read gate, `host/chain` the one shared set — in three
+// kernel's backend (`skein-kernel host`, host.zig). One block table, a member
+// set per instance as the read gate, `host/chain` the one shared set (#133) — in three
 // column families of one database ($SKEIN_HOME/store-rocksdb/ by default):
 //
 //   blocks    cid → bytes                 every block once, content-addressed (never overwritten)
@@ -490,7 +489,7 @@ pub const RocksStore = struct {
         if (own) try commitFn(s);
     }
 
-    /// #130: the bytes of every block the set holds (its share; see lmdb_store.zig).
+    /// #130: the bytes of every block the set holds (its share).
     fn sizeFn(ctx: *anyopaque) anyerror!u64 {
         return self(ctx).sizeNow();
     }

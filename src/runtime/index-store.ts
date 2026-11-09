@@ -7,12 +7,11 @@
 // - `openStoreFile(path)`: the right reader for a store file — this one when
 //   the file has the state pointer, else sqlite.ts's (a store of blocks the
 //   tools write, or a file from before #30). The explorer, skein-dev and
-//   skein-host open files through it. A store may instead be a set of the
-//   host's LMDB environment (#96, #133): `lmdb:<env dir>#<set>` (`storeSpec`
-//   makes it from host.db's `store` column, `lmdb:<env dir>`, and the row's
-//   handle) — read directly, read only, by src/host/stores.ts (lmdb-js: the
-//   disk is the host's), over `indexStoreOver` here, with the kernel's member
-//   gate (kernel-zig/src/lmdb_store.zig).
+//   skein-host open files through it. A store may instead be a set of a
+//   host's shared store (`storeSpec` makes its spec from host.db's `store`
+//   column and the row's handle): read by src/host/stores.ts, over
+//   `indexStoreOver` here, with the kernel's member gate. LMDB
+//   (`lmdb:<env dir>#<set>`) is no longer supported: `refuseLmdb`.
 // - `indexStore(db)`: the `Store` interface over the maps, read only (blocks
 //   may be added: they are a key→bytes map). The pointer is read on every
 //   call, so a reader beside a live kernel follows it.
@@ -430,10 +429,11 @@ export function hasStatePointer(path: string): boolean {
 /**
  * A store file, whichever format it is in: the new format (#30) through the
  * index, read only (blocks may be added unless `readOnly`); any other
- * through sqlite.ts. (An LMDB set, `lmdb:<env dir>#<set>`: src/host/stores.ts.)
+ * through sqlite.ts. (A set, RocksDB or SQLite: src/host/stores.ts.)
  */
 export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
-  if (isSet(path)) throw new Error(`${path}: a set (LMDB, RocksDB) is opened by src/host/stores.ts (openStoreFile there)`);
+  refuseLmdb(path);
+  if (isSet(path)) throw new Error(`${path}: a set (RocksDB, SQLite) is opened by src/host/stores.ts (openStoreFile there)`);
   let fresh = true;
   try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it, and any other open failure throws there with its reason */ }
   if (fresh) return openStore(path, o);
@@ -670,15 +670,15 @@ export function indexStoreOver(src: Blocks): IndexStore {
   return store;
 }
 
-// ---------------------------------------------------------------- the LMDB environment (#96, #133)
+// ---------------------------------------------------------------- a host's shared store: its sets (#133, #158)
 
-/** host.db's `store` column for a set of the host's LMDB environment: `lmdb:<env dir>` (the set: the row's handle). */
-export const LMDB = "lmdb:";
-/** The chain's member set (#133): readable by every set (kernel-zig/src/lmdb_store.zig CHAIN_SET). */
+/** The chain's member set (#133): readable by every set (kernel-zig/src/rocksdb_store.zig CHAIN_SET; store-sqlite.ts). */
 export const CHAIN_SET = "host/chain";
 
-/** Whether host.db's `store` column names a set of an LMDB environment. */
-export function isLmdb(store: string): boolean { return store.startsWith(LMDB); }
+/** A store spec or host.db `store` value of the removed LMDB backend (`lmdb:…`): refused with a plain error. */
+export function refuseLmdb(store: string): void {
+  if (store.startsWith("lmdb:")) throw new Error(`${store}: LMDB is no longer supported`);
+}
 
 /** host.db's `store` column for a set of the one-process kernel's RocksDB database (#158): `rocksdb:<db dir>` (the set: the row's handle). */
 export const ROCKSDB = "rocksdb:";
@@ -696,10 +696,10 @@ export const SQLITE = "sqlite:";
 /** Whether host.db's `store` column names a set of the host's SQLite database. */
 export function isSqliteSet(store: string): boolean { return store.startsWith(SQLITE); }
 
-/** Whether a store is a set of a host's shared store (LMDB #96, RocksDB #158, SQLite 2026-10-31), not a file of its own. */
-export function isSet(store: string): boolean { return isLmdb(store) || isRocks(store) || isSqliteSet(store); }
+/** Whether a store is a set of a host's shared store (RocksDB #158, SQLite 2026-10-31), not a file of its own. */
+export function isSet(store: string): boolean { return isRocks(store) || isSqliteSet(store); }
 
-/** A row's store as the kernel's tools and `openStoreFile` name it: its path, `lmdb:<env dir>#<handle>`, `rocksdb:<db dir>#<handle>` or `sqlite:<db path>#<handle>`. */
+/** A row's store as the kernel's tools and `openStoreFile` name it: its path, `rocksdb:<db dir>#<handle>` or `sqlite:<db path>#<handle>`. */
 export function storeSpec(row: { store: string; handle: string }): string {
   return isSet(row.store) ? `${row.store}#${row.handle}` : row.store;
 }
@@ -720,15 +720,6 @@ export function parseSqliteSpec(spec: string): { db: string; set: string } | und
   const i = rest.lastIndexOf("#");
   if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: a SQLite set is sqlite:<db path>#<set>`);
   return { db: rest.slice(0, i), set: rest.slice(i + 1) };
-}
-
-/** `lmdb:<env dir>#<set>` → its parts (kernel-zig/src/any_store.zig parseSpec); undefined for a path. */
-export function parseLmdbSpec(spec: string): { dir: string; set: string } | undefined {
-  if (!isLmdb(spec)) return undefined;
-  const rest = spec.slice(LMDB.length);
-  const i = rest.lastIndexOf("#");
-  if (i <= 0 || i === rest.length - 1) throw new Error(`${spec}: an LMDB store is lmdb:<env dir>#<set>`);
-  return { dir: rest.slice(0, i), set: rest.slice(i + 1) };
 }
 
 export { readStrKey, cidLen };

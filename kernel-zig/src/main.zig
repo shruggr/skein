@@ -6,9 +6,9 @@
 //   skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (host-go's format) and print results as JSON
 //   skein-kernel dump <store.db>               the derived state read through the index, as JSON (dump.zig)
 //   skein-kernel fuel <store.db> [--since n]   fuel per thread and in total, from the updates (fuel.zig, issue #5)
-//   skein-kernel migrate --from <store> --into <env dir | rocksdb:<db dir>> --set <handle>   a store into a set of an LMDB environment or a RocksDB database (migrate.zig, #96, #158)
-// A store is a SQLite file's path, lmdb:<env dir>#<set> or rocksdb:<db dir>#<set> (any_store.zig, #96, #158);
-// `serve` takes SKEIN_STORE; `host` opens SKEIN_STORE_ROCKSDB (default $SKEIN_HOME/store-rocksdb).
+//   skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>   a store into a set of a RocksDB database (migrate.zig, #158)
+// A store is a SQLite file's path or rocksdb:<db dir>#<set> (any_store.zig, #158);
+// `serve` takes SKEIN_DB; `host` opens SKEIN_STORE_ROCKSDB (default $SKEIN_HOME/store-rocksdb).
 const std = @import("std");
 const shellcmd = @import("cmd_shell.zig");
 const replay = @import("replay.zig");
@@ -53,8 +53,8 @@ fn usage() void {
         \\  skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (the shell app's shell, or <program>), print results
         \\  skein-kernel dump <store.db>               the derived state (the index) as JSON
         \\  skein-kernel fuel <store.db> [--since n]   fuel per thread and in total (steps from log entry n on)
-        \\  skein-kernel migrate --from <store> --into <env dir | rocksdb:<db dir>> --set <handle>   a store into a set of an LMDB environment or a RocksDB database
-        \\a store is a SQLite file's path, lmdb:<env dir>#<set> or rocksdb:<db dir>#<set>; serve takes SKEIN_STORE=<env dir> (the set: its handle)
+        \\  skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>   a store into a set of a RocksDB database
+        \\a store is a SQLite file's path or rocksdb:<db dir>#<set>; serve takes SKEIN_DB=<file>
         \\
     , .{});
     std.process.exit(2);

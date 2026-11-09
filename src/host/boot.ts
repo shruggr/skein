@@ -399,7 +399,7 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
   const { Kernel, KernelHost } = await import("./kernel.ts");
   const { mkdirSync } = await import("node:fs");
   const { dirname } = await import("node:path");
-  const { parseRocksSpec } = await import("../runtime/index-store.ts");
+  const { parseRocksSpec, refuseLmdb } = await import("../runtime/index-store.ts");
   // #158: a RocksDB set boots in the host's one kernel process (this node process's, shared with its router, or one of its own).
   const rocks = parseRocksSpec(o.db);
   // The settled split: a SQLite set boots on the wasm kernel (this node process's machine for it).
@@ -421,7 +421,8 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
       try { return await boot(k, src, c, time); } finally { await k.stop(); }
     } finally { await host.release(); }
   }
-  if (!o.db.startsWith("lmdb:")) mkdirSync(dirname(o.db), { recursive: true }); // an LMDB set (#96): the kernel makes its environment
+  refuseLmdb(o.db);
+  mkdirSync(dirname(o.db), { recursive: true });
   const k = new Kernel({ db: o.db, handle: o.handle, domain: o.domain, command: o.command, env: o.env, log: o.log });
   try {
     return await boot(k, src, c, time);

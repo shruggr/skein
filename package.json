@@ -73,9 +73,6 @@
     "images",
     "README.md"
   ],
-  "optionalDependencies": {
-    "lmdb": "3.5.7"
-  },
   "engines": {
     "node": ">=24"
   }

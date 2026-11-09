@@ -29,7 +29,6 @@ test {
     _ = @import("authfetch.zig");
     _ = @import("billing.zig");
     _ = @import("grants.zig");
-    _ = @import("lmdb_store.zig");
     _ = @import("rocksdb_store.zig");
     _ = @import("host.zig");
     _ = @import("host_chain.zig");

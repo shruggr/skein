@@ -6,11 +6,6 @@
 // ~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api. The static
 // libwasmtime.a is linked, so the binary needs nothing of it at run time.
 // SQLite: the system libsqlite3 (JSON1 is built in since 3.38).
-// LMDB (#96, the shared host store, lmdb_store.zig): vendored, compiled in —
-// OpenLDAP's liblmdb at the tag LMDB_0.9.36 (commit 028f61b6), vendor/lmdb/
-// (mdb.c, midl.c, lmdb.h, midl.h; its LICENSE and COPYRIGHT: the OpenLDAP
-// Public License 2.8). No system dependency, so the -Dcpu=baseline build for the
-// rack needs nothing new there. Not in the browser build.
 // RocksDB (#158, the one-process kernel's store, rocksdb_store.zig): the system
 // librocksdb through its C API (rocksdb/c.h), linked as sqlite3 is (jr: 11.1.1;
 // the rack: 10.1.3 — the rack's binary is built on the rack, README). Not in
@@ -120,9 +115,6 @@ fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {
     m.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libwasmtime.a", .{wt}) });
     m.linkSystemLibrary("sqlite3", .{});
     m.linkSystemLibrary("rocksdb", .{});
-    m.addIncludePath(b.path("vendor/lmdb"));
-    // UBSan off for LMDB's C (Zig turns it on in Debug and ReleaseSafe): its page arithmetic is its own.
-    m.addCSourceFiles(.{ .root = b.path("vendor/lmdb"), .files = &.{ "mdb.c", "midl.c" }, .flags = &.{ "-pthread", "-fno-sanitize=undefined", "-Wno-unused-parameter" } });
     m.linkSystemLibrary("pthread", .{});
     m.linkSystemLibrary("dl", .{});
     m.linkSystemLibrary("m", .{});

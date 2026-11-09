@@ -2,12 +2,12 @@
 // keeps once for all its instances, kept by the kernel process — `skein-kernel
 // host` writes it into the `host/chain` set of its RocksDB database (every
 // instance reads it through the chain exception, rocksdb_store.zig); `serve`
-// writes it into its one instance's own store (SQLite, or its LMDB set). The
+// writes it into its one instance's own store (SQLite). The
 // code is the SDK's `chain` module (skein-sdk `chain.host`: `Chain.add`, the
 // heavier-branch rule, `image.loadMaps`), used natively here.
 //
 // The record, under the pointer `host/chain` (RocksDB: in the set
-// `host/chain`; SQLite: the pointer row `host/chain`; LMDB serve: in its set):
+// `host/chain`; SQLite: the pointer row `host/chain`):
 //
 //   {kind: "host-chain", network, maps: {headers, heights}, tip: {height, hash}}
 //

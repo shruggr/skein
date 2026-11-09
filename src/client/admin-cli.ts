@@ -78,7 +78,7 @@ async function sessionOf(v: Where, origin: string | undefined, env: AdminEnv): P
   if (given !== 1) throw new Error("where is the instance: --instance <handle>, its origin <url>, or --store <runtime.db> (one)");
   if (v.store !== undefined) {
     const { openStoreFile, storeExists } = await import("../host/stores.ts");
-    if (!storeExists(v.store)) throw new Error(`--store ${v.store}: no such file (or LMDB set, lmdb:<env dir>#<set>)`);
+    if (!storeExists(v.store)) throw new Error(`--store ${v.store}: no such file (or set)`);
     const { instanceView } = await import("../host/install.ts");
     const s = openStoreFile(v.store, { readOnly: true });
     let view: InstanceView;

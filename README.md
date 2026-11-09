@@ -166,7 +166,7 @@ instance's store:
 | store (host.db `store`) | the machine | who uses it |
 |---|---|---|
 | `sqlite:<path>` — a set of the host's ONE SQLite database (`SKEIN_STORE_SQLITE`, default `$SKEIN_HOME/store.sqlite` when no native kernel is installed) | the **wasm kernel** (`kernel-zig/zig-out/web/skein-kernel.wasm`), loaded in the host's own process: one machine per active instance on a worker thread, none for an idle one; the host chain held by one more machine; storage node's built-in `node:sqlite` | the npm package (`npx skein-host`, `npx open-exchange`): node alone, any platform node runs on, no toolchain |
-| a file, `lmdb:<dir>` (`SKEIN_STORE`), `rocksdb:<dir>` (`SKEIN_STORE_ROCKSDB`) | the **native kernel** (`kernel-zig/zig-out/bin/skein-kernel`): `serve` per instance, or the one `host` process over RocksDB | a checkout with the kernel built — the hosted shape (the rack) |
+| a file, `rocksdb:<dir>` (`SKEIN_STORE_ROCKSDB`) | the **native kernel** (`kernel-zig/zig-out/bin/skein-kernel`): `serve` per instance, or the one `host` process over RocksDB | a checkout with the kernel built — the hosted shape (the rack) |
 
 The same log gives the same state on both: `kernel-zig/equiv/wasm-host.ts`
 replays every store the wasm host writes with the native `skein-kernel

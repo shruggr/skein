@@ -1,31 +1,27 @@
-// A store on any backend (#96, #158): the SQLite file (sqlite_store.zig, the
-// default), a set in the host's LMDB environment (lmdb_store.zig), or a set in
-// the host's RocksDB database (rocksdb_store.zig: the one-process kernel's,
-// `skein-kernel host`). What `serve`, `replay`, `dump`, `fuel`, `shell` and
-// `migrate` hold; above it the kernel sees the same store.Store either way.
+// A store on any backend (#158): the SQLite file (sqlite_store.zig, the
+// default) or a set in the host's RocksDB database (rocksdb_store.zig: the
+// one-process kernel's, `skein-kernel host`). What `serve`, `replay`, `dump`,
+// `fuel`, `shell` and `migrate` hold; above it the kernel sees the same
+// store.Store either way.
 //
-// A store named on the command line is a SQLite file's path,
-// `lmdb:<env dir>#<set>` — a set in an environment — or
+// A store named on the command line is a SQLite file's path or
 // `rocksdb:<db dir>#<set>` — a set in a RocksDB database, which one process
 // opens at a time (a tool opens it while `skein-kernel host` is down). `serve`
-// takes the LMDB environment from SKEIN_STORE and the set from its handle
-// (serve.zig); `host` opens its database once and its sets by frame (host.zig).
+// takes a file (serve.zig); `host` opens its database once and its sets by
+// frame (host.zig). LMDB (`lmdb:<env dir>#<set>`) is no longer supported: such
+// a spec is refused, never read as a file's path.
 const std = @import("std");
 const storem = @import("store.zig");
 const index = @import("index.zig");
 pub const SqliteStore = @import("sqlite_store.zig").SqliteStore;
-pub const LmdbStore = @import("lmdb_store.zig").LmdbStore;
 pub const RocksStore = @import("rocksdb_store.zig").RocksStore;
 
-pub const PREFIX = "lmdb:";
 pub const ROCKS_PREFIX = "rocksdb:";
+/// The prefix of a store spec of the removed LMDB backend: refused (`refuseLmdb`).
+pub const LMDB_PREFIX = "lmdb:";
 
-/// `lmdb:<dir>#<set>` → its parts; null for a SQLite path.
+/// A set's spec → its parts.
 pub const Spec = struct { dir: []const u8, set: []const u8 };
-
-pub fn parseSpec(spec: []const u8) ?Spec {
-    return parseWith(PREFIX, spec);
-}
 
 /// `rocksdb:<dir>#<set>` → its parts; null for anything else.
 pub fn parseRocksSpec(spec: []const u8) ?Spec {
@@ -42,7 +38,6 @@ fn parseWith(prefix: []const u8, spec: []const u8) ?Spec {
 
 pub const AnyStore = union(enum) {
     sqlite: *SqliteStore,
-    lmdb: *LmdbStore,
     rocksdb: *RocksStore,
 
     /// A store to run on, created if missing.
@@ -51,10 +46,7 @@ pub const AnyStore = union(enum) {
             const p = parseRocksSpec(spec) orelse return badSpec(spec);
             return .{ .rocksdb = try RocksStore.open(alloc, io, p.dir, p.set) };
         }
-        if (std.mem.startsWith(u8, spec, PREFIX)) {
-            const p = parseSpec(spec) orelse return badSpec(spec);
-            return .{ .lmdb = try LmdbStore.open(alloc, io, p.dir, p.set) };
-        }
+        try refuseLmdb(spec);
         return .{ .sqlite = try SqliteStore.open(alloc, io, spec) };
     }
 
@@ -64,16 +56,19 @@ pub const AnyStore = union(enum) {
             const p = parseRocksSpec(spec) orelse return badSpec(spec);
             return .{ .rocksdb = try RocksStore.openReadOnly(alloc, io, p.dir, p.set) };
         }
-        if (std.mem.startsWith(u8, spec, PREFIX)) {
-            const p = parseSpec(spec) orelse return badSpec(spec);
-            return .{ .lmdb = try LmdbStore.openReadOnly(alloc, io, p.dir, p.set) };
-        }
+        try refuseLmdb(spec);
         return .{ .sqlite = try SqliteStore.openReadOnly(alloc, spec) };
     }
 
     fn badSpec(spec: []const u8) error{BadStoreSpec} {
-        std.log.err("{s}: a set is lmdb:<env dir>#<set> or rocksdb:<db dir>#<set>", .{spec});
+        std.log.err("{s}: a set is rocksdb:<db dir>#<set>", .{spec});
         return error.BadStoreSpec;
+    }
+
+    fn refuseLmdb(spec: []const u8) error{LmdbUnsupported}!void {
+        if (!std.mem.startsWith(u8, spec, LMDB_PREFIX)) return;
+        std.log.err("{s}: LMDB is no longer supported", .{spec});
+        return error.LmdbUnsupported;
     }
 
     pub fn close(s: AnyStore) void {

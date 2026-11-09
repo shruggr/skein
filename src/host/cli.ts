@@ -20,7 +20,7 @@
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 //   skein-host chain [handle]          #156: the host chain's tip — height, hash, record — the RocksDB database's
 //                                     (SKEIN_STORE_ROCKSDB; through the running kernel process), else <handle>'s own store's
-//   skein-host migrate-store <handle>   #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE)
+//   skein-host migrate-store <handle>   #158: its runtime.db copied into its set of the host's RocksDB database (SKEIN_STORE_ROCKSDB)
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
 // store: its objects pre-filled, its genesis from the system tree (or a
 // checkpoint restored). `system` writes the stock system as such a tree;
@@ -109,20 +109,19 @@
 //   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
 //   SKEIN_HOST_PORT       the host page (/) and roster (/roster.json) on 127.0.0.1, default 4600
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
-//   SKEIN_STORE           #96: the host's LMDB environment (a directory, e.g. $SKEIN_HOME/store): a new instance's store is
-//                         its set there (host.db `lmdb:<dir>`; the set its handle), its kernel given SKEIN_STORE. Unset: a file
-//                         per instance, $SKEIN_HOME/instances/<handle>/runtime.db. Existing rows keep theirs until migrate-store
+//   SKEIN_STORE           named the host's LMDB environment: LMDB is no longer supported, a set SKEIN_STORE is refused.
+//                         With none of the three below: a file per instance, $SKEIN_HOME/instances/<handle>/runtime.db
 //   SKEIN_STORE_ROCKSDB   #158: the host's RocksDB database (a directory, e.g. $SKEIN_HOME/store-rocksdb), run by ONE
 //                         `skein-kernel host` process the router starts (every instance in it, a worker pool,
 //                         SKEIN_WORKERS threads, default the CPU count): a new instance's store is its set there
-//                         (host.db `rocksdb:<dir>`). Over SKEIN_STORE. The host's reads of such a set go through that
+//                         (host.db `rocksdb:<dir>`). The host's reads of such a set go through that
 //                         process (its host-read socket), so `ls`, explore and the other readers need the host running;
 //                         the one-shot commands that boot (`add --image`, `init`) open the database themselves, so the
 //                         host must be stopped for them (RocksDB: one process per database)
 //   SKEIN_STORE_SQLITE    the settled split (2026-10-31): the host's ONE SQLite database (a file, e.g. $SKEIN_HOME/store.sqlite):
 //                         a new instance's store is its set there (host.db `sqlite:<path>`; the set its handle), run by the
 //                         WASM kernel this process loads (one worker per active instance, wasm-kernel.ts). Over
-//                         SKEIN_STORE_ROCKSDB and SKEIN_STORE. Unset, and no native kernel binary here (the npm package
+//                         SKEIN_STORE_ROCKSDB. Unset, and no native kernel binary here (the npm package
 //                         ships none): $SKEIN_HOME/store.sqlite
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider. Unset: the network's (arc.ts DEFAULT_ARC:
@@ -167,7 +166,7 @@ import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
-import { isLmdb, isRocks, storeSpec } from "../runtime/index-store.ts";
+import { isRocks, refuseLmdb, storeSpec } from "../runtime/index-store.ts";
 import { openStoreFile, readHostChain, storeBlocks, storeExists } from "./stores.ts";
 import { spawnSync } from "node:child_process";
 import { connect } from "node:net";
@@ -220,7 +219,7 @@ const USAGE = `usage:
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
   skein-host chain [handle]                               #156: the host chain's tip (height, hash, record): the RocksDB database's
                                                           (SKEIN_STORE_ROCKSDB, through the running kernel process), else <handle>'s own store's
-  skein-host migrate-store <handle>                       #96: its runtime.db copied into its set of the host's LMDB environment (SKEIN_STORE); the row then
+  skein-host migrate-store <handle>                       #158: its runtime.db copied into its set of the host's RocksDB database (SKEIN_STORE_ROCKSDB); the row then
                                                           names the set, the file kept beside as runtime.db.migrated-<date>. With the host stopped
 settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
 dispatch rows, the address book, a directory into main) are the client's: \`skein install|dispatch|… --instance <handle>\``;
@@ -250,7 +249,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (!db.get(handle)) {
           const sqlite = sqliteStoreOf(env.vars, home);
-          f.store ??= sqlite ? `sqlite:${sqlite}` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : env.vars.SKEIN_STORE ? `lmdb:${resolve(env.vars.SKEIN_STORE)}` : join(home, "instances", handle, "runtime.db"); // #96, #158, the settled split
+          f.store ??= sqlite ? `sqlite:${sqlite}` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : join(home, "instances", handle, "runtime.db"); // #158, the settled split
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
@@ -684,7 +683,6 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     network: hostNetwork(v),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
-    ...(v.SKEIN_STORE ? { lmdbStore: resolve(v.SKEIN_STORE) } : {}),
     ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
     ...((s) => (s ? { sqliteStore: s } : {}))(sqliteStoreOf(v, home)), // the settled split: the wasm kernel
     // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
@@ -824,7 +822,7 @@ function isIndexBlock(cid: CID, bytes: Uint8Array): boolean {
   return v[1].length > 0 && v[1].every((e: unknown) => Array.isArray(e) && e.length === 3 && e[0] instanceof Uint8Array && (e[2] === null || !!CIDClass.asCID(e[2])));
 }
 
-/** Every block of a store except the index's (nodes and state records): a checkpoint's extras candidates. A file, or an LMDB set's members (#96). */
+/** Every block of a store except the index's (nodes and state records): a checkpoint's extras candidates. A file, or a set's members. */
 function looseRecords(spec: string): Array<{ cid: CID; bytes: Uint8Array }> {
   const out: Array<{ cid: CID; bytes: Uint8Array }> = [];
   for (const { cid, bytes } of storeBlocks(spec)) if (!isIndexBlock(cid, bytes)) out.push({ cid, bytes });
@@ -896,34 +894,29 @@ function controlAlive(sock: string): Promise<boolean> {
 }
 
 /**
- * `skein-host migrate-store <handle>` (#96): the row's runtime.db copied into its set of the host's
- * LMDB environment (SKEIN_STORE) by `skein-kernel migrate` (blocks, the state pointer, the size); the
- * row then names the set (`lmdb:<dir>`) and the file is kept beside, renamed
+ * `skein-host migrate-store <handle>` (#158): the row's runtime.db copied into its set of the host's
+ * RocksDB database (SKEIN_STORE_ROCKSDB) by `skein-kernel migrate` (blocks, the state pointer, the size); the
+ * row then names the set (`rocksdb:<dir>`) and the file is kept beside, renamed
  * runtime.db.migrated-<date> (never deleted here). Only with the host stopped: its kernel would
  * hold the store; a running host (its control socket or router answering) is refused.
  */
 async function migrateStoreCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const [handle, ...more] = rest;
   if (!handle || more.length) { env.err(USAGE); return 2; }
-  // #158: SKEIN_STORE_ROCKSDB the target (from a file or an LMDB set), else SKEIN_STORE's LMDB environment (from a file).
-  const rocks = env.vars.SKEIN_STORE_ROCKSDB ? resolve(env.vars.SKEIN_STORE_ROCKSDB) : undefined;
-  const dir = rocks ?? (env.vars.SKEIN_STORE ? resolve(env.vars.SKEIN_STORE) : undefined);
-  if (!dir) { env.err("skein-host migrate-store: neither SKEIN_STORE_ROCKSDB (the host's RocksDB database) nor SKEIN_STORE (its LMDB environment) is set"); return 2; }
+  // #158: SKEIN_STORE_ROCKSDB the target (from a file).
+  refuseLmdbEnv(env.vars);
+  const dir = env.vars.SKEIN_STORE_ROCKSDB ? resolve(env.vars.SKEIN_STORE_ROCKSDB) : undefined;
+  if (!dir) { env.err("skein-host migrate-store: SKEIN_STORE_ROCKSDB (the host's RocksDB database) is not set"); return 2; }
   const row = db.get(handle);
   if (!row) { env.err(`skein-host migrate-store: no instance ${handle}`); return 1; }
-  if (isRocks(row.store) || (!rocks && isLmdb(row.store))) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
-  if (!isLmdb(row.store) && !existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
+  refuseLmdb(row.store);
+  if (isRocks(row.store)) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
+  if (!existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
   if (await controlAlive(join(homeOf(env.vars), CONTROL_SOCKET)) || await routerAt(env.vars)) { env.err("skein-host migrate-store: the host is running (its kernel holds the store): stop it first, migrate, then start it"); return 1; }
-  const target = rocks ? `rocksdb:${dir}` : dir;
+  const target = `rocksdb:${dir}`;
   const r = spawnSync(env.vars.SKEIN_KERNEL_BIN || KERNEL_BIN, ["migrate", "--from", storeSpec(row), "--into", target, "--set", handle], { encoding: "utf8", maxBuffer: 1 << 26 });
   if (r.status !== 0) { env.err(`skein-host migrate-store ${handle}: ${(r.stderr || r.stdout || `exit ${r.status}`).trim()}`); return 1; }
-  const store = rocks ? `rocksdb:${dir}` : `lmdb:${dir}`;
-  if (isLmdb(row.store)) {
-    // An LMDB set: left in its environment (the host writes none, as reclaim leaves it).
-    db.add(handle, { store });
-    env.out(`${handle}: migrated into ${store} (set ${handle}) ${r.stdout.trim()} · its LMDB set left in ${row.store}`);
-    return 0;
-  }
+  const store = target;
   const kept = `${row.store}.migrated-${new Date().toISOString().slice(0, 10)}`;
   for (const ext of ["", "-wal", "-shm"]) if (existsSync(`${row.store}${ext}`)) renameSync(`${row.store}${ext}`, `${kept}${ext}`);
   db.add(handle, { store });
@@ -1009,13 +1002,19 @@ if (import.meta.main) {
   process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${l}\n`), err: (l) => process.stderr.write(`${l}\n`) });
 }
 
+/** SKEIN_STORE named the host's LMDB environment (#96): LMDB is no longer supported, so a set SKEIN_STORE is refused. */
+export function refuseLmdbEnv(v: Record<string, string | undefined>): void {
+  if (v.SKEIN_STORE) throw new Error(`SKEIN_STORE=${v.SKEIN_STORE}: LMDB is no longer supported`);
+}
+
 /**
  * The host's SQLite database for new instances (the settled split, 2026-10-31): SKEIN_STORE_SQLITE, else
  * $SKEIN_HOME/store.sqlite when this installation has no native kernel binary (the npm package ships the
  * wasm kernel only) and no other shared store is named; else none (a native kernel per instance store).
  */
 export function sqliteStoreOf(v: Record<string, string | undefined>, home: string): string | undefined {
+  refuseLmdbEnv(v);
   if (v.SKEIN_STORE_SQLITE) return resolve(v.SKEIN_STORE_SQLITE);
-  if (v.SKEIN_STORE_ROCKSDB || v.SKEIN_STORE) return undefined;
+  if (v.SKEIN_STORE_ROCKSDB) return undefined;
   return existsSync(v.SKEIN_KERNEL_BIN || KERNEL_BIN) ? undefined : join(home, "store.sqlite");
 }

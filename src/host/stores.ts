@@ -1,33 +1,32 @@
-// The host's opener of instance stores (#96, #133): a SQLite file through
-// src/runtime/index-store.ts, or a set of the host's LMDB environment,
-// `lmdb:<env dir>#<set>` (index-store.ts `storeSpec`), read here directly,
-// read only, through lmdb-js — with the kernel's member gate
-// (kernel-zig/src/lmdb_store.zig): a block is there if the set holds it, or
-// the chain's set does. The disk is the host's (src/runtime reads none).
+// The host's opener of instance stores (#133): a SQLite file through
+// src/runtime/index-store.ts, or a set of the host's SQLite database (the
+// settled split), read here directly, read only, with the kernel's member
+// gate: a block is there if the set holds it, or the chain's set does. The
+// disk is the host's (src/runtime reads none). LMDB (`lmdb:<env dir>#<set>`)
+// is no longer supported: such a spec is refused.
 //
 // A set of the one-process kernel's RocksDB database, `rocksdb:<db dir>#<set>`
 // (#158), is read through that process — RocksDB lets no second process see
 // the live database — over its host-read socket (`<db dir>/kernel.sock`,
 // kernel-zig/src/host.zig): `get`/`has` by CID through the set's member gate
-// (the frame names the `set`: a block only another instance holds is absent,
-// as for an LMDB set), the set's `state` pointer, and `members` (the CIDs it
+// (the frame names the `set`: a block only another instance holds is absent),
+// the set's `state` pointer, and `members` (the CIDs it
 // holds: a checkpoint's extras), the frames its stdin takes. The index reader here is
 // synchronous, so the socket is spoken from a worker thread the caller waits
 // on (Atomics.wait, the answer taken with receiveMessageOnPort). With no
 // kernel process running there, a read is refused: the host must run.
 
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "node:worker_threads";
 import { decode, encode, fromBytes, type CID } from "../runtime/cid.ts";
-import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseLmdbSpec, parseRocksSpec, parseSqliteSpec, type IndexStore } from "../runtime/index-store.ts";
+import { CHAIN_SET, indexStoreOver, openStoreFile as openFile, parseRocksSpec, parseSqliteSpec, refuseLmdb, type IndexStore } from "../runtime/index-store.ts";
 import { openHostDb, setHasState } from "./store-sqlite.ts";
 import { KernelHost } from "./kernel.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 
-/** A store, whichever backend: a file (index-store.ts openStoreFile), or an LMDB set, read only. */
+/** A store, whichever backend: a file (index-store.ts openStoreFile), or a SQLite or RocksDB set, read only. */
 export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): SqliteStore {
   const q = parseSqliteSpec(spec);
   if (q) {
@@ -39,13 +38,11 @@ export function openStoreFile(spec: string, o: { readOnly?: boolean } = {}): Sql
     if (o.readOnly === false) throw new Error(`${spec}: a RocksDB set is read only here (the kernel writes it; the host never does)`);
     return openRocksStore(r.dir, r.set);
   }
-  const l = parseLmdbSpec(spec);
-  if (!l) return openFile(spec, o);
-  if (o.readOnly === false) throw new Error(`${spec}: an LMDB set is read only here (the kernel writes it; the host never does)`);
-  return openLmdbStore(l.dir, l.set);
+  refuseLmdb(spec);
+  return openFile(spec, o);
 }
 
-/** Whether a store is there to read: the file; for an LMDB set, its state pointer (the kernel has committed). */
+/** Whether a store is there to read: the file; for a set, its state pointer (the kernel has committed). */
 export function storeExists(spec: string): boolean {
   const q = parseSqliteSpec(spec);
   if (q) {
@@ -55,55 +52,8 @@ export function storeExists(spec: string): boolean {
   }
   const r = parseRocksSpec(spec);
   if (r) return rocksReader(r.dir).request({ op: "state", h: r.set }) != null;
-  const l = parseLmdbSpec(spec);
-  if (!l) return existsSync(spec);
-  if (!existsSync(join(l.dir, "data.mdb"))) return false;
-  const e = lmdbEnv(l.dir);
-  e.pointers.resetReadTxn();
-  return e.pointers.doesExist(Buffer.concat([setPrefix(l.set), Buffer.from("state")]));
-}
-
-type LmdbDb = { get(k: Uint8Array): Buffer | undefined; doesExist(k: Uint8Array): boolean; getKeys(o: { start: Uint8Array; end?: Uint8Array }): Iterable<Buffer>; resetReadTxn(): void };
-type LmdbEnv = { blocks: LmdbDb; members: LmdbDb; pointers: LmdbDb };
-const envs = new Map<string, LmdbEnv>();
-
-/**
- * The environment at `dir`, opened read only once per process (LMDB: one open per process) and
- * kept. lmdb-js must link LMDB 0.9.x (its data-v1 build: `LMDB_DATA_V1=true npm rebuild lmdb
- * --build-from-source`, kernel-zig/README.md): its prebuilt binaries link LMDB 0.9.90 (data format
- * 2, LMDB's 1.0 line), which cannot open the kernel's 0.9.36 environment.
- */
-function lmdbEnv(dir: string): LmdbEnv {
-  const had = envs.get(dir);
-  if (had) return had;
-  const lmdb = createRequire(import.meta.url)("lmdb") as { version: { major: number; minor: number; patch: number }; open(o: Record<string, unknown>): { openDB(o: Record<string, unknown>): LmdbDb } };
-  const v = lmdb.version;
-  if (v.major !== 0 || v.minor !== 9 || v.patch >= 90) throw new Error(`lmdb-js links LMDB ${v.major}.${v.minor}.${v.patch}, not 0.9.x: it cannot read the kernel's environment (rebuild it: LMDB_DATA_V1=true npm rebuild lmdb --build-from-source)`);
-  const env = lmdb.open({ path: dir, readOnly: true, noSubdir: false, maxDbs: 4, maxReaders: 4096, mapSize: 2 ** 40 });
-  const db = (name: string) => env.openDB({ name, encoding: "binary", keyEncoding: "binary" });
-  const e = { blocks: db("blocks"), members: db("members"), pointers: db("pointers") };
-  envs.set(dir, e);
-  return e;
-}
-
-const setPrefix = (set: string) => Buffer.concat([Buffer.from(set), Buffer.from([0])]);
-const prefixEnd = (p: Buffer) => { const b = Buffer.from(p); b[b.length - 1]++; return b; };
-
-/**
- * A set of an LMDB environment through the index (#96), read only: the same reader as a SQLite
- * file's, with the kernel's gate — a block is there if the set holds it, or the chain's set does
- * (#133); one only another set holds is absent. Each state read takes a fresh snapshot.
- */
-export function openLmdbStore(dir: string, set: string): IndexStore {
-  const e = lmdbEnv(dir);
-  const own = setPrefix(set), chain = setPrefix(CHAIN_SET);
-  const member = (c: Uint8Array) => e.members.doesExist(Buffer.concat([own, c])) || e.members.doesExist(Buffer.concat([chain, c]));
-  return indexStoreOver({
-    get: (c) => (member(c) ? e.blocks.get(c) : undefined),
-    has: (c) => member(c) && e.blocks.doesExist(c),
-    pointer: () => { e.pointers.resetReadTxn(); return e.pointers.get(Buffer.concat([own, Buffer.from("state")])); },
-    close: () => {},
-  });
+  refuseLmdb(spec);
+  return existsSync(spec);
 }
 
 /**
@@ -129,7 +79,7 @@ export type HostChain = { root: CID; height: number; hash: string };
 
 /**
  * The host chain a store sees (#156): a RocksDB database's (the kernel process's `chain` frame over
- * its host-read socket), or a SQLite file's or an LMDB set's own (a serve instance's: the pointer
+ * its host-read socket), or a SQLite file's own (a serve instance's: the pointer
  * `host/chain` and the record it names, read directly).
  */
 export function readHostChain(spec: string): HostChain | undefined {
@@ -152,35 +102,24 @@ export function readHostChain(spec: string): HostChain | undefined {
     const v = rocksReader(r.dir).request({ op: "chain" }) as { root: CID; height: number | bigint; hash: string } | null;
     return v ? { root: v.root, height: Number(v.height), hash: v.hash } : undefined;
   }
+  refuseLmdb(spec);
+  if (!existsSync(spec)) return undefined;
   let ptr: Uint8Array | undefined;
-  let get: (c: Uint8Array) => Uint8Array | undefined;
-  const l = parseLmdbSpec(spec);
-  if (l) {
-    if (!existsSync(join(l.dir, "data.mdb"))) return undefined;
-    const e = lmdbEnv(l.dir);
-    e.pointers.resetReadTxn();
-    ptr = e.pointers.get(Buffer.concat([setPrefix(l.set), Buffer.from("host/chain")]));
-    get = (c) => e.blocks.get(c);
-  } else {
-    if (!existsSync(spec)) return undefined;
-    const db = new DatabaseSync(spec, { readOnly: true });
-    try {
-      const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
-      ptr = t ? db.prepare("SELECT cid FROM pointers WHERE name = 'host/chain'").get()?.cid as Uint8Array | undefined : undefined;
-      if (!ptr) return undefined;
-      const b = db.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(ptr)?.bytes as Uint8Array | undefined;
-      get = () => b;
-    } finally { db.close(); }
-  }
-  if (!ptr) return undefined;
-  const bytes = get(ptr);
+  let bytes: Uint8Array | undefined;
+  const db = new DatabaseSync(spec, { readOnly: true });
+  try {
+    const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
+    ptr = t ? db.prepare("SELECT cid FROM pointers WHERE name = 'host/chain'").get()?.cid as Uint8Array | undefined : undefined;
+    if (!ptr) return undefined;
+    bytes = db.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(ptr)?.bytes as Uint8Array | undefined;
+  } finally { db.close(); }
   if (!bytes) return undefined;
   const v = decode<{ tip?: { height: number | bigint; hash: string } }>(bytes);
   if (!v.tip) return undefined;
   return { root: fromBytes(ptr), height: Number(v.tip.height), hash: v.tip.hash };
 }
 
-/** Every block a store holds (a SQLite file's `blocks`; an LMDB set's members), for a checkpoint's extras. */
+/** Every block a store holds (a SQLite file's `blocks`; a set's members), for a checkpoint's extras. */
 export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Array }> {
   const q = parseSqliteSpec(spec);
   if (q) {
@@ -200,18 +139,7 @@ export function* storeBlocks(spec: string): Generator<{ cid: CID; bytes: Uint8Ar
     }
     return;
   }
-  const l = parseLmdbSpec(spec);
-  if (l) {
-    const e = lmdbEnv(l.dir);
-    e.members.resetReadTxn();
-    const own = setPrefix(l.set);
-    for (const k of e.members.getKeys({ start: own, end: prefixEnd(own) })) {
-      const c = new Uint8Array(k.subarray(own.length));
-      const bytes = e.blocks.get(c);
-      if (bytes) yield { cid: fromBytes(c), bytes: new Uint8Array(bytes) };
-    }
-    return;
-  }
+  refuseLmdb(spec);
   const db = new DatabaseSync(spec, { readOnly: true });
   try {
     for (const r of db.prepare("SELECT cid, bytes FROM blocks").all() as Array<{ cid: Uint8Array; bytes: Uint8Array }>) yield { cid: fromBytes(new Uint8Array(r.cid)), bytes: new Uint8Array(r.bytes) };

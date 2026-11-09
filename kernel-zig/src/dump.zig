@@ -1,4 +1,4 @@
-// `skein-kernel dump <store.db | lmdb:<env dir>#<set>>`: a store's derived state as JSON, read
+// `skein-kernel dump <store.db | rocksdb:<db dir>#<set>>`: a store's derived state as JSON, read
 // through the index (issue #30) — the store's own state record, or, for a
 // file in the format before #30, the maps imported from its tables in memory.
 // CIDs in their base32 text form.

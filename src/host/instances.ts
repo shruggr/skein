@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS instances (
   handle            TEXT PRIMARY KEY,                 -- the BRC-169 handle's user part, e.g. martha
   domain            TEXT NOT NULL DEFAULT 'localhost',
   identity          TEXT,                             -- the instance's identity key, hex: the signer's child for the handle
-  store             TEXT NOT NULL,                    -- its runtime.db, or lmdb:<env dir>: its set (its handle) in the host's LMDB environment (#96)
+  store             TEXT NOT NULL,                    -- its runtime.db, or rocksdb:<db dir> / sqlite:<db path>: its set (its handle) in the host's shared store
   tree              TEXT,                             -- the root CID of the directory last deployed into it (skein-host deploy)
   source            TEXT,                             -- that directory, for skein-host deploy --all
   knows             TEXT,                             -- JSON array of the handles this agent knows (its ROSTER.md); ["*"]: everyone; NULL: nobody

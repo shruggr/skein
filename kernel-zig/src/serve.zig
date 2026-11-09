@@ -429,10 +429,10 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         const rest = handle_full[i + 1 ..];
         domain = rest[0 .. std.mem.indexOfScalar(u8, rest, '@') orelse rest.len];
     }
-    // The store (#96): SKEIN_STORE names the host's LMDB environment, this instance's set its handle;
-    // unset, the SQLite file SKEIN_DB, default $SKEIN_HOME/runtime.db.
-    const lmdb_dir = envm.get("SKEIN_STORE");
-    const db_path = if (lmdb_dir) |d| try std.fmt.allocPrint(gpa, "lmdb:{s}#{s}", .{ d, handle }) else envm.get("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
+    // The store: the SQLite file SKEIN_DB, default $SKEIN_HOME/runtime.db. SKEIN_STORE named an LMDB
+    // environment, which is no longer supported: refused.
+    if (envm.get("SKEIN_STORE") != null) die("{s}@{s}: SKEIN_STORE: LMDB is no longer supported", .{ handle, domain });
+    const db_path = envm.get("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
 
     // Signals.
     if (std.posix.errno(std.posix.system.pipe2(&sig_pipe, .{ .CLOEXEC = true, .NONBLOCK = true })) != .SUCCESS) die("{s}@{s}: pipe2 failed", .{ handle, domain });
@@ -443,7 +443,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     std.posix.sigaction(std.posix.SIG.PIPE, &ign, null);
 
     // The store, with the pinned modules installed.
-    if (lmdb_dir == null) if (std.fs.path.dirname(db_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
+    if (std.fs.path.dirname(db_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
     const ss = AnyStore.open(gpa, io, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
     replay.install(gpa, io, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
 

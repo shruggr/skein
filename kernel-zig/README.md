@@ -48,19 +48,6 @@ commands with `mise exec --` or activate mise).
   `~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api`. The static
   `libwasmtime.a` is linked: the binary needs nothing of it at run time.
 - **SQLite**: the system `libsqlite3` (3.38 or later, for JSON1).
-- **LMDB** (#96): vendored and compiled in, `vendor/lmdb/` — OpenLDAP's
-  liblmdb at the tag `LMDB_0.9.36` (commit 028f61b6, github.com/LMDB/lmdb:
-  `mdb.c`, `midl.c`, `lmdb.h`, `midl.h`), under the OpenLDAP Public License
-  2.8 (`vendor/lmdb/LICENSE`, `COPYRIGHT`). No system library: the rack's
-  `zig build --release -Dcpu=baseline` needs nothing new there.
-- **lmdb-js** for the host's reader of an LMDB environment (`lmdb` 3.5.7 in
-  package.json): its prebuilt binaries link LMDB 0.9.90 (data format 2,
-  LMDB's 1.0 line), which cannot open a 0.9.x environment (it crashes on
-  one); its **data-v1 build** links 0.9.29 and reads the kernel's
-  environment, beside running kernels. Build it once after `npm ci`:
-  `LMDB_DATA_V1=true npm rebuild lmdb --build-from-source` (node-gyp, a C
-  compiler). Only an LMDB store loads it (`src/host/stores.ts`, which
-  refuses another build with this message); SQLite hosts never do.
 - **RocksDB** (#158, the one-process kernel's store, `rocksdb_store.zig`): the
   system `librocksdb` through its C API (`rocksdb/c.h`), linked as sqlite3 is
   (`linkSystemLibrary("rocksdb")`). Built and tested here against 11.1.1
@@ -558,44 +545,6 @@ are renamed `legacy_*`; opened read only (a replay's source, `dump`), the
 import stays in memory. A store whose old index is stale is refused (nothing
 rebuilds it any more: `skein-dev rebuild` went with the TS runtime, #55).
 
-**The shared host store** (#96, #133; `lmdb_store.zig`). Beside one SQLite
-file per instance (the default, unchanged), a host may keep every instance in
-**one LMDB environment**, a directory (`$SKEIN_HOME/store`: `data.mdb`,
-`lock.mdb`) opened by each `skein-kernel serve` of the host and read by the
-host directly (lmdb-js). Three tables: `blocks` (cid → bytes, each block once,
-never overwritten), `members` (`<set>‖0x00‖cid` → ∅) and `pointers`
-(`<set>‖0x00‖name` → cid). A **set** is an instance's handle; its members are
-its **read gate**: `has`/`bytes` answer through the set, then through the
-reserved set `host/chain` (the host's chain service writes it, #156; nothing
-does yet) — a block only another set holds is absent. A put writes the block
-if it is new and adds the membership; a new membership adds the block's
-length to the set's `size` pointer (u64 BE: #130's measure, the set's share).
-The index above it is the same: the same records, the same state CIDs (the
-format number unchanged). A commit is one write transaction (the index's
-begin … commit); a put outside one is its own. Flags: `MDB_NOTLS`,
-`MDB_NOMETASYNC` (one flush per commit, the meta page's deferred: a system
-crash may undo the last commit, never corrupt), map size 1 TiB (address space;
-nothing on disk until used), 4096 reader slots. One writer at a time across
-the environment: the instances' commits serialize there.
-
-- `serve`: `SKEIN_STORE=<env dir>` → the set named by its handle
-  (`SKEIN_HANDLE` before `@`); unset → the SQLite file as before.
-- The tools (`replay`, `dump`, `fuel`, `shell`) take a path, or
-  `lmdb:<env dir>#<set>` (`any_store.zig`).
-- `skein-kernel migrate --from <runtime.db> --into <env dir> --set <handle>`:
-  every block, then the state pointer (in batches; the pointer last, so a
-  half-copied set has no state); a set with a state already, or a source in
-  an older format, refused. `skein-host migrate-store <handle>` runs it with
-  the host stopped, renames the file `runtime.db.migrated-<date>` (kept) and
-  sets the row's `store` to `lmdb:<dir>`.
-- The host: `SKEIN_STORE` in host.env makes each **new** instance a set
-  (host.db `store` = `lmdb:<env dir>`, the set its handle); its kernel gets
-  `SKEIN_STORE`, a file's kernel never does. Every host-side read
-  (`openStoreFile`, `storeExists` in `src/host/stores.ts`; `storeSpec` in
-  `index-store.ts`, which touches no disk itself) takes
-  `lmdb:<env dir>#<set>` and reads through the same gate. The host writes no
-  instance store: a reclaimed LMDB instance's set is left in the environment.
-
 **From TypeScript** (`src/runtime/index-store.ts`): a read-only `Store` over
 the maps (the pointer re-read on every call, so it follows a live kernel),
 used by the explorer and `skein-dev` (`rebuild` is refused on such a store:
@@ -650,8 +599,11 @@ CID; through a set's gate if the frame names `set`, else any block),
   its inbox behind the step). `answer` waits (#66) are kept per instance;
   their bounds are the I/O thread's poll timeout.
 - **The store.** One database per host: column families `blocks`, `members`
-  (`<set>‖0x00‖cid`), `pointers` (`<set>‖0x00‖name`), the same shape and gate
-  as the LMDB environment (`host/chain` the one shared set, #133). A commit
+  (`<set>‖0x00‖cid`), `pointers` (`<set>‖0x00‖name`). A **set** is an
+  instance's handle; its members are its **read gate**: `has`/`bytes` answer
+  through the set, then through the reserved set `host/chain` (the one shared
+  set, #133) — a block only another set holds is absent. A new membership
+  adds the block's length to the set's size (#130). A commit
   is one write batch written with `sync = false` (the WAL written, not
   fsynced: an OS crash may lose the last commits, never corrupt); the WAL is
   synced and the memtables flushed at a clean stop. Bloom filters on `blocks`
@@ -670,8 +622,13 @@ CID; through a set's gate if the frame names `set`, else any block),
   `exited`), and the next hydration starts it again and opens the instance
   (replay at hydrate, as for `serve`).
 - `skein-host migrate-store <handle>` with `SKEIN_STORE_ROCKSDB` set copies a
-  file (or an LMDB set) into the database (`skein-kernel migrate --into
-  rocksdb:<db dir>`), host stopped.
+  file into the database (`skein-kernel migrate --from <runtime.db> --into
+  rocksdb:<db dir> --set <handle>`: every block, then the state pointer, in
+  batches, the pointer last; a set with a state already, or a source in an
+  older format, refused), host stopped; the file is renamed
+  `runtime.db.migrated-<date>` (kept) and the row's `store` set to
+  `rocksdb:<dir>`. LMDB (`lmdb:` specs, `SKEIN_STORE`) is no longer
+  supported: refused with that message.
 
 ### The host chain (issue #156)
 
@@ -680,7 +637,7 @@ The header chain is the host's, held once and kept by the kernel process
 and the heavier-branch rule, `image.loadMaps`). `skein-kernel host` writes it
 into the set `host/chain` of its database (every instance reads it through
 the chain exception, #133); `serve` writes it into its one instance's own
-store (SQLite; an LMDB serve instance's own set). Its record, under the
+store (SQLite). Its record, under the
 pointer `host/chain`:
 
 ```
@@ -1150,11 +1107,11 @@ ways from the same source:
   hosted version, a peer of the node host kept here beside the machine:
   `serve.zig` + `ipc.zig` (one instance per process over pipes), `host.zig`
   + `rocksdb_store.zig` (#158: one process, a worker pool over a RocksDB
-  database), the store backends `sqlite_store.zig`, `lmdb_store.zig`,
-  `any_store.zig`, `migrate.zig`, `vendor/`, the engine
+  database), the store backends `sqlite_store.zig`, `any_store.zig`,
+  `migrate.zig`, the engine
   `engine_wasmtime.zig`, and the tools (`replay.zig`, `dump.zig`,
   `fuel.zig`, `cmd_shell.zig`, `main.zig`). The node host still runs it for
-  a store spec that is a file, an LMDB set or a RocksDB set (the rack's
+  a store spec that is a file or a RocksDB set (the rack's
   hosted shape); `skein-kernel replay` is the native reference a wasm
   host's store is checked against.
 
@@ -1166,7 +1123,7 @@ ways from the same source:
 | `json.zig` | JSON.stringify quoting, Number::toString, RFC 8785 (`envelope.ts jcs`) |
 | `secp.zig` | BRC-42 "anyone" keys, ECDSA verify as @bsv/sdk (`identity.ts`) |
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
-| `lmdb_store.zig`, `any_store.zig`, `migrate.zig`, `vendor/lmdb/` | the shared host store (#96, #133): a set of one LMDB environment, its member gate and `host/chain`; either backend for serve and the tools; `skein-kernel migrate`; LMDB 0.9.36 |
+| `any_store.zig`, `migrate.zig` | either backend for serve and the tools (a SQLite file or a RocksDB set; an `lmdb:` spec refused); `skein-kernel migrate` (a file into a RocksDB set) |
 | `host_chain.zig` | the host chain's tracker (#156): the SDK's `chain.host` over a kernel backend (`get`, `put`, `putBlock`), the frames `headers`, `chain-import`, `chain` |
 | `rocksdb_store.zig`, `host.zig` | the one-process kernel (#158): the RocksDB backend (a set of one database, its gate, a call's committed `View`); `skein-kernel host` (the I/O thread, the worker pool and run queue, the host-read socket) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |

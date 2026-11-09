@@ -74,14 +74,13 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 export interface InboxHost { base: string; db: HostDb; router: Router; origin(handle: string): string; entries(handle: string): Promise<number>; register(key: PrivateKey, handle: string): Promise<string> }
 
 /** A host with instances, each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; billing?: Router["o"]["billing"]; lmdb?: boolean; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; billing?: Router["o"]["billing"]; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
-  // #96: o.lmdb — every instance a set of one LMDB environment, <home>/store (host.db `lmdb:<dir>`), else a file each.
   // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
   // The settled split: o.sqlite (or SKEIN_TEST_STORE=sqlite) — every instance a set of one SQLite database, <home>/store.sqlite, on the wasm kernel.
   const sqlite = o.sqlite ?? process.env.SKEIN_TEST_STORE === "sqlite";
-  const storeOf = (handle: string) => (sqlite ? `sqlite:${join(home, "store.sqlite")}` : o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : o.lmdb ? `lmdb:${join(home, "store")}` : join(home, "instances", handle, "runtime.db"));
+  const storeOf = (handle: string) => (sqlite ? `sqlite:${join(home, "store.sqlite")}` : o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : join(home, "instances", handle, "runtime.db"));
   if (!o.reuse) t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
@@ -111,7 +110,6 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.teranode ? { teranode: o.teranode } : {}),
     // #130: what the host bills (billing.ts); none: it bills no one.
     ...(o.billing ? { billing: o.billing } : {}),
-    ...(o.lmdb ? { lmdbStore: join(home, "store") } : {}),
     ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : {}),
     // The settled split: the wasm kernel over the host's one SQLite database (SKEIN_TEST_STORE=sqlite: every test host so).
     ...(sqlite ? { sqliteStore: join(home, "store.sqlite") } : {}),
@@ -174,7 +172,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     },
     /** Host B (a second test host, the same store kind), the hosted inboxes' — made on first use. */
     async inboxHost(): Promise<InboxHost> {
-      b ??= await testHost(t, { sqlite, ...(o.rocks ? { rocks: true } : {}), ...(o.lmdb ? { lmdb: true } : {}) });
+      b ??= await testHost(t, { sqlite, ...(o.rocks ? { rocks: true } : {}) });
       return b;
     },
     /**

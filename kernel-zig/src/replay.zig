@@ -1,5 +1,5 @@
 // `skein-kernel replay <source.db> <out.db>`: the log alone into a fresh store
-// (either backend: a path, or lmdb:<env dir>#<set>, any_store.zig),
+// (either backend: a path, or rocksdb:<db dir>#<set>, any_store.zig),
 // a runtime with no wallet, attested answers served from the source's records
 // (the replay path the TypeScript runtime had, deleted in #55). The fresh
 // store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR

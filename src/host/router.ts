@@ -192,18 +192,16 @@ export interface RouterOptions {
   answerWaitMs?: number;
   /** Where a new instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
-  /** SKEIN_STORE (#96): the host's LMDB environment (a directory); a new instance's store is then its set there (host.db `lmdb:<dir>`, the set its handle). Unset: a file, <home>/instances/<handle>/runtime.db. */
-  lmdbStore?: string;
   /**
    * SKEIN_STORE_ROCKSDB (#158): the host's RocksDB database (a directory), run by one
    * `skein-kernel host` process this router starts (KernelHost): a new instance's store is its set
-   * there (host.db `rocksdb:<dir>`, the set its handle). Over `lmdbStore`.
+   * there (host.db `rocksdb:<dir>`, the set its handle).
    */
   rocksStore?: string;
   /**
    * SKEIN_STORE_SQLITE (the settled split, 2026-10-31): the host's one SQLite database (a file); a
    * new instance's store is then its set there (host.db `sqlite:<path>`, the set its handle), run by
-   * the wasm kernel this process loads (wasm-kernel.ts). Over `rocksStore` and `lmdbStore`.
+   * the wasm kernel this process loads (wasm-kernel.ts). Over `rocksStore`.
    */
   sqliteStore?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
@@ -1500,11 +1498,11 @@ export class Router {
     }
   }
 
-  /** host.db's `store` for a new instance (#96): its set in the host's LMDB environment (SKEIN_STORE), else its own file. */
+  /** host.db's `store` for a new instance: its set in the host's shared store (SQLite, RocksDB), else its own file. */
   private newStore(handle: string): string {
     if (this.o.sqliteStore) return `sqlite:${this.o.sqliteStore}`; // the settled split: the wasm kernel
     if (this.o.rocksStore) return `rocksdb:${this.o.rocksStore}`; // #158
-    return this.o.lmdbStore ? `lmdb:${this.o.lmdbStore}` : join(this.o.home ?? ".", "instances", handle, "runtime.db");
+    return join(this.o.home ?? ".", "instances", handle, "runtime.db");
   }
 
   /**
@@ -2076,7 +2074,7 @@ export class Router {
     this.o.db.forgetBilling(handle);
     this.o.db.remove(handle);
     if (isSet(row.store)) {
-      // #96, #158: the host never writes an LMDB environment or a RocksDB database; the set stays in it (its handle cannot be created again here).
+      // #158: a set of a shared store (RocksDB, SQLite) is not deleted here; the set stays in it (its handle cannot be created again here).
       this.say("router", `${handle}: reclaimed (its set in ${row.store} left in place: the host writes no instance store)`);
       return;
     }

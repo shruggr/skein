@@ -1,17 +1,14 @@
-// `skein-kernel migrate --from <store> --into <target> --set <handle>` (#96,
-// #158): a store copied into a set of the host's shared store — an LMDB
-// environment (`--into <env dir>`) or the one-process kernel's RocksDB
-// database (`--into rocksdb:<db dir>`, while `skein-kernel host` is down) —
-// every block into `blocks` and the set's members, the state pointer last
-// (the set's size counted as the blocks go in). The source is a SQLite file or
-// (into RocksDB) an LMDB set, `lmdb:<env dir>#<set>`. The records are the same
+// `skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>`
+// (#158): a store copied into a set of the one-process kernel's RocksDB
+// database (while `skein-kernel host` is down) — every block into `blocks` and
+// the set's members, the state pointer last (the set's size counted as the
+// blocks go in). The source is a SQLite file. The records are the same
 // bytes: the state CID and the CID list stay as they were. A target set that
 // already has a state pointer is refused; a source in an older format (or
 // with no state) too. The source is only read; nothing deletes it
 // (`skein-host migrate-store` keeps a file beside, renamed).
 const std = @import("std");
 const cidm = @import("cid");
-const lmdb = @import("lmdb_store.zig");
 const rocks = @import("rocksdb_store.zig");
 const any = @import("any_store.zig");
 
@@ -35,17 +32,14 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, from: []const u8, into: []const 
         return 1;
     };
 
-    if (std.mem.startsWith(u8, into, any.ROCKS_PREFIX)) {
-        const dir = into[any.ROCKS_PREFIX.len..];
-        const db = try rocks.Db.open(gpa, io, dir, false);
-        defer db.close(gpa);
-        const dst = try rocks.RocksStore.openIn(gpa, db, set);
-        defer dst.close();
-        return copy(io, a, gpa, src, dst, state, into, set);
+    if (!std.mem.startsWith(u8, into, any.ROCKS_PREFIX)) {
+        std.debug.print("--into {s}: the target is rocksdb:<db dir> (LMDB is no longer supported)\n", .{into});
+        return 1;
     }
-    const env = try lmdb.Env.open(gpa, io, into, false);
-    defer env.close(gpa);
-    const dst = try lmdb.LmdbStore.openIn(gpa, env, set);
+    const dir = into[any.ROCKS_PREFIX.len..];
+    const db = try rocks.Db.open(gpa, io, dir, false);
+    defer db.close(gpa);
+    const dst = try rocks.RocksStore.openIn(gpa, db, set);
     defer dst.close();
     return copy(io, a, gpa, src, dst, state, into, set);
 }
