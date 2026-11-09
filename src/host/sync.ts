@@ -11,7 +11,8 @@
 //                   read, by kernel call) or a fetch of it is under way, the
 //                   host asks that peer `{kind: "tx", topic, txid}` and hands
 //                   the BEEF to the overlay's receive row
-//                   /skein/overlay/beef/1.0.0 as from that peer. Per (handle,
+//                   /skein/overlay/beef/1.0.0 as from that peer, naming the
+//                   ONE topic it was fetched for (skein 0.6.0, D4). Per (handle,
 //                   txid) it keeps the SET of peers whose admit named it:
 //                   fetch from one; on a failure (no answer, no `beef`, the
 //                   delivery not taken) the next; the set exhausted, it stops
@@ -34,9 +35,15 @@
 //                   has the same tip anchor; each block checked against our
 //                   headers (its hash, the BUMP's root for every txid) before
 //                   any transaction is fetched (a height we hold no header for
-//                   yet ends the range: the next changed beat resumes it); each
-//                   txid we lack fetched from the peer that listed it into the
-//                   receive row, block by block in height order. A peer whose
+//                   yet ends the range: the next changed beat resumes it); per
+//                   block, each txid we do not list mined (skein 0.6.0, D3):
+//                   held by the chain app → its own path cut from the block's
+//                   BUMP (`MerklePath.extract`) admitted as ONE proof event in
+//                   box `chain` (arc.ts's shape); not held → fetched and
+//                   submitted through the per-txid announced entry (D4: once
+//                   per (handle, txid) while in flight, whatever path names
+//                   it), block by block in height order, no wait for it to land
+//                   (the 10-31 decision). A peer whose
 //                   list fails the check is dropped for the rest of the host's
 //                   run.
 //   the tail        the reconcile's second half: when the mined side is equal
@@ -87,8 +94,18 @@ export interface SyncOptions {
    * a status other than 200.
    */
   local(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown>;
-  /** One BEEF into the overlay's receive row, as from `peer` (its peer ID). */
-  deliver(handle: string, peer: string, beef: Uint8Array): Promise<InboundAnswer>;
+  /**
+   * One BEEF into the overlay's receive row, as from `peer` (its peer ID), naming the ONE topic it was
+   * fetched for (skein 0.6.0, D4: the receive row judges only under it — the TaggedBEEF rule).
+   */
+  deliver(handle: string, peer: string, beef: Uint8Array, topic: string): Promise<InboundAnswer>;
+  /** Whether `handle`'s chain state holds `txid` (the chain app's `txs`). */
+  holdsTx(handle: string, txid: string): Promise<boolean>;
+  /**
+   * skein 0.6.0 (D3): a proof the pull found for a transaction the chain app holds — `path` the BUMP of
+   * this txid alone — admitted into box `chain` as the broadcaster's proof event (arc.ts `proofOf`).
+   */
+  proof(handle: string, txid: string, path: Uint8Array): Promise<void>;
   /** The chain state's header at `height`: its hash and merkle root (display hex). */
   header(handle: string, height: number): Promise<{ hash: string; root: string } | undefined>;
   /** One request frame to `peer` on the sync protocol: its answer frame. */
@@ -115,7 +132,6 @@ interface Admitted { topic: string; blocks: AdmittedBlock[]; nextHeight: number 
 interface Announced { app: string; topic: string; peers: string[]; tried: Set<string>; fetching: boolean }
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /** A peer ID's string from its multihash bytes. */
@@ -369,9 +385,20 @@ export class OverlaySync {
         h = page.nextHeight;
       }
       for (const b of blocks) {
-        const lacking = b.txids.filter((t) => !ours.has(t));
-        for (const txid of lacking) await this.fetchInto(handle, r.peer, topic, txid);
-        if (lacking.length) await this.landed(handle, app, topic, b.height, lacking);
+        // skein 0.6.0 (D3, D4): a transaction the peer lists mined here and we do not list: held by the
+        // chain app → its own path cut from the block's BUMP, one proof event; not held → fetched and
+        // submitted through the same announced entry as an announcement or a tail (once per txid while
+        // in flight). Listed mined here: nothing. No wait for it to land (the 10-31 decision): a child
+        // whose parent is not admitted yet pauses on it.
+        let mp: MerklePath | undefined;
+        for (const txid of b.txids.filter((t) => !ours.has(t))) {
+          if (this.stopped) return whole;
+          if (await this.o.holdsTx(handle, txid)) {
+            mp ??= MerklePath.fromHex(b.bump);
+            await this.o.proof(handle, txid, Uint8Array.from(mp.extract([txid]).toBinary()))
+              .catch((e) => this.say(handle, `${topic}: ${txid}'s proof at ${b.height}: ${(e as Error).message}`));
+          } else await this.announce(handle, app, topic, txid, r.peer);
+        }
       }
     }
     return whole;
@@ -430,23 +457,12 @@ export class OverlaySync {
     return undefined;
   }
 
-  /** One transaction asked of `peer` and handed to the receive row as from it. → whether it was accepted. */
+  /** One transaction asked of `peer` and handed to the receive row as from it, for `topic`. → whether it was accepted. */
   private async fetchInto(handle: string, peer: string, topic: string, txid: string): Promise<boolean> {
     const a = await this.ask(handle, peer, { kind: "tx", topic, txid });
     if (!(a.beef instanceof Uint8Array)) return false;
-    const r = await this.o.deliver(handle, peer, a.beef);
+    const r = await this.o.deliver(handle, peer, a.beef, topic);
     if (r.verdict !== "accept") this.say(handle, `${topic}: ${txid} from ${peer}: ${r.verdict}${r.reason ? ` (${r.reason})` : ""}`);
     return r.verdict === "accept";
-  }
-
-  /** Until the topic lists `txids` at `height` (admitted: each delivery is judged on its own thread), or 10 s. */
-  private async landed(handle: string, app: string, topic: string, height: number, txids: string[]): Promise<void> {
-    const end = Date.now() + 10_000;
-    while (Date.now() < end && !this.stopped) {
-      const page = await this.o.local(handle, app, "admitted", { topic, fromHeight: String(height), toHeight: String(height) }) as Admitted;
-      const have = new Set(page.blocks.flatMap((b) => b.txids));
-      if (txids.every((t) => have.has(t))) return;
-      await sleep(100);
-    }
   }
 }

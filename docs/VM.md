@@ -116,8 +116,8 @@ writes the same chain. A name never moved has no chain.
   install) writes `<app>/…` and nothing else; a program the genesis wired
   (no app record) writes only what the genesis's `scopes` list under its
   name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox"],
-  resolve: ["resolve/"], wallet: ["wallet/"], chain: ["chain/"]}` by default;
-  `chain` since #78, the chain module wired at boot; `wallet/` since #79;
+  resolve: ["resolve/"], wallet: ["wallet/"]}` by default; skein 0.6.0 (D8):
+  no `chain` — the chain app is an app, never wired at boot; `wallet/` since #79;
   `resolve/` since #87, its records of what it found) — a bare head name, or a
   prefix ending in `/`. An in-VM callee writes in its own scope, not its
   caller's. There are no other grants (#79: the transitional `heads` on

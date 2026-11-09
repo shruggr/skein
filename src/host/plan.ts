@@ -333,11 +333,11 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
 
 const sameRow = (a: DispatchRow, b: DispatchRow): boolean => encode(a as never).cid.equals(encode(b as never).cid);
 
-/** What an overlay app publishes (APPS.md §6), for information: `<topic>`, `-admit`, `-proof` per topic not turned off. */
+/** What an overlay app publishes (APPS.md §6), for information: `<topic>`, `-admit` per topic not turned off (0.6.0: no `-proof`). */
 function gossipOf(config: Record<string, unknown> | undefined): string[] {
   const ov = config?.overlay as { topics?: Record<string, unknown>; gossip?: Record<string, boolean> } | undefined;
   if (!ov?.topics) return [];
-  return Object.keys(ov.topics).filter((t) => ov.gossip?.[t] !== false).flatMap((t) => [t, `${t}-admit`, `${t}-proof`]);
+  return Object.keys(ov.topics).filter((t) => ov.gossip?.[t] !== false).flatMap((t) => [t, `${t}-admit`]);
 }
 
 /** The permission prompt: what the app asks for (APPS.md §3) — its routes, filters and roles read aloud. */

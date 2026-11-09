@@ -20,11 +20,11 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// (shruggr/skein-overlay).
 pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreifmo2fz45wn3vukhcf226bpnfh6klu7w5m43of76mx6olgghnzqkq" },
+    .{ .name = "wallet", .cid = "bafkreiaufe7s52aqspvrfquzaupdbsmg44qlg3i7sr75zx7out6rm6cxfm" },
     // The skein's own mail in and out (issues #33, #40): Zig, wasm32-wasi (programs/mail).
     .{ .name = "mail", .cid = "bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreidsab4vl7wecca56g5idca6nnk7ikd6o6rptbbb5rmkunm6qicxni" },
+    .{ .name = "frontdoor", .cid = "bafkreiga4f6yxmyfxqmyanyko25vkhgxupbgui4qkycnco4mygiiigh4fq" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreifaksuagkwqclhbja7nkuwnxmlkfpv2lsqr2zvbod76qvia2mfdmq" },
 };

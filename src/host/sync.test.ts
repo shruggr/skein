@@ -66,6 +66,17 @@ class FakeOverlay {
   /** Admitted, not mined (the tail), in admission order. */
   tail: string[] = [];
   delivered: Array<{ peer: string; txid: string }> = [];
+  /** skein 0.6.0 (D3): the proof events the pull admitted (box `chain`): a txid and its own path. */
+  proofs: Array<{ txid: string; path: Uint8Array }> = [];
+  /** The chain app holds a transaction: here, one in the tail (admitted, unmined). */
+  holdsTx(txid: string) { return this.tail.includes(txid); }
+  /** A proof event taken: the chain app's `mined`, the overlay places it (the tail → its height). */
+  proven(txid: string, path: Uint8Array) {
+    this.proofs.push({ txid, path });
+    const mp = MerklePath.fromBinary(Array.from(path));
+    this.tail = this.tail.filter((t) => t !== txid);
+    this.have.push({ height: mp.blockHeight, txid });
+  }
   constructor(have: Array<[number, string]>) { this.have = have.map(([height, txid]) => ({ height, txid })); }
   span() { const hs = this.have.map((x) => x.height); return hs.length ? { genesis: Math.min(...hs), tip: Math.max(...hs) } : undefined; }
   at(h: number) { return BLOCKS[h]!.filter((t) => this.have.some((x) => x.height === h && x.txid === t)); }
@@ -149,7 +160,10 @@ function world(overlays: Record<string, FakeOverlay>, o: { lie?: string } = {}) 
     syncs[h] = new OverlaySync({
       overlayOf: (_h, t) => t === "tm_t-live" ? "overlay" : undefined,
       local: async (_h, _app, fn, q) => ov.read(`/${fn}`, q),
-      deliver: async (_h, from, beef): Promise<InboundAnswer> => {
+      holdsTx: async (_h, t) => ov.holdsTx(t),
+      proof: async (_h, t, path) => ov.proven(t, path),
+      deliver: async (_h, from, beef, topic): Promise<InboundAnswer> => {
+        assert.equal(topic, "tm_t", "the one topic it was fetched for (D4)");
         const txid = Buffer.from(beef).toString("utf8");
         ov.delivered.push({ peer: from, txid });
         const height = Number(Object.keys(BLOCKS).find((k) => BLOCKS[Number(k)]!.includes(txid)) ?? 0);
@@ -451,6 +465,8 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
   const sync = new OverlaySync({
     overlayOf: (_h, x) => x === "tm_t-live" ? "overlay" : undefined,
     local: async (_h, _app, fn, q) => c.read(`/${fn}`, q),
+    holdsTx: async (_h, t) => c.holdsTx(t),
+    proof: async (_h, t, path) => c.proven(t, path),
     deliver: async (_h, from, beef): Promise<InboundAnswer> => {
       const txid = Buffer.from(beef).toString("utf8");
       c.delivered.push({ peer: from, txid });
@@ -471,4 +487,35 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
   await A.r.settled();
   assert.equal(await entries(), before, "the whole catch-up: nothing logged at alpha");
   sync.stop();
+});
+
+test("sync (skein 0.6.0, D3, case b): the pull with a held unmined transaction — one proof event with its own path cut from the block's BUMP, no fetch; then mined and placed, the anchors equal", async () => {
+  const a = new FakeOverlay([[2, X]]);
+  a.tail = [Y]; // held by the chain app, unmined here
+  const b = new FakeOverlay([[2, X], [2, Y]]);
+  const { syncs, beat, asked } = world({ a, b });
+  beat("a", "b");
+  await syncs.a!.idle();
+  assert.deepEqual(a.delivered, [], "nothing fetched: Y is held");
+  assert.ok(!(asked.a ?? []).includes("b tx"), "no tx request");
+  assert.equal(a.proofs.length, 1, "one proof event");
+  assert.equal(a.proofs[0]!.txid, Y);
+  const mp = MerklePath.fromBinary(Array.from(a.proofs[0]!.path));
+  assert.equal(mp.blockHeight, 2);
+  assert.ok(mp.path[0]!.some((l) => l.hash === Y && l.txid), "Y's leaf, flagged a txid");
+  assert.equal(mp.path[0]!.length, 2, "Y's own path: its leaf and its sibling (MerklePath.extract)");
+  assert.equal(mp.computeRoot(Y), rootOf(2));
+  assert.deepEqual(a.tail, [], "mined");
+  assert.equal(a.anchor(2), b.anchor(2), "placed: equal anchors at 2");
+});
+
+test("sync (skein 0.6.0, D4): the pull goes through the announced entry — a txid a peer's admit is fetching is not fetched again by the pull", async () => {
+  const a = new FakeOverlay([]);
+  const b = new FakeOverlay([[2, X], [2, Y]]);
+  const { syncs, beat, asked } = world({ a, b });
+  syncs.a!.admit("a", "overlay", "tm_t", X, peer("b"));
+  beat("a", "b");
+  await syncs.a!.idle();
+  assert.deepEqual(a.delivered.map((x) => x.txid).sort(), [X, Y].sort(), "each once");
+  assert.equal((asked.a ?? []).filter((x) => x === "b tx").length, 2, "two tx requests: X once, Y once");
 });

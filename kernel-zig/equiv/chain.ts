@@ -13,23 +13,22 @@
 //   - ingest proven ({fn: "ingest", args: {beef}} in box chain): recorded,
 //     answered at once (state proven, the block's CID);
 //   - ingest unproven: recorded, broadcast (the host's Arcade gets it — from
-//     the chain app, the only thing that emits it here), and answered on each
-//     state change: accepted (the status provider's RECEIVED), proven (the
+//     the chain app, the only thing that emits it here); skein-chain 0.8.0: no
+//     watchers — every status is the fact chain/tx/<txid> (read at the host's
+//     event route): accepted (the status provider's RECEIVED), mined (the
 //     proof Arcade reports once mined; the header first); a second ingest of
-//     it while pending is answered accepted at once and proven later;
-//   - ingest unproven that Arcade refuses: answered rejected;
+//     it while pending is answered accepted at once;
+//   - ingest unproven that Arcade refuses: the fact rejected; 0.9.0 (skein-sdk
+//     0.18.0): its proof later is the latest fact — mined, status proven;
 //   - the reads `status` and `proof` answer CIDs; a bad BEEF is an error;
 //   - nothing unproven is at rest without a registered broadcast;
 //   - the same reads as a kernel call; ingest is refused there (a message only);
-//   - at boot: a system tree (the stock files, bin/chain.wasm, the two rows)
-//     takes the feed, ingests, broadcasts and answers the same way, its writes
-//     under the stock scope `chain/`;
+//   - D8 (skein 0.6.0): the stock scopes name no `chain` — the chain app is
+//     never a genesis-wired system program;
 //   - a reorg (0.7.1, the settled overlay sync design): a heavier branch
 //     without the proven child turns it back to unproven and broadcasts
-//     nothing (no new post reaches the Arcade, no broadcast event); the child
-//     mined in the new branch, Arcade's status for the new block (the same
-//     token's stream: a new blockHash is a new status) is the proof event —
-//     the same watchers answered `proven` again, with the new height.
+//     nothing; the child mined in the new branch, Arcade's status for the new
+//     block is the proof event — the fact mined again, with the new height.
 //
 // Both stores then replay to themselves exactly.
 //
@@ -54,10 +53,11 @@ import { storeSpec } from "../../src/runtime/index-store.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
 import { emittedEvents } from "../../src/host/p2p.ts";
 import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
+import { txCid } from "../../src/host/feeds.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "7da428422ce193a1bb489163637f070860d46ccd"; // v0.7.1: a reorg broadcasts nothing
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0"; // skein-chain 0.9.0: every status a fact; a proof after a rejection is mined
 const here = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -136,7 +136,7 @@ try {
   check(routeLines.some((l) => l.startsWith("route event chain ")) && routeLines.some((l) => l.startsWith("route mailbox chain [kernel.beef] ")) && routeLines.some((l) => l.startsWith("route mailbox chain/status ")) && routeLines.length === 3,
     `the prompt shows its routes (#143: no sender; the BEEF decoded at the door): ${routeLines.join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.7.1", "the head chain/app is the app record (0.7.1)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.9.0", `the head chain/app is the app record (0.9.0: ${String(app?.version)})`);
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   check(rows.length === 3 && rows.every((r) => !("sender" in r) && !("optional" in r)) && rows.map((r) => `${r.transport} ${r.address}`).join(",") === "event chain,mailbox chain,mailbox chain/status"
     && JSON.stringify(rows[1]!.filters) === '["kernel.beef"]',
@@ -167,6 +167,15 @@ try {
   const send = async (body: Record<string, unknown>) => (await callerBox.send(inst, "chain", body)).id.toString();
   const answers = async (id: string, n: number, what: string) => await until(what, async () => { await h.router.settled(); const a = await answersTo(id); return a.length >= n ? a : undefined; }, 30_000);
 
+  // skein-chain 0.8.0: every status of a transaction is the fact chain/tx/<txid> (the event index, read by the host route).
+  const facts = async (txid: string) => {
+    const res = await fetch(`${h.base}/@ch/events/chain/tx/${txid}`);
+    if (res.status !== 200) throw new Error(`GET /events/chain/tx/${txid}: ${res.status}`);
+    return (await res.json() as Array<{ record: Record<string, unknown> }>).map((x) => x.record);
+  };
+  const statuses = async (txid: string) => (await facts(txid)).map((r) => `${String(r.status)}${r.height !== undefined ? `@${String(r.height)}` : ""}`).join(",");
+  const factsAre = async (txid: string, want: string, what: string) => await until(what, async () => { await h.router.settled(); return (await statuses(txid)) === want || undefined; }, 30_000).then(() => true, () => false);
+
   // A stranger's call is admitted (#143: a route has no sender; chain's functions are ungated — no `roles`).
   const strangerWallet = ephemeralWallet(PrivateKey.fromRandom());
   const refused = await new RawBox(strangerWallet, `${h.base}/@ch`).send(inst, "chain", { fn: "status", args: { txid: "00".repeat(32) } }).then(() => "sent", (e: Error) => e.message);
@@ -188,9 +197,10 @@ try {
   const r2 = await send({ fn: "ingest", args: { beef: new Uint8Array(child.toBEEF()) } });
   const posted = await until("the broadcast reaches the Arcade", () => arcade.posts.find((b) => FakeArcade.txOf(b).id("hex") === childTxid), 20_000).catch(() => undefined);
   check(!!posted, "ingest unproven: broadcast (the host's Arcade got it, from the chain app)");
-  const a2 = await answers(r2, 1, "accepted");
-  check(a2[0]?.result?.state === "accepted" && a2[0].result.txStatus === "RECEIVED" && String(a2[0].result.broadcast) !== "undefined", `accepted on the status provider's first status (${JSON.stringify(a2[0]?.result && { state: a2[0].result.state, txStatus: a2[0].result.txStatus })})`);
-  // While it is pending, another ingest of it: answered accepted at once (its watcher registered).
+  // 0.8.0: no watchers — an ingest is answered once, at the ingest, when there is a status (here none: only broadcast).
+  check(await factsAre(childTxid, "accepted", "accepted"), `accepted on the status provider's first status: the fact chain/tx/<child> accepted (${await statuses(childTxid)})`);
+  check((await answersTo(r2)).length === 0, "the unproven ingest answered nothing (0.8.0: no watchers; the fact carries its status)");
+  // While it is pending, another ingest of it: answered accepted at once (its status at the ingest).
   const r3 = await send({ fn: "chain.ingest", args: { beef: new Uint8Array(child.toBEEF()) } });
   const a3 = await answers(r3, 1, "the second ingest's answer");
   check(a3[0]?.fn === "chain.ingest" && a3[0].result?.state === "accepted", `a second ingest while it is pending: accepted at once (${a3[0]?.result?.state})`);
@@ -202,21 +212,21 @@ try {
   await h.router.settled();
   const path = new MerklePath(2, [[{ offset: 0, hash: childTxid, txid: true }]]);
   arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h2)), blockHeight: 2, merklePath: path.toHex() });
-  const a2b = await answers(r2, 2, "proven");
-  check(a2b[1]?.result?.state === "proven" && a2b[1].result.height === 2, `then proven, on Arcade's proof: a second answer to the same request (${a2b.map((x) => x.result?.state).join(" → ")})`);
-  const a3b = await answers(r3, 2, "proven to the second watcher");
-  check(a3b[1]?.result?.state === "proven", `the second watcher told too (${a3b.map((x) => x.result?.state).join(" → ")})`);
+  check(await factsAre(childTxid, "accepted,accepted,mined@2", "mined"), `then mined on Arcade's proof: the fact mined {height: 2} (${await statuses(childTxid)})`);
 
-  // Unproven that Arcade refuses: rejected.
+  // Unproven that Arcade refuses: rejected (the fact).
   const child2 = new Transaction();
   child2.addInput({ sourceTransaction: fund, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
   child2.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 8_000 });
   await child2.sign();
+  const c2 = child2.id("hex");
   arcade.mode = "reject";
-  const r4 = await send({ fn: "ingest", args: { beef: new Uint8Array(child2.toBEEF()) } });
-  const a4 = await answers(r4, 1, "rejected");
+  await send({ fn: "ingest", args: { beef: new Uint8Array(child2.toBEEF()) } });
+  check(await factsAre(c2, "rejected", "rejected"), `ingest unproven, refused by Arcade: the fact rejected (${await statuses(c2)})`);
   arcade.mode = "ok";
-  check(a4[0]?.result?.state === "rejected" && a4[0].result.reason === "REJECTED" && String(a4[0].result.settlement) !== "undefined", `ingest unproven, refused by Arcade: rejected (${JSON.stringify(a4[0]?.result && { state: a4[0].result.state, reason: a4[0].result.reason })})`);
+  const r4s = await send({ fn: "status", args: { txid: c2 } });
+  const a4 = (await answers(r4s, 1, "status of the rejected"))[0]!;
+  check(a4.result?.state === "rejected" && a4.result.reason === "REJECTED" && String(a4.result.settlement) !== "undefined", `its status: rejected, the settlement record says why (${JSON.stringify(a4.result && { state: a4.result.state, reason: a4.result.reason })})`);
 
   // Reads: CIDs.
   const r5 = await send({ fn: "status", args: { txid: childTxid } });
@@ -247,47 +257,21 @@ try {
   const dumped = dagCbor.encode(fin);
   check(dumped.length > 0, "chain/state readable by CID");
 
-  // ------------------------------------------------ at boot: the chain app in a system tree
-  // The stock system's files, the app's module, its two rows; its writes are the stock scope `chain/`.
-  const sys = join(h.home, "system-chain");
-  for (const [p, text] of Object.entries(await stockSystemFiles(await k()))) {
-    mkdirSync(dirname(join(sys, p)), { recursive: true });
-    writeFileSync(join(sys, p), text);
-  }
-  copyFileSync(join(process.env.SKEIN_CHAIN_DIR ?? cloneChain(h.home), "bin/chain.wasm"), join(sys, "bin/chain.wasm"));
-  const conf = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8")) as { defaults: Record<string, string>; scopes?: Record<string, string[]> };
-  conf.defaults.walletNetwork = "regtest";
-  check(JSON.stringify(conf.scopes?.chain) === '["chain/"]', `the stock scopes name chain/ for a genesis-wired chain program (${JSON.stringify(conf.scopes?.chain)})`);
-  writeFileSync(join(sys, "etc/config.json"), JSON.stringify(conf));
-  const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
-  rowsAt.push({ transport: "event", address: "chain", program: "chain" }, { address: "chain", filters: ["kernel.beef"], program: "chain" }, { address: "chain/status", program: "chain" });
-  writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
-  const bootId = h.instance("boot");
-  const src = await dirSource(sys);
-  await h.router.bootRow("boot", { kind: "tree", root: src.root, objects: src.objects });
-  await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: callerMailbox });
-  for (const raw of [h1, h2]) await h.router.chainHeaders("boot", "chain", [raw]);
+  // ------------------------------------------------ D8 (skein 0.6.0): never a genesis-wired system program
+  // The stock system names no `chain` scope: the chain app is in a genesis only as an app (#141), updatable by a
+  // logged install (the boot-time system-tree chain program of 0.7.x is gone).
+  const stock = JSON.parse((await stockSystemFiles(await k()))["etc/config.json"]!) as { scopes?: Record<string, string[]> };
+  check(stock.scopes?.chain === undefined, `the stock scopes name no chain (D8): ${JSON.stringify(Object.keys(stock.scopes ?? {}))}`);
+
+  // ------------------------------------------------ 0.9.0 (skein-sdk 0.18.0): a proof after a rejection is the latest fact
+  const h3 = mine(sha256d(h2), internal(c2), 1_790_201_200);
+  await h.router.chainHeaders("ch", "chain", [h3]);
   await h.router.settled();
-  const bootStore = storeSpec(h.db.get("boot")!);
-  const bootBox = new RawBox(callerWallet, `${h.base}/@boot`);
-  const child3 = new Transaction();
-  child3.addInput({ sourceTransaction: fund, sourceOutputIndex: 2, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
-  child3.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 7_000 });
-  await child3.sign();
-  const c3 = child3.id("hex");
-  const rb = (await bootBox.send(bootId, "chain", { fn: "ingest", args: { beef: new Uint8Array(child3.toBEEF()) } })).id.toString();
-  const ab = await answers(rb, 1, "accepted at boot");
-  check(ab[0]?.result?.state === "accepted", `booted with the chain app: ingest unproven → broadcast → accepted (${ab[0]?.result?.state})`);
-  const h3 = mine(sha256d(h2), internal(c3), 1_790_201_200);
-  for (const hh of ["boot", "ch"]) await h.router.chainHeaders(hh, "chain", [h3]);
-  await h.router.settled();
-  arcade.emit(c3, { txStatus: "MINED", blockHash: display(sha256d(h3)), blockHeight: 3, merklePath: new MerklePath(3, [[{ offset: 0, hash: c3, txid: true }]]).toHex() });
-  const ab2 = await answers(rb, 2, "proven at boot");
-  check(ab2[1]?.result?.state === "proven" && ab2[1].result.height === 3, `… → proven (${ab2.map((x) => x.result?.state).join(" → ")})`);
-  const bk = (await h.router.hydrate("boot")).kernel;
-  const bootHeads = (await bk.call("head", "chain/state")) as CID | null;
-  check(!!bootHeads, "the genesis-wired chain program wrote chain/state (the stock scope)");
-  bootStores.push(bootStore);
+  await h.router.admitEvent("ch", "chain", { kind: "proof", subject: txCid(c2), txid: c2, path: Uint8Array.from(new MerklePath(3, [[{ offset: 0, hash: c2, txid: true }]]).toBinary()) });
+  check(await factsAre(c2, "rejected,mined@3", "mined after rejected"), `rejected, then its proof: the fact mined {height: 3} (${await statuses(c2)})`);
+  const r4b = await send({ fn: "status", args: { txid: c2 } });
+  const a4b = (await answers(r4b, 1, "status after the proof"))[0]!;
+  check(a4b.result?.state === "proven" && a4b.result.height === 3, `its status now proven at 3 (${JSON.stringify(a4b.result && { state: a4b.result.state, height: a4b.result.height })})`);
 
   // ------------------------------------------------ a reorg (0.7.1): reverted, nothing broadcast; the new proof by the status feed
   const postsOf = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid).length;
@@ -311,10 +295,7 @@ try {
   await h.router.chainHeaders("ch", "chain", [h5x]);
   await h.router.settled();
   arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h5x)), blockHeight: 5, merklePath: new MerklePath(5, [[{ offset: 0, hash: childTxid, txid: true }]]).toHex() });
-  const a2c = await answers(r2, 3, "proven again after the reorg").catch(() => undefined);
-  check(a2c?.[2]?.result?.state === "proven" && a2c[2].result.height === 5, `the new proof by the status feed (a new blockHash, the same token's stream): the first watcher answered proven again at 5 (${(a2c ?? []).map((x) => `${x.result?.state}@${x.result?.height ?? "-"}`).join(" → ")})`);
-  const a3c = await answers(r3, 3, "proven again to the second watcher").catch(() => undefined);
-  check(a3c?.[2]?.result?.state === "proven" && a3c[2].result.height === 5, `the second watcher too (${(a3c ?? []).map((x) => x.result?.state).join(" → ")})`);
+  check(await factsAre(childTxid, "accepted,accepted,mined@2,reorged,mined@5", "mined again after the reorg"), `reorged, then the new proof by the status feed (a new blockHash, the same token's stream): the fact mined at 5 (${await statuses(childTxid)})`);
   check((await chainResults()).length === broadcastsBefore && postsOf(childTxid) === childPosts, "still no broadcast of it: the proof came without a resubmit");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

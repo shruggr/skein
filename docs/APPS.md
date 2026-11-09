@@ -812,9 +812,10 @@ more: one program, two rows, one interface.
   `chain/state` by CID.
 
 Installed: `skein install https://github.com/shruggr/skein-chain#<commit>
-<the instance's origin>`; at boot: `bin/chain.wasm` in the system tree and its
-rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
-under its default scope). kernel-zig/equiv/chain.ts does both.
+<the instance's origin>`. skein 0.6.0 (D8, David 2026-11-09): only as an app —
+never a genesis-wired system program (the stock scopes name no `chain`); in a
+genesis it is an app (#141 heads), updatable by a logged install.
+kernel-zig/equiv/chain.ts installs it.
 
 ## 6b. Worked example: the shell app and the chat app (#83)
 

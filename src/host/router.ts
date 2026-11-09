@@ -135,7 +135,7 @@ import { appHead } from "./plan.ts";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
-import { chainHeader, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
+import { chainHeader, chainHolds, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { admitOf, BEEF_PROTOCOL, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
@@ -571,7 +571,15 @@ export class Router {
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
         local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
         ownBeat: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.body,
-        deliver: (h, peer, beef) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef }),
+        deliver: (h, peer, beef, topic) => this.p2pInbound(h, { transport: "libp2p", protocol: BEEF_PROTOCOL, from: peerIdFromString(peer).toMultihash().bytes, body: beef, overlayTopic: topic }),
+        // skein 0.6.0 (D3): the pull's proof for a held transaction, as the broadcaster's proof event (arc.ts `proofOf`).
+        holdsTx: async (h, txid) => {
+          const row = this.o.db.get(h);
+          if (!row || !storeExists(storeSpec(row))) return false;
+          const st = openStoreFile(storeSpec(row), { readOnly: true });
+          try { return await chainHolds(st, txid); } finally { st.close(); }
+        },
+        proof: async (h, txid, path) => { await this.admitEvent(h, "chain", { kind: "proof", subject: txCid(txid), txid, path }); },
         header: async (h, height) => {
           const row = this.o.db.get(h);
           if (!row || !storeExists(storeSpec(row))) return undefined;
@@ -937,7 +945,7 @@ export class Router {
     }
     const record = call.topic !== undefined
       ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
-      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
+      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body, ...(call.overlayTopic !== undefined ? { topic: call.overlayTopic } : {}) };
     let entry: CID;
     try {
       entry = await appendRequest(l.kernel, "libp2p", record, this.now());

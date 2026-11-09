@@ -303,14 +303,13 @@ emit {to: <the instance's own identity>, box: "chain", body: {fn: "ingest", args
 ```
 
 — to the instance itself (docs/VM.md "emit": the host's loopback),
-admitted by the chain app's row from `$self` — and the step ends awaiting
-that message (`ingest` in its result). The chain app answers at the
-instance, each answer `{fn, request, replyTo: <the message>, result: {txid,
-tx, state, txStatus?, reason?, block?, height?, …}}` (or `error`), and each
-steps the wallet's thread (input `reply`, `op: "callback"` in the result):
-`accepted` — the thread awaits the message again; `proven` or `rejected` —
-the thread finishes. No deadline: abandonment is the chain app's
-(`rejected`, reason `abandoned`). Broadcasting, proofs and statuses are the
+admitted by the chain app's row from `$self` — and the step finishes (skein
+0.6.0, D9, David 2026-11-09: "There's no replies necessary"): no await, no
+`callback` step — the wallet's state never changed on a reply. Every status
+of the transaction is the chain app's fact `chain/tx/<txid>` (skein-chain
+0.8.0); anything that wants it (a launcher, the owner) rests on that name. A
+coin's status, spent and live are computed from the chain state at read
+time, as before. Broadcasting, proofs and statuses are the
 chain app's wiring (docs/MESSAGES.md, "Broadcast out, proofs and statuses
 in"): the wallet sees none of them. Replay re-reads the steps from the log;
 the preview1 and component builds emit the same messages
@@ -326,7 +325,7 @@ it, and prints its CID. An error ends the step `errored`; no head moves.
 
 Its coins move on the messages its threads take — the owner's, and a
 program's that launches or calls it (as before #130) — the chain app's
-answers to them, and the kernel's pay step (#130: a thread the kernel
+and the kernel's pay step (#130: a thread the kernel
 launched under the entry it processes; docs/VM.md "Billing"). Only the pay
 step is the kernel's alone: a thread another program launched with `pay`
 is refused. Since #130 (and #116) the default image carries the wallet,
@@ -337,17 +336,14 @@ coming path for a payment from anyone else.
 
 | body (owner) | does → result |
 |---|---|
-| `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction`, then ingested → `{txid, status, outputs, ingest, outcome: "pending", awaiting: true}` |
-| `{op: "createAction", description, inputs?: [{outpoint: "<txid>.<vout>", unlockingScript? (bytes) \| unlockingScriptLength?, inputDescription, sequenceNumber?}], inputBEEF? (bytes), outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?}` (`reference` when a draft: signAndProcess false, or a caller's input without its unlockingScript), and unless a draft or noSend `{ingest, outcome: "pending", awaiting: true}` |
+| `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction`, then ingested → `{txid, status, outputs, ingest}` (0.6.0: no await) |
+| `{op: "createAction", description, inputs?: [{outpoint: "<txid>.<vout>", unlockingScript? (bytes) \| unlockingScriptLength?, inputDescription, sequenceNumber?}], inputBEEF? (bytes), outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?}` (`reference` when a draft: signAndProcess false, or a caller's input without its unlockingScript), and unless a draft or noSend `{ingest}` (0.6.0: no await) |
 | `{op: "signAction", reference, spends?: {"<inputIndex>": {unlockingScript (bytes), sequenceNumber?}}}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
-| args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
+| args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
 
-| the chain app's answer (input `reply`) | result |
-|---|---|
-| `{result: {state, txid, txStatus?, reason?}}` | `op: "callback"`: `{ingest, txid, outcome: accepted \| proven \| rejected, txStatus?, reason?, awaiting?}` |
-| `{error: {code, message}}` | `op: "callback"`: `{ingest, outcome: "error", error}` |
+(0.6.0: no `callback` op — the chain app's answers to an ingest are not awaited; its facts carry every status.)
 
 Any result may carry `refs` (the transactions it names, rel `mentions`).
 `outputs` of `internalize` are BRC-100's: `{outputIndex, protocol: "wallet

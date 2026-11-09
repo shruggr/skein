@@ -418,7 +418,7 @@ payment  {satoshisPaid, txid: <hex>, derivationPrefix, derivationSuffix, sender:
 refused  {stage: "middleware" | "filter", reason, status, code?}                   a refusal at the door: stored, nothing runs
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
-                 {kind: "p2p-frame", protocol, from: bytes, body: bytes}
+                 {kind: "p2p-frame", protocol, from: bytes, body: bytes, topic?}   (0.6.0: topic on the host's own receive-row frame)
          local:  {kind: "message", message: <a mail record>, body: bytes}       signed, or the loopback (below)
 mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
           json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce}

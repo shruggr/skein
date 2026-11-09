@@ -168,6 +168,11 @@ export interface InboundCall {
   seqno?: Uint8Array;
   signature?: Uint8Array;
   body: Uint8Array;
+  /**
+   * skein 0.6.0 (D4): a frame the host itself writes into its overlay's receive row names the ONE
+   * topic it was fetched for (the TaggedBEEF rule): on the frame record as `topic`.
+   */
+  overlayTopic?: string;
 }
 
 /** The front door's answer: the verdict for GossipSub; for a stream frame, what to write back and whether to close. */

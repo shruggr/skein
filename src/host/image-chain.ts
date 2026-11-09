@@ -455,25 +455,36 @@ export class ImageChain {
  * (display hex); undefined when the chain state holds none there.
  */
 export async function chainHeader(store: Store, height: number): Promise<{ hash: string; root: string } | undefined> {
-  const state = await headTree(store, "chain/state");
-  if (!state) return undefined;
-  const v = await store.get(state).catch(() => undefined) as { kind?: string; maps?: { headers?: CID | null } } | undefined;
   const key = Buffer.alloc(4);
   key.writeUInt32BE(height);
-  let node = v?.kind === "chain-state" ? v.maps?.headers ?? undefined : undefined;
+  const found = await chainMapGet(store, "headers", key);
+  if (found === undefined) return undefined;
+  const raw = await store.bytes(found as CID);
+  return { hash: display(sha256d(raw)), root: Buffer.from(raw.subarray(36, 68)).reverse().toString("hex") };
+}
+
+/**
+ * skein 0.6.0 (D3): whether the chain app's state (the head `chain/state`, map `txs`: txid (internal
+ * byte order) → its block) holds the transaction `txid` (display hex).
+ */
+export async function chainHolds(store: Store, txid: string): Promise<boolean> {
+  return (await chainMapGet(store, "txs", Buffer.from(txid, "hex").reverse())) !== undefined;
+}
+
+/** One key's value in a map of the chain app's state (a Merkle search tree), or undefined. */
+async function chainMapGet(store: Store, map: string, key: Buffer): Promise<unknown> {
+  const state = await headTree(store, "chain/state");
+  if (!state) return undefined;
+  const v = await store.get(state).catch(() => undefined) as { kind?: string; maps?: Record<string, CID | null> } | undefined;
+  let node = v?.kind === "chain-state" ? v.maps?.[map] ?? undefined : undefined;
   while (node) {
     const [left, es] = dagCbor.decode(await store.bytes(node)) as [CID | null, Array<[Uint8Array, unknown, CID | null]>];
     let next: CID | null = left;
-    let found: unknown;
     for (const [k, val, right] of es) {
       const c = Buffer.compare(Buffer.from(k), key);
-      if (c === 0) { found = val; break; }
+      if (c === 0) return val ?? null;
       if (c > 0) break;
       next = right;
-    }
-    if (found) {
-      const raw = await store.bytes(found as CID);
-      return { hash: display(sha256d(raw)), root: Buffer.from(raw.subarray(36, 68)).reverse().toString("hex") };
     }
     node = next ?? undefined;
   }

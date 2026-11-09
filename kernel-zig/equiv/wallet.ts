@@ -6,8 +6,10 @@
 // (shruggr/skein-chain, installed into both instances with `skein-host
 // install`): the feed's headers go to the chain app; the wallet reads
 // `chain/state` by CID and hands every transaction to the chain app as an
-// `ingest` message to the instance itself (the host's loopback), then waits
-// on the chain app's answers — accepted, proven, rejected. The wallet never
+// `ingest` message to the instance itself (the host's loopback) and finishes
+// its step (skein 0.6.0, D9: no await, no callback; every status is the chain
+// app's fact chain/tx/<txid>, read here at the host's event route; a coin's
+// status is computed from the chain state at read time). The wallet never
 // broadcasts; the chain app does. Then the stores are replayed Zig against
 // Zig (equiv/replays.ts): the signer's answers come from the recorded calls.
 //
@@ -71,7 +73,7 @@ const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFi
 const WALLET_CID = encode(WALLET).cid;
 // The chain app (#78, #79): SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -179,9 +181,18 @@ async function owned(body: Record<string, unknown>, to = toWallet, v: View = vie
   await to.send(to === toWallet ? identity : payeeId, "wallet", body);
   return resultWhere(String(body.op), (r) => r.op === body.op, 30_000, v);
 }
-/** The chain app's next answer to a wallet thread: the callback step it drives. */
-const answered = (what: string, thread: CID, pred: (r: Result) => boolean = () => true, v: View = view) =>
-  resultWhere(what, (res, _s, t) => t.equals(thread) && res.op === "callback" && pred(res), 30_000, v);
+/**
+ * skein 0.6.0 (D9, David 2026-11-09: "There's no replies necessary"): the wallet sends `ingest` and finishes its step;
+ * every status is the chain app's fact chain/tx/<txid> (skein-chain 0.8.0), read at the host's event route. → the
+ * statuses so far, once `status` is among them.
+ */
+const facts = async (inst: string, txid: string) => {
+  const res = await fetch(`${h.base}/@${inst}/events/chain/tx/${txid}`);
+  if (res.status !== 200) throw new Error(`GET /@${inst}/events/chain/tx/${txid}: ${res.status}`);
+  return (await res.json() as Array<{ record: { status?: string } }>).map((x) => String(x.record.status));
+};
+const fact = (what: string, inst: string, txid: string, status: string) =>
+  until(what, async () => { await h.router.settled(); const f = await facts(inst, txid); return f.includes(status) ? f.join(",") : undefined; }, 30_000);
 
 function cloneChain(): string {
   const dir = join(h.home, "skein-chain");
@@ -203,12 +214,10 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   const bTx = Transaction.fromAtomicBEEF([...(b.result.tx as Uint8Array)]);
   out.bSpendsA = bTx.inputs.some((i) => (i.sourceTXID ?? i.sourceTransaction?.id("hex")) === txA);
   out.awaiting = [a.state, b.state];
-  await answered("A accepted", a.thread, (r) => r.outcome === "accepted");
-  await answered("B accepted", b.thread, (r) => r.outcome === "accepted");
+  await fact("A accepted", "wallettest", txA, "accepted");
+  await fact("B accepted", "wallettest", txB, "accepted");
   arcade.emit(txA, { txStatus: "DOUBLE_SPEND_ATTEMPTED" });
-  const ra = await answered("A rejected", a.thread, (r) => r.outcome === "rejected");
-  const rb = await answered("B rejected", b.thread, (r) => r.outcome === "rejected");
-  out.rejected = { a: [ra.result.reason, ra.state], b: [rb.result.reason, rb.state] };
+  out.rejected = { a: await fact("A rejected", "wallettest", txA, "rejected"), b: await fact("B rejected", "wallettest", txB, "rejected") };
   const list = await owned({ op: "list", includeSpent: true });
   out.inputsFreed = list.result.total === total0;
   out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
@@ -219,17 +228,18 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   out.spendsEdge = bSpends.length === 1 && bSpends[0]!.locator === String(Transaction.fromHex(Buffer.from(await view.bytes(txCid(txB))).toString("hex")).inputs[0]!.sourceOutputIndex);
 
   // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. The chain
-  // app turns it back to unproven and broadcasts it again; the wallet rewrites nothing and lists that
-  // change unproven again.
+  // app turns it back to unproven (the fact reorged; nothing broadcast, skein-chain 0.7.1); the wallet
+  // rewrites nothing and lists that change unproven again.
   const posts = arcade.posts.length;
   const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
   const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
   // A heavier branch arrives as one run (its first header alone is no heavier than ours): one `header` event with `raws`.
   for (const inst of ["wallettest", "payee"]) await h.router.chainHeaders(inst, "chain", [alt103, alt104]);
-  await until("the reorg's rebroadcast", async () => { await h.router.settled(); return arcade.posts.slice(posts).some((p) => FakeArcade.txOf(p).id("hex") === reorg.spend) ? true : undefined; });
+  // skein-chain 0.7.1: a reorg broadcasts nothing; 0.8.0: the fact `reorged`.
+  await fact("the reorg", "wallettest", reorg.spend, "reorged");
   const after = await owned({ op: "list", includeSpent: true });
   out.reorg = {
-    reposted: true,
+    reposted: arcade.posts.slice(posts).some((p) => FakeArcade.txOf(p).id("hex") === reorg.spend),
     change: (after.result.outputs as Array<Record<string, unknown>>).filter((o) => o.txid === reorg.spend).map((o) => o.status),
   };
   return out;
@@ -294,8 +304,8 @@ try {
     op: "internalize", tx: new Uint8Array(pay.toAtomicBEEF()), description: "funding",
     outputs: [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix, derivationSuffix, senderIdentityKey: ownerId } }],
   });
-  const payAccepted = await answered("the payment accepted", r.thread, (x) => x.outcome === "accepted");
-  report.internalize = [r.result.txid === pay.id("hex"), r.result.status, r.state, payAccepted.result.outcome];
+  const payAccepted = await fact("the payment accepted", "wallettest", pay.id("hex"), "accepted");
+  report.internalize = [r.result.txid === pay.id("hex"), r.result.status, r.state, payAccepted];
 
   // Spend: pay the payee 10000 (BRC-29 to its key). The step emits the ingest message to the instance itself (no broadcast of its own).
   const p2 = Buffer.from("payee-prefix").toString("base64"), s2 = Buffer.from("payee-suffix").toString("base64");
@@ -305,13 +315,14 @@ try {
   const spendThread = r.thread;
   const msg = await view.get(r.update.emitted![0]!) as unknown as { kind: string; recipient: Uint8Array; box: string; body: CID };
   const msgBody = await view.get(msg.body) as unknown as { fn: string; args: { beef: Uint8Array } };
-  const acc = await answered("Arcade's RECEIVED → accepted", spendThread, (x) => x.outcome === "accepted");
+  void spendThread;
+  const acc = await fact("Arcade's RECEIVED → accepted", "wallettest", spendTxid, "accepted");
   await h.router.settled();
   const posted = arcade.posts.map((p) => FakeArcade.txOf(p)).find((t) => t.id("hex") === spendTxid);
   report.create = {
     state: r.state, awaiting: r.result.awaiting, outcome: r.result.outcome,
     ingest: [msg.kind, Buffer.from(msg.recipient).toString("hex") === identity, msg.box, msgBody.fn, r.update.emitted!.length],
-    accepted: [acc.result.outcome, acc.result.txStatus, acc.state],
+    accepted: acc,
     postedByTheChainApp: !!posted, extendedFormat: !!posted && arcade.posts.some((p) => Buffer.from(p).equals(Buffer.from(posted.toEF()))),
     token: arcade.postHeaders.at(-1)!["x-callbacktoken"] === ARC_TOKEN,
     scriptsVerify: await Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]).verify("scripts only"),
@@ -323,8 +334,8 @@ try {
     op: "internalize", tx: r.result.tx, description: "from wallettest",
     outputs: [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: p2, derivationSuffix: s2, senderIdentityKey: identity } }],
   }, toPayee, payeeView);
-  const pacc = await answered("the payee's chain app accepts it", pr.thread, (x) => x.outcome === "accepted", payeeView);
-  report.payeeInternalize = [pr.result.txid === spendTxid, pr.result.status, pacc.result.outcome];
+  const pacc = await fact("the payee's chain app accepts it", "payee", spendTxid, "accepted");
+  report.payeeInternalize = [pr.result.txid === spendTxid, pr.result.status, pacc];
 
   // Mined at 103: the header, then MINED with the merkle path: both chain apps prove it, both threads finish.
   const h103 = mine(prev, internal(spendTxid), 1_790_000_000 + 103 * 600);
@@ -332,10 +343,18 @@ try {
   await resultWhere("header 103", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 103, 30_000, view, CHAIN);
   await resultWhere("the payee's header 103", (res) => res.event === "chain" && (res.chain as { height?: number } | undefined)?.height === 103, 30_000, payeeView, CHAIN);
   const path = new MerklePath(103, [[{ offset: 0, hash: spendTxid, txid: true }]]);
+  // D9: the payment's action and coins read right before and after its `mined`, no wallet step in between.
+  const statusOf = async (list: Awaited<ReturnType<typeof owned>>) => (list.result.outputs as Array<Record<string, unknown>>).filter((o) => o.txid === spendTxid).map((o) => o.status).join();
+  const before = await statusOf(await owned({ op: "list", includeSpent: true }));
+  const stepsBefore = (await updates(view)).length;
   arcade.emit(spendTxid, { txStatus: "MINED", blockHash: display(sha256d(h103)), blockHeight: 103, merklePath: path.toHex() });
-  const mined = await answered("proven", spendThread, (x) => x.outcome === "proven");
-  const pmined = await answered("the payee's proven", pr.thread, (x) => x.outcome === "proven", payeeView);
-  report.mined = { outcome: mined.result.outcome, state: mined.state, payee: [pmined.result.outcome, pmined.state] };
+  const mined = await fact("mined", "wallettest", spendTxid, "mined");
+  const pmined = await fact("the payee's mined", "payee", spendTxid, "mined");
+  await h.router.settled();
+  const stepsAfter = (await updates(view)).length;
+  const after = await statusOf(await owned({ op: "list", includeSpent: true }));
+  report.mined = { wallet: mined, payee: pmined };
+  report.d9 = { before, after, walletSteps: stepsAfter - stepsBefore };
 
   r = await owned({ op: "list", includeSpent: true });
   report.list = (r.result.outputs as Array<Record<string, unknown>>).map((o) => [o.txid === spendTxid ? "change" : o.txid === pay.id("hex") ? "payment" : "?", o.satoshis, o.spendable, o.status]);
@@ -347,9 +366,9 @@ try {
   const someone = new P2PKH().lock(new PrivateKey("5555", 16).toPublicKey().toHash()).toBinary();
   arcade.mode = "reject";
   r = await owned({ op: "createAction", description: "rejected", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 1_000 }] });
-  const rej = await answered("rejected", r.thread, (x) => x.outcome === "rejected");
+  const rej = await fact("rejected", "wallettest", r.result.txid as string, "rejected");
   arcade.mode = "ok";
-  report.rejected = { outcome: rej.result.outcome, reason: rej.result.reason, state: rej.state };
+  report.rejected = { facts: rej, state: r.state };
   r = await owned({ op: "list" });
   report.afterReject = r.result.total;
 
@@ -357,7 +376,7 @@ try {
   r = await owned({ op: "createAction", description: "draft", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 2_000 }], options: { signAndProcess: false } });
   const draft = { reference: r.result.reference as CID, awaiting: r.result.awaiting, emitted: r.update.emitted?.length ?? 0 };
   r = await owned({ op: "signAction", reference: draft.reference });
-  await answered("the signed draft accepted", r.thread, (x) => x.outcome === "accepted");
+  await fact("the signed draft accepted", "wallettest", r.result.txid as string, "accepted");
   report.draft = {
     hasReference: CID.asCID(draft.reference) !== null, draftNotIngested: draft.awaiting === undefined && draft.emitted === 0,
     awaiting: r.result.awaiting, scriptsVerify: await Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]).verify("scripts only"),
@@ -376,7 +395,7 @@ try {
   const unsigned = Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]);
   const callerUnlock = await new P2PKH().unlock(callerKey).sign(unsigned, 0);
   r = await owned({ op: "signAction", reference: callerDraft.reference, spends: { "0": { unlockingScript: new Uint8Array(callerUnlock.toBinary()) } } });
-  await answered("the caller-input action accepted", r.thread, (x) => x.outcome === "accepted");
+  await fact("the caller-input action accepted", "wallettest", r.result.txid as string, "accepted");
   const ct = Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]);
   const ours = ct.inputs.slice(1).map((i) => i.unlockingScript!.chunks);
   report.callerInput = {
@@ -386,7 +405,6 @@ try {
     callerScript: Buffer.from(ct.inputs[0]!.unlockingScript!.toBinary()).equals(Buffer.from(callerUnlock.toBinary())),
     walletFunded: ct.inputs.length >= 2 && ours.every((c) => c.length === 2 && c[1]!.data?.length === 33),
     scriptsVerify: await ct.verify("scripts only"),
-    awaiting: r.result.awaiting,
   };
 
   report.settlement = await settlementScenario(new Uint8Array(someone), { h102: prev, spend: spendTxid });
@@ -416,27 +434,28 @@ const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(eq(report.headers, ["chain", 102]) && report.walletTookNoHeader === true, `headers 1..102 from the host's feed reach the chain app (the host chain's chain events, #156); the wallet takes none (#79) (${JSON.stringify(report.headers)})`);
-check(eq(report.internalize, [true, "unproven", "waiting", "accepted"]), `a BRC-29 payment internalized, handed to the chain app (it broadcasts it), the thread answered accepted (${JSON.stringify(report.internalize)})`);
+check(eq(report.internalize, [true, "unproven", "finished", "accepted"]), `a BRC-29 payment internalized, handed to the chain app (it broadcasts it); the step finished at once (D9), the fact accepted (${JSON.stringify(report.internalize)})`);
 const c = (report.create ?? {}) as Record<string, unknown>;
-check(c.state === "waiting" && c.awaiting === true && c.outcome === "pending" && eq(c.ingest, ["mail", true, "chain", "ingest", 1]), `createAction: signed; its step emits one message — {fn: ingest} to the instance itself in box chain — and no broadcast of its own; the thread awaits it (${JSON.stringify(c)})`);
-check(eq(c.accepted, ["accepted", "RECEIVED", "waiting"]), `the chain app broadcast it; Arcade's RECEIVED makes it accepted: an answer to the same thread, which waits on (${JSON.stringify(c.accepted)})`);
+check(c.state === "finished" && c.awaiting === undefined && c.outcome === undefined && eq(c.ingest, ["mail", true, "chain", "ingest", 1]), `createAction: signed; its step emits one message — {fn: ingest} to the instance itself in box chain — and no broadcast of its own; D9: the step finishes, awaiting nothing (${JSON.stringify(c)})`);
+check(c.accepted === "accepted", `the chain app broadcast it; Arcade's RECEIVED makes it accepted: the fact chain/tx/<txid> (no reply to the wallet) (${JSON.stringify(c.accepted)})`);
 check(c.postedByTheChainApp === true && c.extendedFormat === true && c.token === true && c.scriptsVerify === true, "Arcade received it in Extended Format under the host's token (the chain app is the broadcaster); @bsv/sdk verifies its scripts");
 check(eq((c.outputs as number[] | undefined)?.slice(0, 1), [10000]) && (c.outputs as number[] | undefined)?.length === 2, `the payment and our change (${JSON.stringify(c.outputs)})`);
 check(eq(report.payeeInternalize, [true, "unproven", "accepted"]), `the payee internalizes the same transaction, its own chain app accepts it (${JSON.stringify(report.payeeInternalize)})`);
-check(eq(report.mined, { outcome: "proven", state: "finished", payee: ["proven", "finished"] }), `MINED with the BUMP: both chain apps prove it; both wallet threads are answered proven and finish (${JSON.stringify(report.mined)})`);
+check(eq(report.mined, { wallet: "accepted,mined", payee: "accepted,mined" }), `MINED with the BUMP: both chain apps prove it — the facts mined (${JSON.stringify(report.mined)})`);
 check(Array.isArray(report.list) && (report.list as unknown[][]).some((o) => o[0] === "change" && o[2] === true && o[3] === "proven") && (report.list as unknown[][]).some((o) => o[0] === "payment" && o[2] === false), `list: the change spendable and proven, the payment spent — computed from the chain state (${JSON.stringify(report.list)})`);
 check(eq(report.payeeList, [[true, 10000, true, "proven"]]), `the payee's list: the payment spendable and proven (${JSON.stringify(report.payeeList)})`);
-check(eq(report.rejected, { outcome: "rejected", reason: "REJECTED", state: "finished" }) && report.afterReject === report.total, `a rejected broadcast (Arcade's 400): answered rejected; the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
+check(eq(report.rejected, { facts: "rejected", state: "finished" }) && report.afterReject === report.total, `a rejected broadcast (Arcade's 400): the fact rejected; the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
+check(eq(report.d9, { before: "unproven", after: "proven", walletSteps: 0 }), `D9: the payment's change read before and after its \`mined\` — unproven, then proven — with no wallet step in between (computed from the chain state at read time) (${JSON.stringify(report.d9)})`);
 const d = (report.draft ?? {}) as Record<string, unknown>;
-check(d.hasReference === true && d.draftNotIngested === true && d.awaiting === true && d.scriptsVerify === true && d.posted === true, `a draft (signAndProcess: false) is not ingested; signAction signs it, ingests it, the chain app broadcasts it (${JSON.stringify(d)})`);
-check(eq(report.callerInput, { draft: true, unsignedHasNoScripts: true, input0: true, callerScript: true, walletFunded: true, scriptsVerify: true, awaiting: true }), `#93: a caller's input (unlockingScriptLength 108) with the wallet's funding: a signable draft; signAction with the caller's spend for input 0 — the caller's script at input 0, the wallet's P2PKH on its own; scripts verify (${JSON.stringify(report.callerInput)})`);
+check(d.hasReference === true && d.draftNotIngested === true && d.awaiting === undefined && d.scriptsVerify === true && d.posted === true, `a draft (signAndProcess: false) is not ingested; signAction signs it, ingests it, the chain app broadcasts it (${JSON.stringify(d)})`);
+check(eq(report.callerInput, { draft: true, unsignedHasNoScripts: true, input0: true, callerScript: true, walletFunded: true, scriptsVerify: true }), `#93: a caller's input (unlockingScriptLength 108) with the wallet's funding: a signable draft; signAction with the caller's spend for input 0 — the caller's script at input 0, the wallet's P2PKH on its own; scripts verify (${JSON.stringify(report.callerInput)})`);
 const st = (report.settlement ?? {}) as Record<string, unknown>;
-check(eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): A, then B spending A's change, both ingested and awaited (${JSON.stringify([st.awaiting, st.bSpendsA])})`);
-check(eq(st.rejected, { a: ["DOUBLE_SPEND_ATTEMPTED", "finished"], b: ["input-rejected", "finished"] }), `a DOUBLE_SPEND_ATTEMPTED for A: the chain app rejects A and B (it spends A); both threads are answered rejected and finish (${JSON.stringify(st.rejected)})`);
+check(eq(st.awaiting, ["finished", "finished"]) && st.bSpendsA === true, `settlement (#37): A, then B spending A's change, both ingested (D9: neither step waits) (${JSON.stringify([st.awaiting, st.bSpendsA])})`);
+check(eq(st.rejected, { a: "accepted,rejected", b: "accepted,rejected" }), `a DOUBLE_SPEND_ATTEMPTED for A: the chain app rejects A and B (it spends A): the facts rejected (${JSON.stringify(st.rejected)})`);
 check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected coins vanish; A's input is spendable again — read from the chain state, nothing of the wallet's rewritten (${JSON.stringify([st.inputsFreed, st.noOutputsOfAB])})`);
 check(st.mentions === true, "the results name the transactions as `mentions` edges");
 check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B's own kept block, locator = the vout it spends");
-check(eq(st.reorg, { reposted: true, change: ["unproven"] }), `a reorg drops block 103: the chain app broadcasts the spend again; the wallet lists its change unproven (${JSON.stringify(st.reorg)})`);
+check(eq(st.reorg, { reposted: false, change: ["unproven"] }), `a reorg drops block 103: the fact reorged, nothing broadcast (skein-chain 0.7.1); the wallet lists its change unproven (${JSON.stringify(st.reorg)})`);
 check(eq(report.heads, [true, true, true]), `the wallet's head is wallet/state, the chain's chain/state; no \`wallet\` head (${JSON.stringify(report.heads)})`);
 check(report.sameChainProgram === true, "the same chain app program record in both instances");
 check(eq(report.edges, { sameRoot: true, spends: true }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges (${JSON.stringify(report.edges)})`);

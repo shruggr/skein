@@ -438,8 +438,8 @@ const OVERLAY_FIELDS = ["topics", "lookups", "gossip", "market", "validator", "t
 
 /**
  * The wiring `config.overlay` asks for (APPS.md §6, #79, #143), or its problems. For each topic:
- * the libp2p routes `<topic>` → submit (kernel.beef), `<topic>-admit` → peerAdmit, `<topic>-proof`
- * → peerProof; the http route `/submit` (kernel.beef: a submission validates itself — #135, signed
+ * the libp2p routes `<topic>` → submit (kernel.beef), `<topic>-admit` → peerAdmit (skein 0.6.0, D2:
+ * no `<topic>-proof` — proofs never travel by gossip); the http route `/submit` (kernel.beef: a submission validates itself — #135, signed
  * or validated) and `/lookup` (BRC-24's POST: answered by the engine's `lookup`, a filter — a read
  * route, nothing logged); and the app's own box twice: an `event` route (what its libp2p routes
  * admit — a gossiped submission, a peer's admit) and a `mailbox` route (its own watch of a
@@ -495,7 +495,6 @@ export function overlayWiring(app: string, ov: unknown, isRole: (role: string) =
       ...topics.flatMap((t): Route[] => [
         { transport: "libp2p", address: t, filters: beef, handler: engine("submit") },
         { transport: "libp2p", address: `${t}-admit`, handler: engine("peerAdmit") },
-        { transport: "libp2p", address: `${t}-proof`, handler: engine("peerProof") },
       ]),
     ],
   };

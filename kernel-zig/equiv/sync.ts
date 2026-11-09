@@ -1,5 +1,5 @@
 // Overlay sync (shruggr/skein#150; the settled design, David 2026-10-30) end to
-// end over libp2p: shruggr/skein-chain 0.7.1 and shruggr/skein-overlay 0.20.0
+// end over libp2p: shruggr/skein-chain 0.9.0 and shruggr/skein-overlay 0.25.0
 // (pinned commits, or $SKEIN_CHAIN_DIR /
 // $SKEIN_OVERLAY_DIR) installed by the owner's messages into stock-system
 // instances on three routers, each topic registered by the owner (the beats
@@ -22,7 +22,10 @@
 //     is refused at a's door (400 ERR_BEEF MissingInput: skein-sdk's verifier
 //     over the BEEF alone), nothing written for it, nothing wanted; p, b's
 //     unmined tail on tm_demo (never announced: gossip off), reaches a and c
-//     by the tail reconcile on b's next beat.
+//     by the tail reconcile on b's next beat;
+//   - skein 0.6.0 (D3, case b): p mined at 6, its proof known to b only: a's
+//     pull finds p held by its chain app and not mined there — ONE proof event
+//     with p's own path (MerklePath.extract), no fetch; a places p at 6.
 //
 // Each instance's store then replays to itself exactly.
 //
@@ -47,12 +50,13 @@ import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
+import { txCid } from "../../src/host/feeds.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "a9ec5ee9ed7aeab011b9458c99ad1d6802d8f60c"; // v0.20.0
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "v0.25.0";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "7da428422ce193a1bb489163637f070860d46ccd"; // v0.7.1
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-sync-"));
@@ -239,7 +243,7 @@ try {
   mf.config.overlay.validator = { every: 1000 };
   mf.config.overlay.gossip = { tm_demo: false };
   writeFileSync(join(overlayDir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  check(mf.version === "0.20.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
+  check(mf.version === "0.25.0", `skein-overlay ${mf.version} at ${OVERLAY_REV.slice(0, 7)}`);
 
   await bring("a");
   await bring("b");
@@ -308,6 +312,24 @@ try {
   // and c's hosts, on b's next beat (the mined side equal, the tail digest not), ask b's tail and fetch p.
   const pTail = await until("p reaches a and c by the tail", async () => (await holdsOn("a", p.id("hex"))).via && (await holdsOn("c", p.id("hex"))).via ? true : undefined, 30_000).catch(() => false);
   check(pTail === true, "p (unmined, never announced) reaches a and c by the tail reconcile on b's beat");
+
+  // ------------------------------------------------ skein 0.6.0 (D3, case b): the pull delivers a proof for a held transaction
+  // p mined at 6; only b learns its proof (a proof event, as its Arcade would). a holds p unmined (its tail on tm_demo):
+  // on b's beat (tm_demo's tip anchor not a's) a's host pulls b's list at 6, finds p held by its chain app and not
+  // mined there, cuts p's own path from the block's BUMP and admits ONE proof event — no fetch. a's chain app makes it
+  // mined; its overlay places it; the anchors equal.
+  await quiet();
+  const h6 = mineAlone(p);
+  for (const hh of names) await feedHeaders(hh, h6);
+  const pid = p.id("hex");
+  const factsOf = async (hh: Name) => (await (await fetch(`${origin(hh)}/events/chain/tx/${pid}`)).json() as Array<{ record: { status?: string; height?: number } }>).map((x) => `${x.record.status}${x.record.height !== undefined ? `@${x.record.height}` : ""}`);
+  await r("b").admitEvent("b", "chain", { kind: "proof", subject: txCid(pid), txid: pid, path: Uint8Array.from(p.merklePath!.toBinary()) });
+  await r("b").settled();
+  const demoTip = async (hh: Name) => (await (await fetch(`${origin(hh)}/overlay/anchors?topic=tm_demo`)).json() as { tipHeight?: number }).tipHeight;
+  check(await until("b places p at 6", async () => (await demoTip("b")) === 6 || undefined, 30_000).then(() => true, () => false), `b: p mined at 6, tm_demo's tip 6 (${await demoTip("b")})`);
+  const placedA = await until("a places p at 6 by the pull's proof", async () => (await demoTip("a")) === 6 || undefined, 60_000).then(() => true, () => false);
+  check(placedA, `a: p mined and placed at 6 from the pull's proof event (tm_demo's tip ${await demoTip("a")})`);
+  check((await factsOf("a")).filter((x) => x.startsWith("mined")).join() === "mined@6", `a's chain app: one proof, mined at 6 (${(await factsOf("a")).join(",")})`);
   await quiet();
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

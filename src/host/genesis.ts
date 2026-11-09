@@ -203,9 +203,9 @@ export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
   resolve: ["resolve/"],
   wallet: ["wallet/"],
-  // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:
-  // its heads are `chain/…`, as an installed chain app's are by the name rule.
-  chain: ["chain/"],
+  // skein 0.6.0 (D8, David 2026-11-09): no `chain` — the chain app (shruggr/skein-chain) and the
+  // overlay are in a genesis only as apps (#141 heads), updatable by a logged install, never as
+  // genesis-wired system programs; an installed chain app writes `chain/…` by the name rule.
 };
 
 /** A system's config (etc/config.json): every field optional; keys in hex, `$self`, `$infer` or a provider's `$<name>`. */

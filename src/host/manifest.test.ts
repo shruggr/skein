@@ -252,9 +252,9 @@ test("config.overlay derives the wiring: three libp2p routes per topic, /submit 
     "event overlay→overlay", "mailbox overlay→overlay",
     "http /overlay/submit [kernel.beef]→overlay.submit",
     "http /overlay/lookup [overlay.lookup]→(read)",
-    "libp2p tm_demo [kernel.beef]→overlay.submit", "libp2p tm_demo-admit→overlay.peerAdmit", "libp2p tm_demo-proof→overlay.peerProof",
+    "libp2p tm_demo [kernel.beef]→overlay.submit", "libp2p tm_demo-admit→overlay.peerAdmit",
   ]);
-  assert.deepEqual(c.derived, { routes: ["event overlay", "mailbox overlay", "http /overlay/submit", "http /overlay/lookup", "libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof"] });
+  assert.deepEqual(c.derived, { routes: ["event overlay", "mailbox overlay", "http /overlay/submit", "http /overlay/lookup", "libp2p tm_demo", "libp2p tm_demo-admit"] });
   assert.deepEqual(m.filters, { topics: "overlay.listTopicManagers", lookup: "overlay.lookup" }, "the derived /lookup's filter: the engine's lookup");
   // Another name, the same tree: its box is its own name — two overlay apps do not clash (#79).
   const two = checkManifest({ ...overlayApp(demoOverlay), name: "amm" }, (p) => overlayFiles.has(p));
@@ -266,7 +266,7 @@ test("config.overlay: two topics; what the manifest names itself wins", () => {
   const explicit = { transport: "libp2p", address: "tm_two", handler: "topic-demo.own" };
   const c = checkManifest(overlayApp(ov, { routes: [explicit], filters: { lookup: "lookup-demo.mine" } }), (p) => overlayFiles.has(p));
   const libp2p = c.manifest.routes.filter((r) => r.transport === "libp2p").map((r) => `${r.address}→${r.handler}`);
-  assert.deepEqual(libp2p, ["tm_two→topic-demo.own", "tm_demo→overlay.submit", "tm_demo-admit→overlay.peerAdmit", "tm_demo-proof→overlay.peerProof", "tm_two-admit→overlay.peerAdmit", "tm_two-proof→overlay.peerProof"]);
+  assert.deepEqual(libp2p, ["tm_two→topic-demo.own", "tm_demo→overlay.submit", "tm_demo-admit→overlay.peerAdmit", "tm_two-admit→overlay.peerAdmit"]);
   assert.ok(!c.derived.routes.includes("libp2p tm_two"), "an explicit route is not derived");
   assert.deepEqual(c.manifest.filters, { lookup: "lookup-demo.mine" }, "a filter the manifest declares itself wins");
   assert.ok(!c.manifest.routes.some((r) => r.address === "chain" || r.address === "status" || r.address === "submit"), "no chain, status or submit box: the chain app's, and the app's own box");

@@ -22,7 +22,7 @@ export function rawCid(bytes: Uint8Array): CID {
 /** The modules as committed under wasm/ (see wasm/README.md). A test checks these against the files. */
 export const MODULES = {
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreifmo2fz45wn3vukhcf226bpnfh6klu7w5m43of76mx6olgghnzqkq"),
+  "wallet": CID.parse("bafkreiaufe7s52aqspvrfquzaupdbsmg44qlg3i7sr75zx7out6rm6cxfm"),
 } as const;
 
 /** The wallet program record's description (also the default image's bin/wallet.json: the same record, #116). */

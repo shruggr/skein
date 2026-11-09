@@ -1,8 +1,8 @@
 //! wallet: the handler program for the `wallet` box (issues #29, #79), a
 //! wasm32-wasi command stepped with the `skein` imports (kernel-zig
 //! program.zig). One run is one step over one input: an owner's message
-//! (args.body), or — for a thread resting on the chain app — the chain app's
-//! answer to its `ingest` (input.reply).
+//! (args.body), or the kernel's pay step. skein 0.6.0 (D9, David 2026-11-09:
+//! "There's no replies necessary"): the wallet waits on nothing.
 //!
 //! **The wallet keeps its own records, the chain is the chain app's** (#79):
 //! its state is the head `wallet/state` (the name rule: an app writes only
@@ -28,12 +28,12 @@
 //! A transaction goes to the chain app as a message (#79): the wallet emits
 //! `{fn: "ingest", args: {beef}}` to the instance itself (the host's
 //! loopback) in box `chain`, which the chain app takes from `$self`, and
-//! ends its step awaiting the message. The chain app records it (SPV against
+//! finishes its step at once (skein 0.6.0: no await, no `callback` step —
+//! its state never changed on a reply). The chain app records it (SPV against
 //! the instance's headers), broadcasts it if it is unproven (it is the only
-//! broadcaster), and answers on each change: `accepted` (the first status
-//! that is not a rejection), `proven`, `rejected` (a status, a double spend,
-//! abandonment) — each answer steps this thread again (`op: "callback"`);
-//! `accepted` waits on, `proven` and `rejected` end it.
+//! broadcaster), and emits every status as the fact `chain/tx/<txid>`
+//! (skein-chain 0.8.0); whoever wants it rests on that name. A coin's status
+//! is computed from the chain state at read time, as before.
 //!
 //! Body operations (dag-cbor; docs/WALLET.md):
 //!   {op: "internalize", tx, outputs, description, labels?}   BRC-100 internalizeAction (Atomic BEEF)
@@ -86,7 +86,6 @@ const sk = if (component) @import("skein_wit") else struct {
     extern "skein" fn advance(name: [*]const u8, name_len: u32, tree: [*]const u8, tree_len: u32) i32;
     extern "skein" fn wallet(frame: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
     extern "skein" fn emit(msg: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
-    extern "skein" fn @"await"(cid: [*]const u8, cid_len: u32) i32;
     extern "skein" fn take(out: [*]u8, cap: u32) i32;
     extern "skein" fn @"error"(out: [*]u8, cap: u32) i32;
     extern "skein" fn edges(to: [*]const u8, to_len: u32, rel: [*]const u8, rel_len: u32, out: [*]u8, cap: u32) i32;
@@ -712,15 +711,6 @@ fn encodeOutputs(a: std.mem.Allocator, outputs: []const w.wallet.Wallet.CreateOu
     return out;
 }
 
-/// Ask the chain app to take a transaction (#79): `{fn: "ingest", args: {beef}}` to the instance
-/// itself in box `chain` (the host's loopback; the chain app's row from `$self`). → the message's CID,
-/// which the step then awaits: each of the chain app's answers names it as `replyTo`.
-fn ingest(a: std.mem.Allocator, me: []const u8, beef: []const u8) ![]const u8 {
-    const c = try emitIngest(a, me, beef);
-    if (sk.@"await"(c.ptr, @intCast(c.len)) < 0) return failed();
-    return c;
-}
-
 /// The `ingest` message to the chain app, emitted (not awaited) → its CID.
 fn emitIngest(a: std.mem.Allocator, me: []const u8, beef: []const u8) ![]const u8 {
     const body = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
@@ -744,13 +734,9 @@ fn run(a: std.mem.Allocator) !void {
     };
     const args = step.get("args") orelse return error.BadInput;
     const me = (step.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
-    const reply = step.get("reply");
     var body: Value = .null;
     var op: []const u8 = undefined;
-    if (reply != null and reply.? == .map) {
-        op = "callback";
-        body = try s.getValue(a, reply.?.getCid("body") orelse return error.BadInput);
-    } else if (args.get("pay")) |p| {
+    if (args.get("pay")) |p| {
         // #130: the kernel's pay step.
         op = "pay";
         body = p;
@@ -876,30 +862,6 @@ fn run(a: std.mem.Allocator) !void {
                 .{ .key = "reason", .value = .{ .text = "nothing to pay with: no coins, or none that covers the fee" } },
             });
         }
-    } else if (eql(u8, op, "callback")) {
-        // The chain app's answer to our `ingest`: accepted (wait on), proven or rejected (done), or an error.
-        const r = reply.?;
-        const asked = r.getCid("replyTo") orelse return error.BadInput;
-        try out.append(a, .{ .key = "ingest", .value = .{ .cid = asked } });
-        if (body.get("error")) |e| {
-            try out.appendSlice(a, &.{
-                .{ .key = "outcome", .value = .{ .text = "error" } },
-                .{ .key = "error", .value = .{ .text = e.getText("message") orelse "" } },
-            });
-        } else {
-            const res = body.get("result") orelse return error.BadInput;
-            const chain_state = res.getText("state") orelse "";
-            if (res.getText("txid")) |t| try out.append(a, .{ .key = "txid", .value = .{ .text = t } });
-            try out.append(a, .{ .key = "outcome", .value = .{ .text = chain_state } });
-            if (res.getText("txStatus")) |ts| try out.append(a, .{ .key = "txStatus", .value = .{ .text = ts } });
-            if (res.getText("reason")) |rs| try out.append(a, .{ .key = "reason", .value = .{ .text = rs } });
-            if (eql(u8, chain_state, "accepted") or eql(u8, chain_state, "unproven")) {
-                if (sk.@"await"(asked.ptr, @intCast(asked.len)) < 0) return failed();
-                try out.append(a, .{ .key = "awaiting", .value = .{ .boolean = true } });
-            }
-        }
-        // Nothing of ours changes: a rejected transaction's coins vanish at read time (the chain state says so).
-        mutates = false;
     } else if (eql(u8, op, "list")) {
         mutates = false;
         const basket = body.getText("basket") orelse "default";
@@ -938,12 +900,9 @@ fn run(a: std.mem.Allocator) !void {
         try out.append(a, .{ .key = "state", .value = .{ .cid = c } });
     }
     if (to_ingest) |beef| {
-        const m = try ingest(a, me, beef);
-        try out.appendSlice(a, &.{
-            .{ .key = "ingest", .value = .{ .cid = m } },
-            .{ .key = "outcome", .value = .{ .text = "pending" } },
-            .{ .key = "awaiting", .value = .{ .boolean = true } },
-        });
+        // skein 0.6.0 (D9): emitted, not awaited; the step ends here.
+        const m = try emitIngest(a, me, beef);
+        try out.append(a, .{ .key = "ingest", .value = .{ .cid = m } });
     }
     // The transactions this result is about, as `mentions` (kernel edges from the thread).
     {

@@ -33,8 +33,11 @@
 //              libp2p  {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
 //                      a GossipSub message, signature and all — the same record an accepted
 //                      message is routed as (box `libp2p:<topic>`)
-//                      {kind: "p2p-frame", protocol, from: bytes, body: bytes}
-//                      one frame of an inbound stream (unsigned: the stream is Noise's)
+//                      {kind: "p2p-frame", protocol, from: bytes, body: bytes, topic?}
+//                      one frame of an inbound stream (unsigned: the stream is Noise's);
+//                      0.6.0: `topic`, on a frame the host itself writes into an overlay's
+//                      receive row, the one topic it fetched the BEEF for (the front door
+//                      hands it to the handler)
 //              local   {kind: "message", message: <a mail record>, body: bytes}
 //                      a message the host carried in with its body (#70): a provider's
 //                      answer or a forwarded claim, signed (the front door checks the
