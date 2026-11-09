@@ -26,7 +26,8 @@
 //       claimed by the shared key, its app record's config the one asked;
 //       (skein-amm#4) the image carries the chain app and the overlay
 //       (skein-overlay 0.17.0), the create's config names T2's topic, a
-//       lookup and terms (skein 0.6.1: no `beef` on a create): the topic and
+//       lookup and terms (skein 0.6.1: no `beef` on a create); its first entry is
+//       its deploy, submitted at the bare host's /submit as a wallet does: the topic and
 //       the lookup beating on <name>-live with the configured
 //       terms; stop disables it and takes it off the node, start brings it
 //       and its beats back;
@@ -381,7 +382,7 @@ try {
   const imgDir = join(homeO, "images", "okimg");
   mkdirSync(join(imgDir, "etc"), { recursive: true });
   // skein-amm#4: the chain app and the overlay beside okt (with no rows: app-demo's own manifest has a start message, not at birth),
-  // so a create's `config` can name the new instance's topic and its `beef` be judged under it.
+  // so a create's `config` can name the new instance's topic and the deploy submitted to it be judged under it.
   // #137: and the overlay's two root routes (skein-overlay "Root routes"), as skein-amm's token image has them, so a request
 // the router routes by topic to an instance born from it is answered at its /submit and /lookup.
 writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir, overlayDir, appTree("img", [])], routes: [
@@ -406,7 +407,7 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
     await r.settled();
     return answers.slice(k).filter((a) => a.box === box && a.handle === from);
   };
-  // skein-amm#4: the create carries a mined token's BEEF; the new instance's overlay serves tm_color_T2 from its config at birth.
+  // skein-amm#4: the new instance's overlay serves tm_color_T2 from its config.
   const overlayAt = (t: string, terms?: Record<string, number>) => ({ overlay: { topics: { [t]: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: [t] } }, ...(terms ? { terms } : {}) } });
   const TERMS = { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
   const tE = await token(fund, 2);
@@ -421,9 +422,22 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const T2_TOPICS = [topicOf(T2), `ls_color_${T2}`];
   let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, topics: T2_TOPICS });
   const createMs = Date.now() - tc;
-  timings.push(`create by emit with the deploy's BEEF (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, to its answer): ${createMs} ms`);
+  timings.push(`create by emit (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, to its answer): ${createMs} ms`);
   check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 260)}`);
-  // skein 0.6.1 (D10): the create's `beef` is gone (nothing sends it); T2's token tE stays mined (the later cases spend it).
+  // skein 0.6.1 (D10): the create carries no BEEF. T2's first entry is its deploy tE, submitted at the host root with its
+  // topic as a wallet does (routed to T2); tE stays mined and (g) spends its output 1.
+  const tsub = Date.now();
+  const sE = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": topicOf(T2) }, body: Uint8Array.from(tE.toBEEF()) });
+  const sEBody = await sE.text();
+  await rO.settled();
+  check(sE.status === 200, `(e) T2's deploy submitted at the bare host, X-Topics tm_color_<txid>_2: ${sE.status} ${sEBody.slice(0, 160)}`);
+  const admittedE = await until("T2 admits its deploy", async () => {
+    const r = await fetch(`${base}/@${T2}/overlay/admitted?topic=${topicOf(T2)}&fromHeight=${hE}&toHeight=${hE}`);
+    if (r.status !== 200) return undefined;
+    const x = await r.json() as { blocks?: Array<{ txids: string[] }> };
+    return x.blocks?.some((b) => b.txids.includes(tE.id("hex"))) || undefined;
+  }, 10_000).catch(() => false);
+  check(admittedE === true, `(e) T2 admitted its deploy under tm_color_<txid>_2 (at ${hE})`);
   // skein-overlay 0.17.0: a configured topic and lookup beat on <name>-live (the validator's every: 1000 ms here),
   // the beat's terms config.overlay.terms (the initial value: no head overlay/terms written).
   const liveAt = async (name: string) => {
@@ -435,7 +449,7 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const tl = Date.now();
   const topicBeats = await until("T2 beats tm_color_<txid>_2-live", () => liveAt(topicOf(T2)), 5000).catch(() => undefined);
   const lookupBeats = await until("T2 beats ls_demo-live", () => liveAt("ls_demo"), 5000).catch(() => undefined);
-  timings.push(`a configured topic's first beat seen after the create's answer: ${Date.now() - tl} ms (validator every 1000 ms)`);
+  timings.push(`a configured topic's first beat seen after the deploy's submission: ${Date.now() - tl} ms (${Date.now() - tsub} ms from the submit; validator every 1000 ms)`);
   const beatTerms = topicBeats ? (dagCbor.decode(Buffer.from(topicBeats[0]!.body, "base64")) as { terms?: Record<string, number> }).terms : undefined;
   check(!!topicBeats && !!lookupBeats, `(e) its configured topic and lookup beat: .live/tm_color_<txid>_2-live ${topicBeats?.length ?? 0} beat(s), .live/ls_demo-live ${lookupBeats?.length ?? 0}`);
   const sorted = (o: object | undefined) => JSON.stringify(o && Object.fromEntries(Object.entries(o).sort()));
