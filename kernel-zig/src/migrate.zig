@@ -33,7 +33,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, from: []const u8, into: []const 
     };
 
     if (!std.mem.startsWith(u8, into, any.ROCKS_PREFIX)) {
-        std.debug.print("--into {s}: the target is rocksdb:<db dir> (LMDB is no longer supported)\n", .{into});
+        std.debug.print("--into {s}: the target must be rocksdb:<db dir>\n", .{into});
         return 1;
     }
     const dir = into[any.ROCKS_PREFIX.len..];

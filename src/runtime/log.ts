@@ -75,8 +75,7 @@ export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Pro
 // Before format 2 (#33) an entry was the host's statement, signed by the
 // host: protocol [2, "skein log"], key "1", counterparty anyone, over the
 // entry's dag-cbor without `sig`. The kernel refuses such a store; these are
-// kept for what makes one to check that (kernel-zig/equiv/old-store.ts) and
-// for the signature fixtures (kernel-zig/test/fixtures.ts).
+// kept for the signature fixtures (kernel-zig/test/fixtures.ts).
 
 export const LOG_PROTOCOL: WalletProtocol = [2, "skein log"];
 export const LOG_KEY_ID = "1";

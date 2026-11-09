@@ -1,5 +1,5 @@
-// `skein-kernel shell <db> [<program>]`: the Zig side of the shell equivalence
-// test (equiv/shell.ts; host-go/node/run-shell.ts is the TypeScript side). The
+// `skein-kernel shell <db> [<program>]`: shell cases from stdin run through the
+// shell program (equiv/git.ts drives it). The
 // shell is a program record in the store (#83): <program> its CID, else the
 // shell app's (the app record at the head `shell/app`, its `programs.shell`).
 // A case is {cmd, tree, cwd?, env?: [[k, v]…], stdin?: base64, time?, seed?};
@@ -44,7 +44,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, db: []const u8, program: ?[]cons
 
     // Issue #34: SKEIN_SHELL_COMPONENTS=<dir> runs the tools found there as
     // <name>.wasm (components made with the preview1 adapter) in place of the
-    // pinned modules, so equiv/shell.ts can compare the two ABIs case by case.
+    // pinned modules, so the two ABIs can be compared case by case.
     if (envm.get("SKEIN_SHELL_COMPONENTS")) |dir| try useComponents(gpa, io, r, mods, dir);
 
     var in_buf: [4096]u8 = undefined;

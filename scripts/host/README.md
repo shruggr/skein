@@ -754,10 +754,9 @@ where they use one. Unset means the default.
 | `SKEIN_EQUIV_BROWSER` | `0`: skip the browser parts of equiv/run.sh |
 | `SKEIN_CHROMIUM`, `SKEIN_PLAYWRIGHT` | the Chromium and the Playwright package the browser parts use |
 | `SKEIN_BROWSER_MAX_MB` | the largest store the browser replay takes (default 256) |
-| `SKEIN_EQUIV_SHOW`, `SKEIN_EQUIV_KEEP`, `SKEIN_EQUIV_NO_COMPONENTS` | equiv/shell.ts: print the cases, keep the work dir, skip the component runs |
 | `SKEIN_WALLET_ABI`, `SKEIN_WALLET_COMPONENT`, `SKEIN_WALLET_REPORT` | equiv/wallet.ts: run the wallet as a component, which build, and where to write its report |
 | `SKEIN_FETCH_COMPONENT` | equiv/fetch.ts: the fetch component's build |
-| `SKEIN_WASI_ADAPTER` | the preview1 adapter for component builds (programs/*/build.zig, equiv/shell.ts) |
+| `SKEIN_WASI_ADAPTER` | the preview1 adapter for component builds (programs/*/build.zig) |
 | `SKEIN_P2P_KEEP` | p2p-router.test.ts: keep its stores |
 | `SKEIN_POLLS` | router.test.ts: how many polls the poll test makes (default 100) |
 | `SKEIN_TEST_MESSAGEBOX_HOST` | web/envelope.test.ts: the live messagebox it tries (default `http://127.0.0.1:8100`) |

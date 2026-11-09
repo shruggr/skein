@@ -88,5 +88,4 @@ record.
 
 Dead or legacy code, not yet removed: `host-go/` (a shell experiment, not a
 host); the format-1 `LogEntry` type in `src/runtime/store.ts` (and the
-sqlite store's envelope/outcome indexes) that the old-store refusal check
-still writes; `attested` in `src/runtime/records.ts` and `types.ts`.
+sqlite store's envelope/outcome indexes), no longer written by any check; `attested` in `src/runtime/records.ts` and `types.ts`.
