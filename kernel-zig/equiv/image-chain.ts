@@ -42,7 +42,7 @@ import { readLog } from "../../src/runtime/log.ts";
 import { parseTree } from "../../src/runtime/tree.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
 import { storeSpec } from "../../src/runtime/index-store.ts";
-import { BACKEND, LMDB_MODE, ROCKS_MODE } from "./backend.ts";
+import { BACKEND, ROCKS_MODE } from "./backend.ts";
 
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "4d3f595c0f073db63223907fcd0909d53e770b91";
@@ -96,7 +96,7 @@ const N = 30, M = 20;
 mineTo(N);
 const afters: Array<() => unknown> = [];
 const ownerKey = PrivateKey.fromRandom();
-const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey, genesis: { defaults: { walletNetwork: "regtest" } }, headersFeed: `${ctUrl}/tip/stream`, lmdb: LMDB_MODE, rocks: ROCKS_MODE });
+const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey, genesis: { defaults: { walletNetwork: "regtest" } }, headersFeed: `${ctUrl}/tip/stream`, rocks: ROCKS_MODE });
 let store = "";
 const specOf = (handle: string) => storeSpec(h.db.get(handle)!);
 try {

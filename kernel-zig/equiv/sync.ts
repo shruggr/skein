@@ -86,7 +86,7 @@ function checkout(envDir: string | undefined, repo: string, rev: string, dir: st
   return dir;
 }
 
-// ---------------------------------------------------------------- regtest (as equiv/install-overlay.ts)
+// ---------------------------------------------------------------- regtest
 
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 const internal = (displayHex: string) => Buffer.from(displayHex, "hex").reverse();
@@ -105,7 +105,7 @@ function mine(prev: Uint8Array, merkleRoot: Uint8Array, time: number): Uint8Arra
   }
 }
 
-/** Every overlay step's result record in a store, oldest first, each once (as install-overlay.ts). */
+/** Every overlay step's result record in a store, oldest first, each once. */
 async function overlayResults(file: string): Promise<Array<Record<string, unknown>>> {
   const v = openStoreFile(file, { readOnly: true });
   const out: Array<{ at: number; r: Record<string, unknown> }> = [];

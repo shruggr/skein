@@ -35,7 +35,7 @@ import { DEFAULTS } from "../../src/runtime/log.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
-import { LMDB_MODE, ROCKS_MODE, routerStore } from "./backend.ts";
+import { ROCKS_MODE, routerStore } from "./backend.ts";
 import { inboxes, type Inboxes } from "./inboxes.ts";
 
 type Json = Record<string, unknown>;
@@ -118,7 +118,7 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   };
   let first: string | undefined;
   let ownerBox: string | undefined;
-  // #96, SKEIN_EQUIV_STORE=lmdb: the host's agents are sets of one environment, out/<first agent>.lmdb.
+  // #158, SKEIN_EQUIV_STORE=rocksdb: the host's agents are sets of one database (below).
   let env: string | undefined;
   const add = async (name: string) => {
     keys.set(name, key());
@@ -127,7 +127,6 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
       // The owner's mailbox before the first agent's genesis (which names it): the owner's messagebox setting.
       first = name;
       // #158, SKEIN_EQUIV_STORE=rocksdb: sets of one RocksDB database, out/<first agent>.rocksdb, in one `skein-kernel host`.
-      if (LMDB_MODE) { env = join(out, `${name}.lmdb`); await fs.rm(env, { recursive: true, force: true }); }
       if (ROCKS_MODE) { env = join(out, `${name}.rocksdb`); await fs.rm(env, { recursive: true, force: true }); }
       ownerBox = await inbox(ownerKey, "david", `${name}-david`);
       router.o.ownerMessagebox = ownerBox;
@@ -184,8 +183,8 @@ async function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, as:
 }
 
 const made: string[] = [];
-const scheme = ROCKS_MODE ? "rocksdb:" : "lmdb:";
-/** #96: a store's name → its LMDB set (lmdb:<env>#<handle>), in LMDB mode. */
+const scheme = "rocksdb:";
+/** #158: a store's name → its RocksDB set (rocksdb:<db dir>#<handle>), in RocksDB mode. */
 const specs = new Map<string, string>();
 const specOf = (n: string) => specs.get(n) ?? join(out, `${n}.db`);
 

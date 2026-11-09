@@ -42,9 +42,7 @@ engine is not pinned here: a tree carries its modules.
 `kernel-zig/equiv/overlay.ts` runs it end to end as part of
 `kernel-zig/equiv/run.sh`: it clones skein-overlay and skein-chain at
 pinned commits (or takes `$SKEIN_OVERLAY_DIR`, `$SKEIN_CHAIN_DIR`) and boots
-instances from trees carrying their `bin/*.wasm`;
-`kernel-zig/equiv/install-overlay.ts` installs both as apps, and two
-overlay apps on one instance.
+instances from trees carrying their `bin/*.wasm`.
 
 ## How an overlay app activates a token topic live (#119)
 
@@ -92,8 +90,7 @@ docs/MESSAGES.md "libp2p (#51)", "Subscriptions".
 
 The steps below were run on skein main 9b06db6 with skein-chain v0.3.0
 (61b03c6) and skein-overlay v0.4.1 (d5df94e), on regtest, with no Arcade;
-the outputs are trimmed. `kernel-zig/equiv/install-overlay.ts` runs the same
-install, submit and lookup in the equivalence suite.
+the outputs are trimmed.
 
 **Prerequisites.** The overlay admits a submission on the chain app's
 answer, and the chain app proves nothing without the host's headers feed

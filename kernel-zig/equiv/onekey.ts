@@ -158,7 +158,7 @@ const dPeer = peerIdOf(derived.peerKey("dd")).toString();
 const arcade = await FakeArcade.start();
 const lines: string[] = [];
 const log = (who: string) => (s: string, l: string) => { lines.push(`[${who}:${s}] ${l}`); if (process.env.VERBOSE || /^sync: /.test(l)) process.stdout.write(`  | [${who}:${s}] ${l}\n`); };
-const cliVars = { SKEIN_HOME: homeO, HOME: homeO, SKEIN_KEY_FILE: keyFile, SKEIN_KERNEL_BIN: kernel, ...(BACKEND === "rocksdb" ? { SKEIN_STORE_ROCKSDB: join(homeO, "store-rocksdb") } : BACKEND === "lmdb" ? { SKEIN_STORE: join(homeO, "store") } : BACKEND === "wasm" ? { SKEIN_STORE_SQLITE: join(homeO, "store.sqlite") } : {}) };
+const cliVars = { SKEIN_HOME: homeO, HOME: homeO, SKEIN_KEY_FILE: keyFile, SKEIN_KERNEL_BIN: kernel, ...(BACKEND === "rocksdb" ? { SKEIN_STORE_ROCKSDB: join(homeO, "store-rocksdb") } : BACKEND === "wasm" ? { SKEIN_STORE_SQLITE: join(homeO, "store.sqlite") } : {}) };
 async function cli(args: string[]): Promise<{ code: number; out: string[]; err: string[] }> {
   const out: string[] = [], err: string[] = [];
   const code = await main(args, { vars: cliVars, out: (l) => out.push(l), err: (l) => err.push(l) });
@@ -414,7 +414,7 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const hE = mineAlone(tE);
   await feedHeaders(rO, T0, hE);
   // A host with a headers feed fills its image's chain from it (#132): a new instance is born with the headers (on
-  // SQLite and LMDB each instance holds them; on RocksDB the host chain is the kernel process's, #156).
+  // SQLite each instance holds them; on RocksDB the host chain is the kernel process's, #156).
   await (rO as unknown as { image: { headers(raws: Uint8Array[]): Promise<void> } }).image.headers([REGTEST_GENESIS, ...headers.slice(0, hE)]);
   const config = { okt: { onekey: "the admin's initial values" }, overlay: overlayAt(topicOf(T2), TERMS) };
   const tc = Date.now();

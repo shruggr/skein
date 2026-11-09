@@ -471,7 +471,7 @@ docs/OVERLAY.md there have the walkthrough.
 cd kernel-zig && mise exec -- zig build          # first: the host tests run kernel-zig/zig-out/bin/skein-kernel
 cd kernel-zig && mise exec -- zig build test     # the kernel's unit tests
 npm test                                         # the host, client, formats (node --test src/**/*.test.ts)
-TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, replay exactness, apps, browser, the wasm host
+TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: git, replay exactness, apps, browser, the wasm host
 SKEIN_TEST_STORE=sqlite npm test                 # the host suite with every test host on the wasm kernel
 ```
 

@@ -660,8 +660,7 @@ admitted on `accepted` is watched on (a message to its own box from
 `$self`): `proven` publishes `<topic>-proof`, `rejected` removes its
 judgements. Lookups read the chain state for BEEFs and spent-ness. So
 **two overlay apps on one instance coexist by construction**: two names,
-two sets of heads, two boxes, one chain state (kernel-zig/equiv/install-overlay.ts
-installs the same tree twice, as `overlay` and `overlay2`). Two overlays
+two sets of heads, two boxes, one chain state. Two overlays
 running the same overlay topic would claim the same libp2p rows: one topic,
 one overlay app per instance.
 
@@ -739,8 +738,7 @@ engine with its example topic manager and lookup service. Its
 Installed (after the chain app; without it the install is refused,
 `requires chain/1`), it asks for its listing rows and the derived ones:
 mailbox `overlay` from `event` and `$self`, http `/overlay/submit` and
-`/overlay/lookup`, libp2p `tm_demo`, `tm_demo-admit`, `tm_demo-proof`
-(equiv/install-overlay.ts installs it from its repo and checks each).
+`/overlay/lookup`, libp2p `tm_demo`, `tm_demo-admit`, `tm_demo-proof`.
 
 **A multi-tenant overlay is a choice, not core.** An overlay app that wants
 to accept topic managers from outside may offer `overlay.topics/1`

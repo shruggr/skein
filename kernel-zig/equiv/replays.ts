@@ -18,21 +18,15 @@
 // and a source the Zig kernel wrote itself (equiv/serve.ts; format 1) is
 // reproduced exactly by its replay.
 //
-// Both backends (#96): the same log is also replayed into a set of a fresh
-// LMDB environment, which must come to the same report and dump as z1 (the
-// same state CID, the same CIDs); a SQLite source the Zig kernel wrote is
-// also migrated into a set (`skein-kernel migrate`), whose dump must be the
-// source's and whose replay must come to z1's state. A source may itself be
-// an LMDB set, `lmdb:<env dir>#<set>`: read in place (read only).
+// The backends, proven equal here (#158): the same log is also replayed into
+// a set of a fresh RocksDB database (the same report and dump as z1), and a
+// SQLite source the Zig kernel wrote is migrated into one (`skein-kernel
+// migrate --into rocksdb:<dir>`: the same dump; its replay z1's state). A
+// source may be a RocksDB set, `rocksdb:<db dir>#<set>`, read in place once
+// the host process that wrote it is stopped (one process per database), or a
+// set of a wasm host's SQLite database, `sqlite:<db>#<set>` (exported first).
 //
-// RocksDB (#158): the same log is also replayed into a set of a fresh RocksDB
-// database (the same report and dump as z1), and a SQLite source the Zig
-// kernel wrote, or an LMDB set, is migrated into one (`skein-kernel migrate
-// --into rocksdb:<dir>`: the same dump; its replay z1's state). A source may
-// be a RocksDB set, `rocksdb:<db dir>#<set>`, read in place once the host
-// process that wrote it is stopped (one process per database).
-//
-//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | lmdb:<dir>#<set> | rocksdb:<dir>#<set>>…
+//   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | rocksdb:<dir>#<set> | sqlite:<db>#<set>>…
 //
 // SQLite sources are copied first (with their -wal), never opened in place.
 
@@ -94,7 +88,7 @@ function dumpDiff(x: Dump, y: Dump, what: string): string[] {
 
 /** A file the Zig kernel wrote in the current format (its state record has `format`). */
 function isZigStore(db: string): boolean {
-  if (db.startsWith("lmdb:") || db.startsWith("rocksdb:")) {
+  if (db.startsWith("rocksdb:")) {
     if (run(["fuel", db]).status !== 0) return false;
     const x = dump(db);
     return x.updates.some((u) => u[3] !== null) || !x.chains.some((c) => c[3] === "thread");
@@ -149,9 +143,8 @@ function withoutHostChain(d: Dump, db: string): Dump {
 let allSame = true;
 for (const source of sources) {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-replay-"));
-  const lmdbSource = source.startsWith("lmdb:");
   const rocksSource = source.startsWith("rocksdb:");
-  const setSource = lmdbSource || rocksSource;
+  const setSource = rocksSource;
   // The settled split: a set of a wasm host's SQLite database, `sqlite:<db>#<set>` — exported as a native kernel's store
   // file (its blocks, the host chain's, its pointers: store-sqlite.ts exportSet) and replayed natively from there: what the
   // wasm kernel wrote, reproduced by the native reference (requirement 1).
@@ -166,7 +159,7 @@ for (const source of sources) {
     const d = new DatabaseSync(src); d.exec("PRAGMA wal_checkpoint(TRUNCATE)"); d.close();
   }
   const z1 = join(work, "z1.db"), z2 = join(work, "z2.db");
-  const name = setSource || sqliteSet ? `${source.slice(source.lastIndexOf("#") + 1)} (${lmdbSource ? "lmdb" : rocksSource ? "rocksdb" : "wasm host's sqlite"} set)` : `${basename(dirname(source))}/${basename(source)}`;
+  const name = setSource || sqliteSet ? `${source.slice(source.lastIndexOf("#") + 1)} (${rocksSource ? "rocksdb" : "wasm host's sqlite"} set)` : `${basename(dirname(source))}/${basename(source)}`;
 
   let t0 = Date.now();
   const r1 = run(["replay", src, z1]);
@@ -223,41 +216,16 @@ for (const source of sources) {
   const zigSource = isZigStore(src);
   if (zigSource) {
     const ds = dump(src);
-    // #156: a RocksDB set reads the host chain through the host/chain set, which is not its own; the
-    // replay (a fresh file) holds the blocks its `chain` events name. Compared without those.
-    // A wasm host's set (exported with the whole host/chain set beside it): both sides without the host chain's blocks.
-    const sd = dumpDiff(sqliteSet ? withoutHostChain(ds, src) : ds, rocksSource || sqliteSet ? withoutHostChain(d1, z1) : d1, "source vs replay");
+    // #156: the host chain's blocks are compared on neither side, for every store kind. A RocksDB set reads
+    // the host chain through the host/chain set, which is not its own (its dump holds none of them); a wasm
+    // host's set is exported with the whole host/chain set beside it; a serve instance's file holds its own
+    // host chain; the replay (a fresh file) holds the blocks its `chain` events name.
+    const sd = dumpDiff(rocksSource ? ds : withoutHostChain(ds, src), withoutHostChain(d1, z1), "source vs replay");
     diffs.push(...sd);
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
   }
-  // #96: the other backend — the same log replayed into a set of a fresh LMDB environment.
-  t0 = Date.now();
-  const zl = `lmdb:${join(work, "env")}#replay`;
-  const rl = run(["replay", src, zl]);
-  const msl = Date.now() - t0;
-  if (rl.status !== 0) diffs.push(`replay into LMDB failed (exit ${rl.status}): ${rl.stderr.slice(0, 300)}`);
-  else {
-    const jl = JSON.parse(rl.stdout);
-    for (const k of ["lines", "state"] as const) if (JSON.stringify(jl[k]) !== JSON.stringify(j1[k])) diffs.push(`LMDB replay ${k} differ from SQLite's`);
-    if (jl.index.record !== j1.index.record) diffs.push(`state record: LMDB ${jl.index.record} vs SQLite ${j1.index.record}`);
-    diffs.push(...dumpDiff(dump(zl), d1, "LMDB replay vs SQLite replay"));
-  }
-  // #96: migrate — a SQLite source the Zig kernel wrote, into a set: the same dump; its replay the same state.
   let migrated = "";
-  if (!setSource && zigSource) {
-    const zm = `lmdb:${join(work, "menv")}#migrated`;
-    const m = run(["migrate", "--from", src, "--into", join(work, "menv"), "--set", "migrated"]);
-    if (m.status !== 0) diffs.push(`migrate failed (exit ${m.status}): ${m.stderr.slice(0, 300)}`);
-    else {
-      const md = dumpDiff(dump(src), dump(zm), "source vs migrated");
-      diffs.push(...md);
-      const rm = run(["replay", zm, join(work, "zm.db")]);
-      if (rm.status !== 0) diffs.push(`replay of the migrated set failed (exit ${rm.status})`);
-      else if (JSON.parse(rm.stdout).index.record !== j1.index.record) diffs.push(`the migrated set's replay ends at ${JSON.parse(rm.stdout).index.record}, the source's at ${j1.index.record}`);
-      if (!md.length) migrated = " · migrated to LMDB: the same dump and replay";
-    }
-  }
-  // #158: RocksDB — the same log replayed into a set of a fresh database; a Zig source (a file, an LMDB set) migrated into one.
+  // #158: RocksDB — the same log replayed into a set of a fresh database; a Zig source (a file) migrated into one.
   t0 = Date.now();
   const zr = `rocksdb:${join(work, "rdb")}#replay`;
   const rr = run(["replay", src, zr]);
@@ -279,7 +247,7 @@ for (const source of sources) {
       const rm = run(["replay", zm, join(work, "zrm.db")]);
       if (rm.status !== 0) diffs.push(`replay of the RocksDB-migrated set failed (exit ${rm.status})`);
       else if (JSON.parse(rm.stdout).index.record !== j1.index.record) diffs.push(`the RocksDB-migrated set's replay ends at ${JSON.parse(rm.stdout).index.record}, the source's at ${j1.index.record}`);
-      if (!md.length) migrated += " · migrated to RocksDB: the same dump and replay";
+      if (!md.length) migrated = " · migrated to RocksDB: the same dump and replay";
     }
   }
   const n = d1.entries.length;
@@ -291,7 +259,7 @@ for (const source of sources) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);
   } else {
-    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into LMDB ${msl} ms, into RocksDB ${msr} ms, the same)${fromSource}${migrated}\n`);
+    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into RocksDB ${msr} ms, the same)${fromSource}${migrated}\n`);
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
