@@ -26,12 +26,10 @@
 //       claimed by the shared key, its app record's config the one asked;
 //       (skein-amm#4) the image carries the chain app and the overlay
 //       (skein-overlay 0.17.0), the create's config names T2's topic, a
-//       lookup and terms, and its `beef` is a mined token: answered
-//       delivered {verdict: "accept"}, admitted under the configured topic,
-//       the topic and the lookup beating on <name>-live with the configured
+//       lookup and terms (skein 0.6.1: no `beef` on a create): the topic and
+//       the lookup beating on <name>-live with the configured
 //       terms; stop disables it and takes it off the node, start brings it
-//       and its beats back; a create with an unmined BEEF answers delivered
-//       {verdict: ignore|reject, reason}, the instance created and enabled;
+//       and its beats back;
 //       T1 (not named) is not acted on; on D (master key) a
 //       create with no claim is refused as before;
 //   (f) D's dd syncs tm_color_T0 from T0 (the #150 sync path: the locator and
@@ -421,19 +419,11 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   const tc = Date.now();
   // #137: the create names the overlay names the host routes to it.
   const T2_TOPICS = [topicOf(T2), `ls_color_${T2}`];
-  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, beef: Uint8Array.from(tE.toAtomicBEEF()), topics: T2_TOPICS });
+  let a = await ask(rO, "alice", "create", { handle: T2, image: "okimg", config, topics: T2_TOPICS });
   const createMs = Date.now() - tc;
-  timings.push(`create by emit with the deploy's BEEF (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, the BEEF delivered, to its answer): ${createMs} ms`);
-  check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url, delivered}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 260)}`);
-  const del = a[0]?.body.delivered as { verdict?: string; reason?: string } | undefined;
-  check(del?.verdict === "accept", `(e) the create's BEEF (a token mined at ${hE}) delivered into the new instance: ${JSON.stringify(del)}`);
-  const admittedE = await until("T2 admits the create's BEEF", async () => {
-    const r = await fetch(`${base}/@${T2}/overlay/admitted?topic=${topicOf(T2)}&fromHeight=${hE}&toHeight=${hE}`);
-    if (r.status !== 200) return undefined;
-    const x = await r.json() as { blocks?: Array<{ txids: string[] }> };
-    return x.blocks?.some((b) => b.txids.includes(tE.id("hex"))) || undefined;
-  }, 10_000).catch(() => false);
-  check(admittedE === true, `(e) the new instance admitted it under tm_color_<txid>_2, the topic its config at birth declares (/@<txid>_2/overlay/admitted at ${hE})`);
+  timings.push(`create by emit with the deploy's BEEF (the manager's create of ${T2.slice(0, 8)}…_2 from the image okimg, host-claimed, to its answer): ${createMs} ms`);
+  check(a.length === 1 && a[0]!.body.handle === T2 && a[0]!.body.url === `${rO.origin()}/@${T2}` && hex(a[0]!.body.identity) === shared.toPublicKey().toString(), `(e) alice's create answered {handle, identity, url}: ${JSON.stringify({ ...a[0]?.body, identity: hex(a[0]?.body.identity).slice(0, 10) }).slice(0, 260)}`);
+  // skein 0.6.1 (D10): the create's `beef` is gone (nothing sends it); T2's token tE stays mined (the later cases spend it).
   // skein-overlay 0.17.0: a configured topic and lookup beat on <name>-live (the validator's every: 1000 ms here),
   // the beat's terms config.overlay.terms (the initial value: no head overlay/terms written).
   const liveAt = async (name: string) => {
@@ -470,16 +460,6 @@ writeFileSync(join(imgDir, "etc/apps.json"), JSON.stringify({ install: [chainDir
   check(a[0]?.body.started === true && dbO.get(T2)?.status === "enabled" && rO.p2p!.handlesOn(T0).includes(T2) && !!restarted, `(e) start enables it again and its configured topic beats again (${restarted?.length ?? 0} beat(s))`);
   check(dbO.get(T2)?.topics === JSON.stringify(T2_TOPICS), `(e) a start with no topics keeps the row's (${dbO.get(T2)?.topics})`);
   await ask(rO, "alice", "stop", { handle: T2 });
-  // An unmined BEEF: turned away at the door (the HARD RULE), reported in the answer, the instance created and enabled.
-  const TU = `${TXID}_10`;
-  const tU = await token(fund, 3);
-  a = await ask(rO, "alice", "create", { handle: TU, image: "okimg", config: { overlay: overlayAt(topicOf(TU)) }, beef: Uint8Array.from(tU.toAtomicBEEF()) });
-  const delU = a[0]?.body.delivered as { verdict?: string; reason?: string } | undefined;
-  const rowU = dbO.get(TU);
-  if (rowU) { stores.push(storeSpec(rowU)); handleOf.set(storeSpec(rowU), TU); }
-  check(a[0]?.body.handle === TU && (delU?.verdict === "reject" || delU?.verdict === "ignore") && !!delU?.reason, `(e) a create with an unmined BEEF answers delivered ${JSON.stringify(delU)}`);
-  check(rowU?.status === "enabled", `(e) … and the instance is created and enabled (${rowU?.status})`);
-  await ask(rO, "alice", "stop", { handle: TU });
   const nLines = lines.length;
   a = await ask(rO, T1, "create", { handle: `${TXID}_9`, image: "okimg" });
   check(a.length === 0 && !dbO.get(`${TXID}_9`) && lines.slice(nLines).some((l) => /the instance manager takes messages from the host skein only: not acted on/.test(l)), "(e) T1 (not named) gets the manager's refusal: not acted on, nothing created");
