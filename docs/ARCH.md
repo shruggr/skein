@@ -69,7 +69,7 @@ kernel's four tables".)
 
 **Write scope by name, reads by CID.** No app writes another app's data,
 and the kernel enforces it: an app's programs `advance` only heads under
-the app's name (`chain/state`, `wallet/state`, `overlay/ls_demo`). The
+the app's name (`chain/state`, `overlay/ls_demo`). The
 scope is read from a program record only when the owner installed that
 record — a genesis program, a dispatch row's program, or one listed in its
 app's record at `<app>/app` — so a record a program puts itself, claiming
@@ -130,7 +130,7 @@ owner. `APPS.md` is the specification.
 | mail | `programs/mail` | the skein's own mail: `/sendMessage` for this instance only; delivery threads to other identities' messageboxes |
 | messagebox | shruggr/skein-messagebox | the hosted BRC-33 messagebox, in the host skein: one mailbox per key onboard records, under `/messagebox/`; send and ack in the request's step, list a read |
 | resolve | `programs/resolve` | BRC-169 handle lookup; keeps what it finds under `resolve/peers` and answers with the record's CID (never the address book) |
-| wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`). Not installable: a genesis-wired program the kernel pins, with no `etc/app.json`; `wallet` is a reserved app name |
+| wallet | shruggr/skein-wallet | an app (0.7.0: no genesis wallet program; the name `wallet` is free for it) |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
 | site | shruggr/skein-site | the management page (#92): its own tree's `www` at `/site/` (and at `/` by the owner's row), served with skein-sdk's `files` (#125: the static app archived; serving files is a function any handler calls) |

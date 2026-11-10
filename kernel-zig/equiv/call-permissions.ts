@@ -121,7 +121,7 @@ try {
   // ------------------------------------------------ the grants record
   const grants = await record(spec, (await headRoot(spec, "grants"))!) as { calls?: Record<string, Record<string, string[]>>; services?: Record<string, string[]> };
   check(JSON.stringify(grants.calls?.pa) === JSON.stringify({ pb: ["1/amm pool"], pc: ["*"] }), `the grants' calls: pa → pb "1/amm pool", pc "*" (${JSON.stringify(grants.calls)})`);
-  check(JSON.stringify(grants.services?.pb) === '["signer"]' && JSON.stringify(grants.services?.["genesis:frontdoor"]) === '["signer"]' && JSON.stringify(grants.services?.["genesis:wallet"]) === '["signer"]', `the grants' services: pb, and the stock genesis's front door and wallet, at birth (${JSON.stringify(grants.services)})`);
+  check(JSON.stringify(grants.services?.pb) === '["signer"]' && JSON.stringify(grants.services?.["genesis:frontdoor"]) === '["signer"]' && grants.services?.["genesis:wallet"] === undefined, `the grants' services: pb, and the stock genesis's front door at birth (0.7.0: no genesis wallet) (${JSON.stringify(grants.services)})`);
 
   // ------------------------------------------------ named calls from a step
   let o = await probe("pa", { op: "call", prog: pb, fn: "who", name: "1/amm pool" });

@@ -9,7 +9,7 @@ const Value = cbor.Value;
 pub const Module = struct { name: []const u8, cid: []const u8 };
 
 /// MODULES, in declaration order (install order). Since #71 skein's own
-/// sources build only the mail program, the front door, resolve and the wallet
+/// sources build only the mail program, the front door and resolve
 /// (programs/, over the SDK, shruggr/skein-sdk, #75); the install handlers
 /// (objects, head, subscribe) went with #77: those are the kernel's own
 /// operations on admin messages (scheduler.zig kernelOp). Since #83 nothing
@@ -19,8 +19,6 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// modules), as are static (shruggr/skein-static) and the overlay engine
 /// (shruggr/skein-overlay).
 pub const modules = [_]Module{
-    // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreidm4rgrxdyfixexre7naw2xz72sow2iduy2sxaefere5knkeugvcm" },
     // The skein's own mail in and out (issues #33, #40): Zig, wasm32-wasi (programs/mail).
     .{ .name = "mail", .cid = "bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).

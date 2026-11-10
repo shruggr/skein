@@ -98,7 +98,7 @@ pub const Runner = struct {
             return r.keep(k, c);
         };
         const bytes = (s.bytes(a, cid) catch return error.Store) orelse {
-            msg.* = std.fmt.allocPrint(a, "module not in store: {s} (skein-dev install puts it there)", .{k}) catch "module not in store";
+            msg.* = std.fmt.allocPrint(a, "module not in store: {s}", .{k}) catch "module not in store";
             return error.NotInStore;
         };
         const raw = cidm.ofRaw(a, bytes) catch return error.OutOfMemory;

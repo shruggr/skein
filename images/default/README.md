@@ -1,7 +1,7 @@
 # The default image
 
 One genesis for everyone, with no root in it (#89, #143). It has the front
-door, the messagebox, the wallet (#116), the admin routes (root's:
+door, the messagebox, the admin routes (root's:
 nobody holds root yet) and the claim route, open: the first claim's sender
 is granted root (#127: never a key in its body) — the claimant's own
 message, or a claim signed before the instance existed, which the host
@@ -13,14 +13,11 @@ docs/BOOTSTRAP.md, "The default image".
 
 - `bin/frontdoor.cid`, `bin/mail.cid`: the kernel's pinned modules
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
-- `bin/wallet.cid`, `bin/wallet.json` (#116): the wallet — core, in
-  every skein — the same program record as src/runtime/programs.ts
-  `WALLET`.
 - `etc/dispatch.json` (#143: routes, no senders): the claim route, the
   handshake route, the skein's own `/sendMessage` (the mail program) and
   the explorer behind `kernel.brc104` (the explorer gated by root: every
-  genesis's `roles`). No route to the wallet: root funds the skein by the
-  wallet's `internalize` message on a route of its own (docs/WALLET.md).
+  genesis's `roles`). (0.7.0: no genesis wallet — a wallet is an app,
+  shruggr/skein-wallet, installed under the name `wallet`.)
 - `etc/config.json`: `{collect: []}`.
 - `chain/` (#132): **not in the repo** — the host adds it. The image a
   host boots skeins from is this directory with the whole header chain at

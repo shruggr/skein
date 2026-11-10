@@ -15,7 +15,6 @@ import { canonical, jcs, verify } from "../../src/runtime/envelope.ts";
 import { sign } from "../../src/envelope.ts";
 import { signAnyone, verifyAnyone } from "../../src/runtime/identity.ts";
 import { entryBytes, LOG_KEY_ID, LOG_PROTOCOL } from "../../src/runtime/log.ts";
-import { MODULES, WALLET } from "../../src/runtime/programs.ts";
 import { headOrigin } from "../../src/runtime/heads.ts";
 import { dispatchOrigin } from "../../src/runtime/dispatch.ts";
 import { entropy } from "../../src/runtime/syscalls.ts";
@@ -24,11 +23,20 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
+// A module CID to stand in for any (the mail program's pinned module, kernel-zig/src/programs.zig).
+const MODULE = CID.parse("bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4");
+// A handler program record's shape, over that module.
+const HANDLER = {
+  kind: "program", name: "handler", code: { wasm: MODULE },
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity", event: "cid" },
+  services: ["wallet", "http"], description: "A handler program (a fixture's stand-in).",
+};
+
 // A shell program record's shape (#83: the shell app's install writes one; src/host/install.ts shellProgram), over a stand-in module.
 const SHELL_PROGRAM = {
   kind: "program", name: "shell", code: { ts: "shell" },
-  modules: { brush: MODULES.wallet, coreutils: MODULES.wallet, node: MODULES.wallet },
-  support: { python: { mount: "/opt/skein/python", files: { "lib/python314.zip": MODULES.wallet }, env: { PYTHONHOME: "/opt/skein/python", PYTHONDONTWRITEBYTECODE: "1" } } },
+  modules: { brush: MODULE, coreutils: MODULE, node: MODULE },
+  support: { python: { mount: "/opt/skein/python", files: { "lib/python314.zip": MODULE }, env: { PYTHONHOME: "/opt/skein/python", PYTHONDONTWRITEBYTECODE: "1" } } },
   inputs: { cmd: "string", tree: "cid", cwd: "string?", env: "map?" }, services: [],
   description: "Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}.", app: "shell",
 };
@@ -38,8 +46,8 @@ const values: unknown[] = [
   null, true, false, 0, 1, -1, 23, 24, 255, 256, 65535, 65536, 2 ** 32, 2 ** 53 - 1, -(2 ** 53) + 1, 1.5, -0.25, 1e300, 2 ** 53, 0.1,
   "", "a", "héllo ☃ 𝄞", new Uint8Array([0, 1, 2, 255]), [1, [2, [3]]], {},
   { b: 1, a: 2, aa: 3, "": 4, "é": 5, z: { y: [null, "x"] } },
-  { kind: "log", prev: null, n: 0, time: [1_790_000_000, 250_000_000], genesis: MODULES.wallet, sig: new Uint8Array([48, 1]) },
-  SHELL_PROGRAM, WALLET,
+  { kind: "log", prev: null, n: 0, time: [1_790_000_000, 250_000_000], genesis: MODULE, sig: new Uint8Array([48, 1]) },
+  SHELL_PROGRAM, HANDLER,
 ];
 
 const cbor = values.map((v) => { const { cid, bytes } = encode(v); return { hex: hex(bytes), cid: cid.toString() }; });

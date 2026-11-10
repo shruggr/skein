@@ -200,7 +200,7 @@ for (const under of ["native", "wasm"] as const) {
     if (under === "native") {
       const replays = join(ROOT, "kernel-zig/equiv/replays.ts");
       for (const h of ["alpha", "beta"]) {
-        const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", replays, store(h)], { encoding: "utf8", env: { ...process.env, SKEIN_KERNEL: KERNEL } });
+        const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", replays, store(h)], { encoding: "utf8", env: { ...process.env, SKEIN_KERNEL_BIN: KERNEL } });
         assert.equal(r.status, 0, `${h} replays: ${r.stdout}\n${r.stderr}`);
         assert.match(r.stdout, /the source store reproduced exactly/, `${h}: ${r.stdout}`);
       }

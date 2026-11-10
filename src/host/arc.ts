@@ -38,7 +38,7 @@
 //       {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?} — admitted by an
 //       instance only if it has a row from that provider ({sender: <its key>, box: "chain/status"}). Optional: an instance
 //       without the subscription learns acceptance from the proof, rejection from a competing
-//       proof or abandonment (docs/WALLET.md).
+//       proof or abandonment (docs/CHAIN.md, "Settlement").
 //
 // A status already routed (txid + txStatus + blockHash, host.db
 // `status_seen`) is not routed again — but Arcade's answer to a post always

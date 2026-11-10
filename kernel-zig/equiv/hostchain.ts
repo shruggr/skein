@@ -40,7 +40,7 @@ import { CHAIN_APP } from "../../src/testapps.ts";
 import { storeSpec } from "../../src/runtime/index-store.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const kernelBin = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
+const kernelBin = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 

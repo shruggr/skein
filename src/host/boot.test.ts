@@ -25,7 +25,6 @@ import { ImageChain } from "./image-chain.ts";
 import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
 import { codeSystem, genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
-import { WALLET } from "../runtime/programs.ts";
 
 const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
 const key = () => PrivateKey.fromRandom().toPublicKey().toString();
@@ -86,9 +85,8 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   void t;
   const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
   const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail", "wallet"], "#116, #130: the wallet is core, in the image");
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail"], "0.7.0: the image's programs, no genesis wallet (a wallet is an app)");
   assert.equal(s.apps, undefined, "#152: no etc/apps.json — the image carries no apps");
-  assert.equal(encode(s.programs.find((p) => p.name === "wallet")!.record).cid.toString(), encode(WALLET).cid.toString(), "the image's wallet record is WALLET (bin/wallet.json)");
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const c = { identity: key(), handle: "a", domain: "localhost" };
   const g = genesisRecord(c, resolveSystem(c, programs, s.config, root, s.dispatch)) as Record<string, any>;
@@ -103,7 +101,7 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image's own routes (${http.join(", ")})`);
   assert.deepEqual(http.sort(), ["/.well-known/auth", "/explore", "/sendMessage"], "the image's http routes: the handshake, the skein's own /sendMessage and the explorer — no /listMessages, /acknowledgeMessage, nothing under /messagebox/ (the messagebox app's)");
   // The image names the kernel's pinned front door and mail program: the tree's .cid files are the wasm/ modules'.
-  for (const n of ["frontdoor", "mail", "wallet"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
+  for (const n of ["frontdoor", "mail"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
 });
 
 test("system tree: refusals — no routes, the forms before #77/#115, a sender, a bad .cid, a handler that is no program, $infer on a host without one, $owner", async (t) => {
@@ -272,7 +270,7 @@ test("#152: an image directory with no bin/ (an app repository's image/, etc/app
   if (src.kind !== "tree") return;
   assert.deepEqual(Object.keys(src.apps ?? {}), [".."], "the app beside the image is read with it");
   const s = await readSystemTree(src.objects, src.root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail", "wallet"], "the default image's programs");
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail"], "the default image's programs");
   const def = await imageSource(DEFAULT);
   assert.deepEqual(s.dispatch, (await readSystemTree(def.objects, def.root)).dispatch, "the default image's routes, the claim route among them");
   assert.ok(s.dispatch.some((r) => r.program === "kernel" && r.address === "claim"), "the claim route");

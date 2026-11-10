@@ -9,7 +9,7 @@
 #
 # Usage: prefix the command you'd otherwise run, from anywhere:
 #   cd kernel-zig && ../scripts/sdk-local.sh mise exec -- zig build test
-#   cd programs/wallet && ../../scripts/sdk-local.sh mise exec -- zig build
+#   cd programs/frontdoor && ../../scripts/sdk-local.sh mise exec -- zig build
 #
 # The sibling defaults to ../skein-sdk, next to this skein checkout
 # (`git clone https://github.com/shruggr/skein-sdk ../skein-sdk`);

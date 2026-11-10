@@ -804,7 +804,7 @@ more: one program, two rows, one interface.
   `proven` or `rejected`), each `{fn, request, replyTo, result}` at the
   caller's address — the shape of §4 with more than one answer. A caller in
   the same instance awaits its ingest message, and each answer steps it.
-- The wallet (docs/WALLET.md) and the overlay apps (§6) are such callers:
+- The overlay apps (§6) and a wallet app (shruggr/skein-wallet) are such callers:
   they keep their own records under their own names and read
   `chain/state` by CID.
 
@@ -907,7 +907,7 @@ bounded at 64 MiB).
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record `<app>/app`, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72, #79: skein-overlay 0.3.0 `src/config.zig`) |
 | the chain under `chain/` (one chain module, shruggr/skein-chain: ingest, broadcast, answers on each state change); `optional` rows; no open box (`event`, `$self`, `$owner`) | built (#78, #79, #121: §6a; skein-chain 0.3.0; skein-sdk 0.5.0 `chain`) |
-| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message (the wallet is a genesis-wired program the kernel pins, with scope `wallet/`, not an installable app: it has no `etc/app.json` and `wallet` is a reserved app name); two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0; skein-shell and skein-chat 0.1.0 since #83) |
+| each overlay under its own name, reading `chain/…`, ingesting by message; two overlay apps on one instance; the sibling apps' manifests in the #77 shape; (0.7.0) no genesis wallet program — a wallet is an app (shruggr/skein-wallet) under the name `wallet` | built (#79: skein-overlay 0.3.0; 0.7.0) |
 | the shell and the chat loop as apps (shruggr/skein-shell, shruggr/skein-chat); a shell program declared in a manifest, its modules files of the tree; no shell in a genesis | built (#83: §6b) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
 | apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-shell, shruggr/skein-chat, shruggr/skein-site, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |

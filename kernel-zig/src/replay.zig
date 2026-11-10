@@ -2,7 +2,7 @@
 // (either backend: a path, or rocksdb:<db dir>#<set>, any_store.zig),
 // a runtime with no wallet, attested answers served from the source's records
 // (the replay path the TypeScript runtime had, deleted in #55). The fresh
-// store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR
+// store first gets the pinned modules (from $SKEIN_WASM_DIR
 // or the repo's wasm/) and every module (raw block) the source holds, so an
 // old log runs the handlers it ran. Prints {lines, state, index} as
 // JSON: the runtime's log lines, the emits handed to the outbox, the log tip,
@@ -40,7 +40,7 @@ pub fn wasmDir(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
     return std.fs.path.join(gpa, &.{ exe, "..", "..", "..", "wasm" });
 }
 
-/// skein-dev install: the pinned modules from the wasm directory, checked against their CIDs.
+/// The pinned modules from the wasm directory, checked against their CIDs.
 pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: AnyStore, say: ?*const fn (line: []const u8) void) !void {
     const s = ss.store();
     const dir = try wasmDir(gpa, io);
@@ -61,8 +61,8 @@ pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: AnyStore, say: ?*const fn
         if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ m.name, m.cid }));
     }
     // SKEIN_EXTRA_MODULES=<file>:<file>…: modules that are not pinned, installed
-    // under their raw CIDs — how equiv/wallet.ts runs the wallet's component
-    // build (issue #34) without pinning it. Not for live instances.
+    // under their raw CIDs — how equiv/fetch.ts runs its component (issue #34)
+    // without pinning it. Not for live instances.
     if (envm.get("SKEIN_EXTRA_MODULES")) |list| {
         var it = std.mem.tokenizeScalar(u8, list, ':');
         while (it.next()) |path| {
@@ -84,7 +84,7 @@ pub fn copyLog(a: std.mem.Allocator, from: AnyStore, to: AnyStore) !void {
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
         try dst.putBlock(p.value.cid, b);
     }
-    // Programs the genesis's dispatch rows name that are not among its programs (the wallet, #29; a
+    // Programs the genesis's dispatch rows name that are not among its programs (a
     // route handler the middleware's steps call, #68): replay needs them as the source holds them.
     if (g.get("dispatch")) |rs| if (rs == .array) for (rs.array) |r| {
         const h = Value.cidOf(r.get("program")) orelse continue;

@@ -118,7 +118,7 @@ export class ManifestError extends Error {
   constructor(problems: string[]) { super(`etc/app.json:\n  ${problems.join("\n  ")}`); this.problems = problems; }
 }
 
-export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "grant", "grants", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "mail", "resolve", "reads", "root", "user"];
+export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "grant", "grants", "claim", "subscribe", "routes", "main", "sessions", "kernel", "frontdoor", "mail", "resolve", "reads", "root", "user"];
 /** The fields gone, refused: the form before #77 (#79), and #143's. */
 const GONE_FIELDS: Record<string, string> = {
   handler: "the form before #77 is gone (#79): name routes, and write only heads under the app's name",

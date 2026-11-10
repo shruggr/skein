@@ -1,8 +1,7 @@
 # wasm/
 
-The modules the kernel pins (`kernel-zig/src/programs.zig`; the wallet's
-also in `src/runtime/programs.ts`) and installs into every store
-(`skein-kernel serve`/`replay`, `skein-dev install`; `$SKEIN_WASM_DIR`
+The modules the kernel pins (`kernel-zig/src/programs.zig`) and installs into every store
+(`skein-kernel serve`/`replay`; `$SKEIN_WASM_DIR`
 overrides where they are read from). Each is checked against its pinned raw
 CID (CIDv1, raw, sha2-256) when it is installed.
 
@@ -11,7 +10,6 @@ CID (CIDv1, raw, sha2-256) when it is installed.
 | module | source | what |
 |---|---|---|
 | `mail.wasm`, `frontdoor.wasm`, `resolve.wasm` | `programs/` | the boundary programs (#40) |
-| `wallet.wasm` | `programs/wallet` | the wallet app's program (#29, #79), over the SDK's `wallet` and `chain` modules |
 | `wire-probe.wasm` | `programs/test/wire-probe` | a test program, not pinned |
 
 All of these are Zig 0.16.0 and `wasm32-wasi`, over the SDK (shruggr/skein-sdk,

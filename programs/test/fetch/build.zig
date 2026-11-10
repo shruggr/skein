@@ -1,7 +1,7 @@
 // fetch (issue #15, #70): GET a URL by a message to the `fetch` provider, the
 // body to stdout — a WASI 0.2 component (a test fixture for a component's
-// `emit`), Zig 0.16.0. Built as the wallet's component build is (programs/wallet/
-// build.zig, kernel-zig/README.md "Building a component handler"): a
+// `emit`), Zig 0.16.0. Built as kernel-zig/README.md "Building a component
+// handler" says: a
 // wasm32-wasi core module with wit-bindgen's C bindings for world
 // skein:kernel/program (the SDK's wit/bindings/c) and no libc
 // (the SDK's `cabi`), made a component with the preview1

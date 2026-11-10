@@ -75,13 +75,6 @@ else
   "${node[@]}" "$kz/equiv/browser-live.ts" || status=1
 fi
 
-echo "== the wallet in the VM (#29, #79): its own records under wallet/state over the chain app (shruggr/skein-chain at wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR): signer signing, every transaction ingested by a message to the instance itself, the chain app broadcasting to a fake Arcade and answering accepted/proven/rejected; settlement and a reorg read from chain/state; replayed"
-# Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
-if command -v wasm-tools > /dev/null; then
-  (cd "$kz/../programs/wallet" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
-fi
-"${node[@]}" "$kz/equiv/wallet.ts" || status=1
-
 echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
 "${node[@]}" "$kz/equiv/boot.ts" || status=1
 echo "== a component's emit (#15, #70): the fetch component through the router's fetch provider, its answer an entry; replayed with no host to ask"

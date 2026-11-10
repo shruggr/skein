@@ -1098,7 +1098,7 @@ A transaction's chain state (accepted, proven, rejected) is the chain
 app's, under `chain/state`; every reader computes settlement from it at
 read time, and a rejection is what a read sees once the chain state holds
 it. Nothing is deleted: history stays, and a thread that depended on a
-transaction reads its state again when the chain app answers (WALLET.md,
+transaction reads its state again when the chain app answers (docs/CHAIN.md,
 "Settlement").
 
 ## Routing
@@ -1164,8 +1164,8 @@ its length. A 64-byte transaction would be ambiguous; it is malformed by
 consensus-adjacent convention (Core refuses them, CVE-2017-12842), so 64
 bytes always reads as a node. The header's merkle root names the root node
 and each node its children, so a block's transaction tree is a DAG in the
-store, held sparsely (the paths to a wallet's own transactions), and a
-merkle proof is a walk down it (docs/WALLET.md "Proofs"); a transaction's
+store, held sparsely (the paths to the transactions held), and a
+merkle proof is a walk down it (docs/CHAIN.md "Proofs"); a transaction's
 inputs link what they spend, so the ancestry is a DAG too. Links to blocks
 not held point at absent CIDs (sparse, and fine). Intermediate
 trees and command output are recomputable and may be kept as cache or
@@ -1335,7 +1335,7 @@ header or merkle node contributes none: they stay records with forward links
 decoded), but nothing asks the reverse questions ("which header follows",
 "which node has this child"), and at chain scale they would cost ~200 bytes
 per header and ~4 KB per proven transaction for nothing. A proof is read
-downward from the block's root (docs/WALLET.md "Proofs").
+downward from the block's root (docs/CHAIN.md "Proofs").
 
 A kept transaction's edges are keyed `to ‖ block CID ‖ 0 ‖ ord`, like an
 origin's own: they do not depend on which thread kept it or when, so a
@@ -1358,7 +1358,7 @@ will add; other kept records' `refs` appear from the next step. A kernel
 
 The kept-record `refs` are how a program says what a record it keeps stands on, with the
 **relation kind** that decides whether a transaction's rejection (#37,
-docs/WALLET.md "Settlement") matters to it:
+docs/CHAIN.md "Settlement") matters to it:
 
 | rel | meaning | propagates a rejection |
 |---|---|---|

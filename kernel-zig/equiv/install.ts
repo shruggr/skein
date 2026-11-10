@@ -19,7 +19,7 @@
 //   function that writes, unknown-fn); its `peers` message to the kernel, sent
 //   as the instance itself, is gated away (#87, #143: the admin operations are
 //   root's, and the instance's key is not root; recorded, nothing runs, the address book unchanged); a
-//   program record it puts itself, claiming app chain (or the name wallet),
+//   program record it puts itself, claiming app chain (or the name resolve),
 //   called or launched, runs but its advance is refused (K1: not installed),
 //   while its own installed record still advances app-demo/…; the route /app-demo/call answers on the
 //   connection; an install over itself keeps its state; uninstalled, its stop
@@ -184,9 +184,9 @@ try {
   const notInstalled = (head: string, name: string) => new RegExp(`advance: "${head}" is outside the write scope of ${name}: its program record \\S+ is not installed`);
   await forge({ how: "call", app: "chain", head: "chain/state" }, new RegExp(`forge call refused: .*${notInstalled("chain/state", "forged").source}`), "a program record a step put, claiming app chain, called: its advance of chain/state is refused (not installed)");
   await forge({ how: "launch", app: "chain", head: "chain/state" }, new RegExp(` forged step 1 → errored · .*${notInstalled("chain/state", "forged").source}`), "the same record launched: the thread runs and its advance of chain/state is refused");
-  await forge({ how: "launch", name: "wallet", head: "wallet/state" }, new RegExp(` wallet step 1 → errored · .*${notInstalled("wallet/state", "wallet").source}`), "a record a step put named like a genesis-wired program (wallet, no app), launched: no genesis scope");
+  await forge({ how: "launch", name: "resolve", head: "resolve/forged" }, new RegExp(` resolve step 1 → errored · .*${notInstalled("resolve/forged", "resolve").source}`), "a record a step put named like a genesis-wired program (resolve, no app), launched: no genesis scope");
   await forge({ how: "call", app: "app-demo", head: "app-demo/forged" }, new RegExp(`forge call refused: .*${notInstalled("app-demo/forged", "forged").source}`), "a record claiming app-demo itself but not listed in app-demo/app: refused too");
-  check((await record("chain/state")) === undefined && (await record("wallet/state")) === undefined && (await record("app-demo/forged")) === undefined, "no forged advance moved a head: chain/state, wallet/state and app-demo/forged never moved");
+  check((await record("chain/state")) === undefined && (await record("resolve/forged")) === undefined && (await record("app-demo/forged")) === undefined, "no forged advance moved a head: chain/state, resolve/forged and app-demo/forged never moved");
   await forge({ how: "installed", head: "app-demo/forged" }, /forge call moved app-demo\/forged/, "app-demo's installed record (a dispatch row's program), called the same way: it advances app-demo/forged");
   check((await record("app-demo/forged"))?.kind === "app-demo-forged", "app-demo/forged moved by the installed program");
   await forge({ how: "installed", head: "chain/state" }, /forge call refused: .*advance: "chain\/state" is outside the write scope of app-demo \(app app-demo writes only heads under its own name/, "the installed record still writes only its own app's heads: chain/state refused");

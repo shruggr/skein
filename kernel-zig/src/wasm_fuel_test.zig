@@ -109,7 +109,7 @@ test "instrumented fuel: every pinned program instruments to a valid module" {
         _ = &m;
         n += 1;
     }
-    // wasm/ holds the boundary programs, the wallet and wire-probe (#83: the shell's modules are the shell
+    // wasm/ holds the boundary programs and wire-probe (#83: the shell's modules are the shell
     // app's, not pinned here; run.sh's instrumented replay of the corpus instruments the ones it runs).
-    try std.testing.expect(n >= 5);
+    try std.testing.expect(n >= 4);
 }

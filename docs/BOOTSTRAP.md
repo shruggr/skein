@@ -784,10 +784,7 @@ boot is written, and the process exits 0.
   directory and one from a packet of it (mined, proofs checked). Each is
   chatted with over `main` and runs over it. Then a checkpoint is restored on a
   second host: `dump` is identical and it keeps answering. Finally the booted
-  stores are replayed Zig against Zig. When the wallet's component build is
-  there (`run.sh` builds it), the tree also carries it as `bin/wallet.wasm`,
-  and each instance, the restored one included, answers an owner's `list`
-  through that component handler.
+  stores are replayed Zig against Zig.
 
 ## Not done yet
 

@@ -661,11 +661,10 @@ where they use one. Unset means the default.
 |---|---|
 | `SKEIN_SHELL_DIR`, `SKEIN_SHELL_REV`, `SKEIN_CHAT_DIR`, `SKEIN_CHAT_REV`, `SKEIN_ONBOARD_DIR`, `SKEIN_ONBOARD_REV`, `SKEIN_GIT_DIR`, `SKEIN_GIT_REV` | the apps the tests install: a checkout, or another commit than src/testapps.ts pins |
 | `SKEIN_CHAIN_DIR`, `SKEIN_CHAIN_REV`, `SKEIN_OVERLAY_DIR`, `SKEIN_OVERLAY_REV`, `SKEIN_SITE_DIR`, `SKEIN_SITE_REV` | the same for the equiv drivers' apps (the site, #125) |
-| `SKEIN_KERNEL` | the equiv drivers' kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
+| `SKEIN_KERNEL_BIN` | the equiv drivers' kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
 | `SKEIN_EQUIV_BROWSER` | `0`: skip the browser parts of equiv/run.sh |
 | `SKEIN_CHROMIUM`, `SKEIN_PLAYWRIGHT` | the Chromium and the Playwright package the browser parts use |
 | `SKEIN_BROWSER_MAX_MB` | the largest store the browser replay takes (default 256) |
-| `SKEIN_WALLET_ABI`, `SKEIN_WALLET_COMPONENT`, `SKEIN_WALLET_REPORT` | equiv/wallet.ts: run the wallet as a component, which build, and where to write its report |
 | `SKEIN_FETCH_COMPONENT` | equiv/fetch.ts: the fetch component's build |
 | `SKEIN_WASI_ADAPTER` | the preview1 adapter for component builds (programs/*/build.zig) |
 | `SKEIN_P2P_KEEP` | p2p-router.test.ts: keep its stores |

@@ -498,7 +498,7 @@ SKEIN_TEST_STORE=sqlite npm test                 # the host suite with every tes
 
 | repo | what | version |
 |---|---|---|
-| [shruggr/skein](https://github.com/shruggr/skein) | kernel, boundary programs (front door, messagebox, resolve), the wallet program, the node host, the client | log format 8 |
+| [shruggr/skein](https://github.com/shruggr/skein) | kernel, boundary programs (front door, messagebox, resolve), the node host, the client | 0.7.0, log format 8 |
 | [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `files`, `chain`, wallet library, WIT | v0.6.0 |
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster; born with the image's header chain (#132) | v0.4.0 |
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.9.2 |
@@ -534,7 +534,7 @@ scripts/         program builds and pins, sdk-local.sh; host/ (the dev stack)
 | [docs/MESSAGES.md](docs/MESSAGES.md) | the wire: the front door, sessions, routes, the log format, the messagebox, outbound, providers, broadcast, scheduling, libp2p |
 | [docs/APPS.md](docs/APPS.md) | apps: the manifest, install, calling an app, security, worked examples |
 | [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) | genesis: the system tree, packets, checkpoints, installing |
-| [docs/WALLET.md](docs/WALLET.md) | the wallet program, the chain state it reads, proofs, SPV |
+| [docs/CHAIN.md](docs/CHAIN.md) | the chain state: proofs as a DAG, settlement (the chain app's) |
 | [docs/OVERLAY.md](docs/OVERLAY.md) | pointer to skein-overlay's docs |
 | [docs/SKILLS.md](docs/SKILLS.md) | which skill scripts run in the VM |
 | [kernel-zig/README.md](kernel-zig/README.md) | building and running the kernel, components, the browser build, equivalence |

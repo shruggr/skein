@@ -1,16 +1,12 @@
-// The pinned modules as the node host names them: the wallet, by the CID of
-// its bytes under wasm/. `skein-dev install` puts them into a store file (the
-// bootstrap side door, docs/OPEN.md). The kernel's pins are the truth
-// (kernel-zig/src/programs.zig, which also pins the handler programs: the
-// front door, the messagebox, resolve); a test checks these against the
-// committed files. The shell is not pinned (#83): its modules are the shell
+// Program records and module CIDs as the node host makes them. The kernel's
+// pins are the truth (kernel-zig/src/programs.zig: the front door, the mail
+// program, resolve). The shell is not pinned (#83): its modules are the shell
 // app's (shruggr/skein-shell), installed like any app's, and its program
 // record is written by that install (src/host/install.ts shellProgram).
 
 import { createHash } from "node:crypto";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
-import { program } from "./records.ts";
 
 export const RAW = 0x55;
 
@@ -18,29 +14,6 @@ export const RAW = 0x55;
 export function rawCid(bytes: Uint8Array): CID {
   return CID.createV1(RAW, Digest.create(0x12, createHash("sha256").update(bytes).digest()));
 }
-
-/** The modules as committed under wasm/ (see wasm/README.md). A test checks these against the files. */
-export const MODULES = {
-  // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreidm4rgrxdyfixexre7naw2xz72sow2iduy2sxaefere5knkeugvcm"),
-} as const;
-
-/** The wallet program record's description (also the default image's bin/wallet.json: the same record, #116). */
-export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app). Prints the result record's CID.";
-
-/**
- * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`
- * box's handler, written in Zig (programs/wallet, over the SDK's wallet library). In the default image
- * by CID (#116: images/default/bin/wallet.cid and wallet.json — this very record). A code genesis has none: an instance that wants it subscribes a box to
- * its record's CID (an owner's box).
- */
-export const WALLET = program({
-  name: "wallet",
-  code: { wasm: MODULES.wallet },
-  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity", event: "cid" },
-  services: ["wallet", "http"],
-  description: WALLET_DESCRIPTION,
-});
 
 /** A wasm binary's kind by its preamble: a core module, a component (#34), or neither. */
 export function wasmKind(b: Uint8Array): "module" | "component" | undefined {

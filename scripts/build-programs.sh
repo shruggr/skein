@@ -4,8 +4,7 @@
 # all Zig 0.16.0 (mise.toml), wasm32-wasi, over the SDK (shruggr/skein-sdk, a
 # Zig package dependency by URL+hash, #75 — `zig build` fetches it; override
 # with a sibling checkout via scripts/sdk-local.sh) — the boundary programs
-# (the mail program, the front door, resolve, the wallet over the SDK's wallet
-# library and bsvz; the install handlers went with #77: those are kernel
+# (the mail program, the front door, resolve; the install handlers went with #77: those are kernel
 # operations), plus the wire-probe test program.
 #
 # The apps' modules are built in their own repos (#71, #83) and installed
@@ -14,7 +13,7 @@
 # shruggr/skein-site, the overlay engine in shruggr/skein-overlay.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-programs=(mail frontdoor resolve wallet)
+programs=(mail frontdoor resolve)
 for p in "${programs[@]}"; do
   (cd "programs/$p" && zig build)
   cp "programs/$p/zig-out/bin/$p.wasm" "wasm/$p.wasm"

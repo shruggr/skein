@@ -10,7 +10,7 @@
 // nothing), and the subscription's resume across a restart with
 // Last-Event-ID from host.db. With a router: no broadcast route any more, a
 // host with no Arcade drops a broadcast event and names no status provider
-// (kernel-zig/equiv/wallet.ts and overlay.ts run it all with a kernel).
+// (kernel-zig/equiv/overlay.ts runs it all with a kernel).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -222,12 +222,12 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   // #143: a box's route names no sender — the status provider's box is a route like any other, on any host.
   const me = PrivateKey.fromRandom().toPublicKey().toString();
   const handler = txCid("cd".repeat(32));
-  const specs = [{ address: "status", program: "wallet" }];
-  const programs = { wallet: handler };
+  const specs = [{ address: "status", program: "watcher" }];
+  const programs = { watcher: handler };
   const boxRows = (s: { dispatch: Array<{ transport: string; address: string; program?: unknown }> }) => s.dispatch.filter((r) => r.transport === "mailbox" && r.program !== "kernel").map((r) => r.address);
   assert.deepEqual(boxRows(resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
   assert.deepEqual(boxRows(resolveSystem({ ...none.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
-  assert.throws(() => resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me) }, programs, {}, undefined, [{ address: "status", sender: "$status", program: "wallet" }]), /`sender` is gone \(#143/);
+  assert.throws(() => resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me) }, programs, {}, undefined, [{ address: "status", sender: "$status", program: "watcher" }]), /`sender` is gone \(#143/);
   assert.throws(() => resolveSystem({ identity: me, root: [owner], handle: "w", domain: "localhost" }, programs, { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
 });
 

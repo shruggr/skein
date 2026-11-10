@@ -271,7 +271,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   await stop();
   const replays = join(ROOT, "kernel-zig/equiv/replays.ts");
   for (const h of ["alpha", "beta"]) {
-    const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", replays, join(home, h, "runtime.db")], { encoding: "utf8", env: { ...process.env, SKEIN_KERNEL: kernel } });
+    const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", replays, join(home, h, "runtime.db")], { encoding: "utf8", env: { ...process.env, SKEIN_KERNEL_BIN: kernel } });
     assert.equal(r.status, 0, `${h} replays: ${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /the source store reproduced exactly/, `${h}: ${r.stdout}`);
   }

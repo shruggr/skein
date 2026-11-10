@@ -30,7 +30,7 @@ import { DatabaseSync } from "node:sqlite";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kz = join(here, "..");
-const kernelBin = process.env.SKEIN_KERNEL ?? join(kz, "zig-out/bin/skein-kernel");
+const kernelBin = process.env.SKEIN_KERNEL_BIN ?? join(kz, "zig-out/bin/skein-kernel");
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".wasm": "application/wasm", ".json": "application/json", ".map": "application/json", ".css": "text/css" };
 
 // ---------------------------------------------------------------- shared with equiv/browser-live.ts

@@ -193,9 +193,9 @@ burnt before the sleep; the Go programs of the time (run-handler, loop; Zig
 since #54) burnt ~1.2k more fuel per step (their runtime read the clock);
 any printed mid-step time.
 
-## For the wallet (issue #29)
+## For the chain state (issue #29)
 
-What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's wallet and chain libraries, docs/WALLET.md) and the chain app (shruggr/skein-chain), which since #79 holds the chain state the wallet reads.
+What this kernel adds for the chain app (shruggr/skein-chain), which since #79 holds the chain state every other app reads (docs/CHAIN.md).
 
 - **Bitcoin codecs** (`cid.zig`, `bitcoin.zig`, #42): `putblock` accepts
   `bitcoin-tx` (0xb1) and `bitcoin-block` (0xb0, 80 bytes) with
@@ -211,8 +211,8 @@ What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's
   transaction is malformed by convention, so the length decides). The
   header's merkle root names the root node, each node its two children
   (nodes, or at the bottom transactions), so a block's transaction tree is a
-  DAG in the store — sparse, holding only the paths a wallet needs
-  (docs/WALLET.md "Proofs"). (The unregistered 0xb3 `bitcoin-merkle` of
+  DAG in the store — sparse, holding only the paths of the transactions held
+  (docs/CHAIN.md "Proofs"). (The unregistered 0xb3 `bitcoin-merkle` of
   #29 is gone.)
 - **Edges from kept bitcoin transactions** (`index.zig`, `bitcoin.zig`
   `edgesOf`, #42): a transaction a step keeps adds its inputs to the `edges`
@@ -439,8 +439,8 @@ use them:
 
 ### Building a component handler
 
-The wallet (`../programs/wallet`) is the example: `zig build component` gives
-`zig-out/bin/wallet.component.wasm`.
+`../programs/test/fetch` is the example (an emit to the `fetch` provider, its
+URL from argv or the step's input).
 
 1. **Generate the C bindings.**
    `wit-bindgen c wit --world program --out-dir wit/bindings/c` gives
@@ -460,12 +460,6 @@ The wallet (`../programs/wallet`) is the example: `zig build component` gives
 A program that uses 0.2 directly needs no adapter: for example, C built with
 wasi-sdk's `wasm32-wasip2`, as in the unit test.
 
-The wallet's two builds share one source (`program.zig`, where `sk` is the
-preview1 imports or `skein_wit.zig`). Both broadcast the same way: a
-broadcast event (`emit`, #65), the same record from either build. The preview1 build stays byte-identical to the pinned
-`wasm/wallet.wasm`, and the pin stays on preview1. `../programs/test/fetch` is a
-second, minimal example (an emit to the `fetch` provider, its URL from argv
-or the step's input).
 
 ### What is not the same
 
@@ -1048,9 +1042,7 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `zig build test` | format 3's records (mail, genesis routes/reads) and, kept from format 2, genesis keys as bytes and unsigned entries, against vectors the host's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures src/runtime's formats make (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI ; the dispatch table's fold and match against `test/dispatch-cases.json` (libp2p rows exact, #119); the event record (`log.zig`, #119); the subscriptions' fold, delivery row and checks (`subscriptions.zig`, #119) | 45/45 tests pass |
 | `equiv/git.ts` | git (the shell app's `bin/git.wasm`, #83) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 15 logs: 9 agents (#83: each with the shell app and/or the chat app installed by the owner's messages first (#124) — the installs are in the logs; the kernel's objects/head/dispatch operations (#77), the run handler, the shell with writes, cwd, failures, sleeps and wakes, the script runtimes, the loop with bash and message tools, a `bash` call with no shell app, replies, resolutions, a failed delivery, a refused infer, a stranger's chat on a row the owner added, two agents, and `gen-fuel`: `fuelPerStep` 10^9, which the installs fit and a spinning shell does not) and the 6 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is written by the Zig kernel as the host drives it (format 6 since #70/#67: every message out an `emit`, signed through the recorded signer; on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering by their own delivery threads through the host's `fetch` provider, whose signed answers are `local` requests in the log), so each source is also reproduced exactly by its replay | 15/15 identical, sources reproduced |
-| `equiv/wallet.ts` (#29, #79) | on a test host with a fake Arcade behind its broadcaster and a fake SSE header feed, the chain app (shruggr/skein-chain) installed into two instances and the wallet program on the owner's `wallet` box: the feed's headers reach the chain app (the wallet takes none); a BRC-29 payment internalized (SPV against `chain/state`) and ingested; a spend signed through the signer whose step emits one `ingest` message to the instance itself and no broadcast — the chain app broadcasts it (Extended Format, the host's token), Arcade's RECEIVED answers the wallet's thread `accepted`, MINED `proven`; the payee internalizes it and is answered the same; a rejected broadcast gives the balance back; a draft signed by `signAction`; settlement at the chain app (A rejected, B input-rejected, both threads answered, the coins read back); a reorg run re-broadcast by the chain app and the change listed unproven; the heads `wallet/state` and `chain/state`; both stores replayed | all ok; both reproduced exactly |
 | `equiv/boot.ts` (#4) | `skein-host system` → a system tree (one handler as .wasm bytes, a SOUL.md, a config default); `add --boot <dir>` and `add --packet` of a mined ordfs-form packet of it (`--proofs`); a wrong `--scope` refused; both genesis name the tree, `main` is it, programs from bin/ (no shell, #83); the apps installed on top by the owner's messages (alpha the chat app, beta the chat app and the shell app); each chatted with (the loop reads SOUL.md from main), beta run over main; the wallet's component build (#34) as `bin/wallet.wasm` answering a `list`; `pack --checkpoint` restored on a second host (same master key): `dump` identical, still answering; both booted stores replayed Zig against Zig | all ok; both reproduced exactly |
-| `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the host with the component as the wallet program | no DIVERGED; the same chains and log lines; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly. Since #65 both builds broadcast by emitting the same event, so this also shows the two ABIs emit byte-identical records |
 | `equiv/fetch.ts` (#15, #70) | the `fetch` component as a box's handler through the host: it emits a GET to the `fetch` provider (the host's http handler standing in for the network) and writes the answer's body on its next step; then `replays.ts` with no host | the body on stdout; the update lists the emitted message; the provider's signed answer is a `local` request in the log; a 404 comes back to the program; the store replays exactly with no host to ask |
 | `wasm_fuel_test.zig` (#35) | fuel by instrumentation against wasmtime's on a probe module (bulk operators, grows that fail, branches to the function's label, call_indirect, a trap, a start function): the same reading at every host call and at the end, and the same exhaustion for every limit; every pinned program instruments to a valid module | ok |
 | instrumented fuel (#35) | the corpus replayed natively with `SKEIN_FUEL_MODE=instrument` (every module metered by its own counter) | 15/15 identical reports |

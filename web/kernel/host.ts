@@ -240,7 +240,7 @@ export class BrowserHost {
     this.kernel?.kw.terminate();
   }
 
-  /** The pinned modules and support files the store lacks, fetched and checked against their CIDs (skein-dev install). */
+  /** The pinned modules and support files the store lacks, fetched and checked against their CIDs. */
   private async install(): Promise<void> {
     const list = dagCbor.decode(await this.kernel.kw.call("modules")) as Array<{ name: string; file: string; cid: CID }>;
     let n = 0;

@@ -92,7 +92,7 @@ export interface Genesis2Config {
   /** Explicit host overrides (dev: SKEIN_FUEL_PER_STEP) that win even over a tree's config; `warn` says so when they do. */
   overrides?: Record<string, string>;
   warn?(line: string): void;
-  /** More box routes, after these (e.g. the wallet's boxes, #29): a box and its handler program record. */
+  /** More box routes, after these (e.g. an app program's boxes): a box and its handler program record. */
   subscriptions?: Array<{ box: string; handler: CID }>;
   /** More routes of any transport (#77), after these: the route as a system writes it (handler names resolved against the programs). */
   dispatch?: DispatchSpec[];
@@ -192,27 +192,25 @@ export const STOCK_ROLES: Record<string, string[]> = { root: ["frontdoor.explore
 export const STOCK_DISPATCH: DispatchSpec[] = [...STOCK_HTTP];
 
 /**
+ * Call permissions (kernel-zig grants.zig): the kernel services the stock genesis-wired programs
+ * hold at birth — the raw signer for the program that signs today, the front door (the BRC-103
+ * handshake, signed answers). Written into the genesis like any grant
+ * (resolveSystem), no special case in the kernel; the signer app takes this over when it lands.
+ */
+export const STOCK_SERVICES: Record<string, string[]> = { "genesis:frontdoor": ["signer"] };
+
+/**
  * The write scopes of the stock genesis-wired programs (#77): the heads each
  * may advance, by program name. The front door's sessions (the mail program
- * keeps none: its delivery's sessions are the host's, #157); the wallet's records (#79: `wallet/…`, its
- * coins, actions, drafts and outputs — the chain is the chain app's). The
+ * keeps none: its delivery's sessions are the host's, #157). The
  * resolve program's records (#87: `resolve/peers`, what a BRC-169 lookup
  * found — never the address book, which only root's `peers` messages
  * change; the mail program's delivery reads them for a key the address book
  * does not name).
  */
-/**
- * Call permissions (kernel-zig grants.zig): the kernel services the stock genesis-wired programs
- * hold at birth — the raw signer for the programs that sign today, the front door (the BRC-103
- * handshake, signed answers) and the wallet (BRC-29 keys). Written into the genesis like any grant
- * (resolveSystem), no special case in the kernel; the signer app takes this over when it lands.
- */
-export const STOCK_SERVICES: Record<string, string[]> = { "genesis:frontdoor": ["signer"], "genesis:wallet": ["signer"] };
-
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
   resolve: ["resolve/"],
-  wallet: ["wallet/"],
   // skein 0.6.0 (D8, David 2026-11-09): no `chain` — the chain app (shruggr/skein-chain) and the
   // overlay are in a genesis only as apps (#141 heads), updatable by a logged install, never as
   // genesis-wired system programs; an installed chain app writes `chain/…` by the name rule.

@@ -42,7 +42,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
+const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const args = process.argv.slice(2);
 const keep = args.includes("--keep");
 const sources = args.filter((a) => a !== "--keep");

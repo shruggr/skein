@@ -3,29 +3,23 @@
 // the disk and opens an instance's store file directly, which the kernel
 // itself never lets anything do.
 //
-//   - bootstrap: `install` puts the pinned wasm modules into the store file
-//     (they exceed a message; docs/OPEN.md). Trees and commands come from the
-//     client (bin/skein) through the messagebox.
+//   Trees and commands come from the client (bin/skein) through the messagebox.
 //   - inspection: `log`, `ls`, `show`, `refs` read the store.
 //
 // Replay is the kernel's: `skein-kernel replay <source.db> <out.db>`.
 
-import { readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
 import { readLog } from "../runtime/log.ts";
-import { MODULES, rawCid } from "../runtime/programs.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
 
 const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
 export const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "runtime.db");
-const WASM_DIR = fileURLToPath(new URL("../../wasm/", import.meta.url));
 
 function openDefault(path?: string): SqliteStore {
   const p = path || dbPath();
@@ -70,21 +64,6 @@ function jsonify(v: unknown): unknown {
   return v;
 }
 
-/** Put the pinned wasm modules into the store under their CIDs (the shell's are the shell app's, #83: installed with it). */
-export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Promise<string[]> {
-  const out: string[] = [];
-  const all = Object.entries(MODULES).map(([n, c]) => [`${n}.wasm`, c] as const);
-  for (const [file, cid] of all) {
-    const name = file.replace(/\.wasm$/, "");
-    if (await store.has(cid)) continue;
-    const bytes = await readFile(join(WASM_DIR, file));
-    if (!rawCid(bytes).equals(cid)) throw new Error(`wasm/${file} does not match the pinned ${fmt(cid)} (rebuilt? update src/runtime/programs.ts)`);
-    await store.putBlock(cid, bytes);
-    out.push(`${name} ${fmt(cid)}`);
-  }
-  return out;
-}
-
 export async function resolveCid(store: Pick<SqliteStore, "findByPrefix">, s: string): Promise<CID> {
   try { return parse(s); } catch { /* a prefix or suffix */ }
   const all = await store.findByPrefix("");
@@ -104,19 +83,6 @@ async function withStore<T>(fn: (s: SqliteStore) => Promise<T>, path?: string): 
 }
 
 const COMMANDS: Record<string, Command> = {
-  install: {
-    usage: `skein-dev install
-  Put the pinned wasm modules (the shell's brush, coreutils and tools, the
-  wallet) into the store file under their CIDs: the bootstrap side door
-  (docs/OPEN.md); objects bigger than a message cannot arrive any other way yet.`,
-    flags: {},
-    async run(_a, env) {
-      const done = await withStore(install);
-      env.out(done.length ? done.map((l) => `installed ${l}`).join("\n") : "modules already in the store");
-      return 0;
-    },
-  },
-
   log: {
     usage: `skein-dev log [--limit n]
   The input log: position, admission stamp, entry CID (the last is the state hash), and what it admits.`,
@@ -201,7 +167,6 @@ const COMMANDS: Record<string, Command> = {
 
 const HELP = `skein-dev — developer tools, outside the machine
 
-  skein-dev install                        put the pinned wasm modules into the store file (bootstrap)
   skein-dev log | ls | show <cid> | refs <cid>
 
 Trees and commands come from the client (bin/skein import / run) through the
