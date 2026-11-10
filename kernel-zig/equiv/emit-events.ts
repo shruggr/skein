@@ -25,7 +25,7 @@
 //   - a row wins: evt-a subscribes demo_mine (evt-b's row's topic); a message
 //     there is evt-b's, by the row;
 //   - an event nobody wires (`evt-a/made-up`: 0.5.0, a fact is named under its app): listed on the update, a record in the
-//     store, a log line; nothing else;
+//     store; nothing else (no log line);
 //   - A restarted (a new router on the same host db): the node subscribes the
 //     same topics, read from the log (p2p.ts subscriptionsOf); nothing is
 //     re-emitted; the new kernel delivers by the subscription it folds.
@@ -262,7 +262,7 @@ try {
   const was = served().join(",");
   await emit("evt-a", { event: "evt-a/made-up", n: 7 });
   const ev2 = (await events()).find((r) => r.event === "evt-a/made-up");
-  check(!!ev2 && ev2.app === "evt-a" && ev2.n === 7 && served().join(",") === was && lines.some((l) => /an event evt-a\/made-up this host has no wiring for: ignored/.test(l)), `an event nobody wires: a record on the update (${JSON.stringify(ev2)}), a log line, nothing else`);
+  check(!!ev2 && ev2.app === "evt-a" && ev2.n === 7 && served().join(",") === was && !lines.some((l) => /evt-a\/made-up this host has no wiring/.test(l)), `an event nobody wires: a record on the update (${JSON.stringify(ev2)}), nothing else (no log line)`);
 
   // ------------------------------------------------ the subscriptions as the log folds them
   await emit("evt-a", sub("demo_def"));

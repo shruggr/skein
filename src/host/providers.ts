@@ -199,7 +199,7 @@ export interface ProvidersOptions {
   /**
    * #164: an application host's wiring — an event record {kind: "event", event, app?, …} from `handle`
    * whose name no stock wiring takes (not broadcast, an intention, nor the libp2p node's),
-   * handed over after its step's commit as `topicEvent`'s are. Absent: logged as ignored.
+   * handed over after its step's commit as `topicEvent`'s are. Absent: nothing (not logged).
    */
   appEvent?(handle: string, record: Record<string, unknown>): void;
   /**
@@ -342,7 +342,7 @@ export class Providers {
       try { this.o.appEvent(handle, m); } catch (e) { this.say(handle, `provider: an event ${out.address}: the host's wiring: ${(e as Error).message}`); }
       return;
     }
-    this.say(handle, `provider: an event ${out.address} this host has no wiring for: ignored`);
+    // An event no wiring takes is the normal case (an app's facts: chain/tx, chain/output, amm/…): nothing to do, nothing logged.
   }
 
   private async carry(handle: string, id: CID, out: Outgoing): Promise<void> {

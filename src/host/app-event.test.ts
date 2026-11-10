@@ -1,6 +1,6 @@
 // #164: an application host's wiring — an emitted event whose name no stock wiring takes is handed
-// to the Providers' (and the Router's) `appEvent`, once, after its step's commit; without it, a log
-// line ("this host has no wiring for: ignored"). The stock names never reach it.
+// to the Providers' (and the Router's) `appEvent`, once, after its step's commit; without it,
+// nothing (0.7.0: an unwired event is the normal case, not logged). The stock names never reach it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PrivateKey } from "@bsv/sdk";
@@ -55,10 +55,10 @@ test("a throwing appEvent is logged, not thrown into the kernel's notice", () =>
   assert.ok(lines.some((l) => /token-disabled: the host's wiring: boom/.test(l)), lines.join("\n"));
 });
 
-test("without appEvent: logged as ignored, as before", () => {
+test("without appEvent: nothing happens and nothing is logged (an unwired event is the normal case)", () => {
   const { p, lines } = providers();
   p.deliver("swap", ev("token-enabled", { tokenId: "aa_0" }));
-  assert.ok(lines.some((l) => /an event token-enabled this host has no wiring for: ignored/.test(l)), lines.join("\n"));
+  assert.ok(!lines.some((l) => /token-enabled/.test(l)), lines.join("\n"));
 });
 
 test("Router: its appEvent option is the Providers'", async () => {
