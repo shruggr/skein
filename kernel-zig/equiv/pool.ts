@@ -41,7 +41,7 @@ import { Router } from "../../src/host/router.ts";
 import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { rawCid } from "../../src/host/boot.ts";
-import { writeGenesis } from "../../src/host/genesis.ts";
+import { codeSystem, writeSystemGenesis, type Genesis2Config } from "../../src/host/genesis.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -175,7 +175,10 @@ try {
     await k.putBlock(wm, wireWasm);
     const probe = await k.store.put({ kind: "program", name: "probe", code: { wasm: pm }, inputs: {}, services: [], description: "the call probe" } as never) as CID;
     const wire = await k.store.put({ kind: "program", name: "wire-probe", code: { wasm: wm }, inputs: {}, services: [], description: "the wallet probe" } as never) as CID;
-    await writeGenesis(k, { identity, root: [identity], handle: h, domain: "localhost", dispatch: [{ transport: "event", address: "probe", program: wire.toString() }], scopes: {} });
+    // Call permissions: the wire probe asks the raw signer, so its genesis grants it the signer service at birth.
+    const c: Genesis2Config = { identity, root: [identity], handle: h, domain: "localhost", dispatch: [{ transport: "event", address: "probe", program: wire.toString() }], scopes: {} };
+    const s = codeSystem(c, await k.call("programs") as Record<string, CID>);
+    await writeSystemGenesis(k, c, { ...s, services: { ...s.services, "genesis:wire-probe": ["signer"] } });
     await k.start();
     await k.idle();
     return probe;
