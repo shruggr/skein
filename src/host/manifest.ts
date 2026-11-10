@@ -136,7 +136,8 @@ const INTERFACE = /^[a-z0-9][a-z0-9._-]*\/\d+$/;
 const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
 const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef"];
 /** Call permissions (kernel-zig grants.zig): a caller or callee, the kernel services, a name's bound. */
-const PARTY = /^(genesis:)?[a-z0-9][a-z0-9_-]*$/;
+/** A caller or callee: an app's name (the manifest's NAME grammar) or `genesis:<program name>` (the same grammar). */
+export const PARTY = /^(genesis:)?[a-z0-9][a-z0-9._-]*$/;
 export const SERVICES = ["signer"];
 export const MAX_CALL_NAME = 256;
 export const isCallName = (n: unknown): n is string => typeof n === "string" && n.length > 0 && new TextEncoder().encode(n).length <= MAX_CALL_NAME && !n.includes("\0");

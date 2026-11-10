@@ -154,8 +154,9 @@ echo "== subscriptions (skein 0.5.2): one router, three apps (programs/test/even
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/on-off.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/on-off.ts" || status=1
 
-echo "== call permissions: one router, three apps (programs/test/perm-probe's module) — a named call (callAs) the grants approve runs and the callee reads the name as \`as\`, an unapproved name refused to the caller, \"*\" any name, a nameless call unchanged, a launched or messaged program sees no \`as\`, a nested call inherits none (from a step and from a kernel call); the raw signer refused without the signer service; root's grants without a manifest; an image's apps' approvals from its genesis; both stores replayed (and migrated to RocksDB)"
+echo "== call permissions: one router, three apps (programs/test/perm-probe's module) — a named call (callAs) the grants approve runs and the callee reads the name as \`as\`, an unapproved name refused to the caller, \"*\" any name, a nameless call unchanged, a launched or messaged program sees no \`as\`, a nested call inherits none (from a step and from a kernel call); the raw signer refused without the signer service; root's grants without a manifest; an image's apps' approvals from its genesis; the review's cases (a non-root grant, an `as` in the arg, step-put records, a dotted app name, upgrade and uninstall taken back from the grants head — an app rewriting its own record changes nothing); both stores replayed — on SQLite and on RocksDB"
 "${node[@]}" "$kz/equiv/call-permissions.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/call-permissions.ts" || status=1
 
 echo "== a thread resting on an event name (skein 0.5.4): on(name) with no fn ends the step resting; each fact under the name wakes the resting threads in the order they began resting, never another name's, their context intact, and they rest again; a kernel killed mid-delivery commits nothing of the entry and, restarted, wakes each once; index-store.ts derives the waits index; replayed — on SQLite, on RocksDB and on the WASM host"
 "${node[@]}" "$kz/equiv/rest-on.ts" || status=1

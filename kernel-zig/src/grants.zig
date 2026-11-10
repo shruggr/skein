@@ -168,10 +168,18 @@ pub const SIGNER = "signer";
 /// The kernel services that may be granted.
 pub const services_known = [_][]const u8{SIGNER};
 
-/// Whether `s` names a caller or callee: an app's name, or `genesis:<program name>`.
+/// Whether `s` names a caller or callee: an app's name, or `genesis:<program name>` — the manifest's
+/// name grammar (src/host/manifest.ts NAME, PARTY): [a-z0-9][a-z0-9._-]*. (Roles keep `isName`, with no
+/// dot: a role is `<app>.<role>`.) The record keys a party whole; nothing splits it.
 pub fn isParty(s: []const u8) bool {
-    if (std.mem.startsWith(u8, s, GENESIS_PREFIX)) return isName(s[GENESIS_PREFIX.len..]);
-    return isName(s);
+    return isAppName(if (std.mem.startsWith(u8, s, GENESIS_PREFIX)) s[GENESIS_PREFIX.len..] else s);
+}
+
+fn isAppName(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (!std.ascii.isLower(s[0]) and !std.ascii.isDigit(s[0])) return false;
+    for (s) |c| if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '.' or c == '_' or c == '-')) return false;
+    return true;
 }
 
 /// Whether `s` may be a call's name: 1 to MAX_NAME bytes of UTF-8, no NUL.
@@ -439,6 +447,13 @@ test "call permissions: names per (caller, callee), any, removal, and roles kept
     rec = (try changed(a, rec, "remove", "amm.admin", &k1)).?;
     try std.testing.expectEqualSlices(u8, roots_only, try cbor.encode(a, rec.?)); // as it was: roles only
     try std.testing.expect(isParty("amm") and isParty("genesis:frontdoor") and !isParty("genesis:") and !isParty("Amm"));
+    try std.testing.expect(isParty("foo.bar") and isParty("genesis:wire-probe") and !isParty("foo bar") and !isParty(".foo"));
+    // Removing "*" leaves the explicit names.
+    var r2: ?Value = (try callsChanged(a, null, "add", "amm", "signer", "1/amm pool")).?;
+    r2 = (try callsChanged(a, r2, "add", "amm", "signer", ANY)).?;
+    r2 = (try callsChanged(a, r2, "remove", "amm", "signer", ANY)).?;
+    try std.testing.expect(mayCall(r2, "amm", "signer", "1/amm pool"));
+    try std.testing.expect(!mayCall(r2, "amm", "signer", "anything else"));
     try std.testing.expect(isCallName("1/amm pool") and !isCallName("") and !isCallName("a\x00b"));
 }
 

@@ -11,9 +11,16 @@
 //   - a nested call does not inherit `as` — from a step and from a kernel call (cCall);
 //   - the raw signer is refused to an app without the signer service, answered to one with it, and
 //     the stock genesis's front door holds it (the handshake every owner message rides on);
-//   - root's grant without a manifest (`skein grant add --calls`);
+//   - root's grant without a manifest (`skein grant add --calls`); a non-root `grant` refused;
+//   - a caller's `as` inside its `arg` never reaches the callee's top level;
+//   - a program record a step put: refused a named call, and refused as a named callee;
+//   - a dotted app name (`pd.x`) with the signer service;
+//   - an upgrade takes back what the grants head holds for the app and the new manifest does not
+//     ask; an uninstall takes back everything the grants head holds for that name — never read
+//     from the app's own record, which the app may rewrite (drop its `services`; take another
+//     app's `name`);
 //   - an image app's approvals come from the genesis;
-//   - both stores replay to themselves exactly.
+//   - both stores replay to themselves exactly — on SQLite, and with SKEIN_EQUIV_STORE=rocksdb on RocksDB.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/call-permissions.ts
 
@@ -174,6 +181,58 @@ try {
   await r.settled();
   o = await probe("pc", { op: "sign" });
   check(o.signed === true, "pc signs once root grants it the service");
+
+  const grantsNow = async () => await record(spec, (await headRoot(spec, "grants"))!) as { calls?: Record<string, Record<string, string[]>>; services?: Record<string, string[]> };
+
+  // ------------------------------------------------ a non-root grant is refused
+  const stranger = ephemeralWallet(new PrivateKey("4444", 16));
+  try { await new RawBox(stranger, base).send(identity, "grant", { op: "add", service: { caller: "pa", service: "signer" } }); } catch { /* refused at the gate */ }
+  await r.settled();
+  check(!(await grantsNow()).services?.pa, "a grant message from a key that is not root is refused (pa holds no service)");
+
+  // ------------------------------------------------ `as` in the caller's arg is the callee's argument, not the name
+  o = await probe("pa", { op: "call", prog: pb, fn: "who", arg: { as: "forged" } });
+  check(o.ok === true && who(o).as === null, `a caller's \`as\` inside its arg does not reach the callee's top level (${JSON.stringify(who(o))})`);
+  o = await probe("pa", { op: "call", prog: pb, fn: "who", name: "1/amm pool", arg: { as: "forged" } });
+  check(o.ok === true && who(o).as === "1/amm pool", "… and under a named call the callee reads the kernel's name");
+
+  // ------------------------------------------------ a program record a step put: no party
+  const stray = (await probe("pa", { op: "putprog" }) as unknown as { prog: CID }).prog;
+  w = await call(stray, "callAs", { prog: pb, name: "1/amm pool", fn: "who" });
+  check(w.ok === false && /callAs: a named call needs an installed caller/.test(w.error ?? ""), `a step-put record makes no named call (${w.error})`);
+  w = await call(pa, "callAs", { prog: stray, name: "1/amm pool", fn: "who" });
+  check(w.ok === false && /callAs: \S+ is no installed app's program/.test(w.error ?? ""), `a step-put record is no named callee, whatever \`app\` it names (${w.error})`);
+
+  // ------------------------------------------------ a dotted app name
+  let d = await cli(["install", appTree("pd.x", { services: ["signer"] }), "--instance", handle]);
+  await r.settled();
+  check(d.code === 0, `skein install pd.x: exit ${d.code} ${d.err.join(" ")}`);
+  check(JSON.stringify((await grantsNow()).services?.["pd.x"]) === '["signer"]', "pd.x holds the signer service");
+  o = await probe("pd.x", { op: "sign" });
+  check(o.signed === true, "pd.x signs");
+
+  // ------------------------------------------------ upgrade and uninstall take back from the grants head
+  d = await cli(["install", appTree("pa", { version: "0.2.0", calls: { pb: ["1/amm pool"] } }, join(home, "apps", "pa-0.2.0")), "--instance", handle]);
+  await r.settled();
+  check(d.code === 0 && d.out.some((l) => /grant\s+no longer calls pc as ANY NAME/.test(l)) && d.out.some((l) => /grant\s+no longer calls pb as "2\/skein instance\/self"/.test(l)), `the upgrade's prompt takes back pc "*" and the root-granted "2/skein instance/self" (${d.code} ${d.err.join(" ")})`);
+  check(JSON.stringify((await grantsNow()).calls?.pa) === JSON.stringify({ pb: ["1/amm pool"] }), `after the upgrade pa calls pb as "1/amm pool" only (${JSON.stringify((await grantsNow()).calls?.pa)})`);
+  // (A) an app drops `services` from its own record, then is uninstalled: the grants head still takes it back.
+  d = await cli(["install", appTree("pz", { services: ["signer"] }), "--instance", handle]);
+  await r.settled();
+  check(d.code === 0, "skein install pz (the signer service)");
+  o = await probe("pz", { op: "rewrite", drop: ["services"] });
+  check(o.ok === true && !(await record(spec, (await headRoot(spec, "pz/app"))!)).services, "pz rewrites its own record without `services`");
+  d = await cli(["uninstall", "pz", "--instance", handle]);
+  await r.settled();
+  check(d.code === 0 && !(await grantsNow()).services?.pz, `uninstall pz takes its signer service back from the grants head (${JSON.stringify((await grantsNow()).services)})`);
+  // (B) an app names itself `pb` in its own record, then is uninstalled: pb keeps its service.
+  d = await cli(["install", appTree("pw"), "--instance", handle]);
+  await r.settled();
+  o = await probe("pw", { op: "rewrite", name: "pb" });
+  check(o.ok === true, "pw rewrites its own record's name to pb");
+  d = await cli(["uninstall", "pw", "--instance", handle]);
+  await r.settled();
+  check(d.code === 0 && JSON.stringify((await grantsNow()).services?.pb) === '["signer"]', `uninstall pw leaves pb's service (${JSON.stringify((await grantsNow()).services)})`);
 
   // ------------------------------------------------ an image's apps: their approvals from the genesis
   await r.createInstance("ci", owner, { image: "perm", owned: true, publish: false });

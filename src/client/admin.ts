@@ -20,7 +20,7 @@ import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
 import { appHead, describe, mergeConfig, planInstall, planRootRoute, planUninstall, sendInstall, sendUninstall, showGrant, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
-import { isCallName, MAX_CALL_NAME, SERVICES } from "../host/manifest.ts";
+import { isCallName, MAX_CALL_NAME, PARTY, SERVICES } from "../host/manifest.ts";
 import { lookup, readBlob } from "../runtime/tree.ts";
 
 import type { Objects } from "../host/boot.ts";
@@ -245,7 +245,6 @@ export function planGrantService(view: InstanceView, caller: string, service: st
   return { prompt: [`grant ${op}: ${caller} ${o.remove ? "loses" : "holds"} service ${service}${service === "signer" ? " (the raw signer import: any derivation)" : ""}`], recipient: view.identity, messages: [{ box: "grant", body: { op, service: { caller, service } } }] };
 }
 
-const PARTY = /^(genesis:)?[a-z0-9][a-z0-9_-]*$/;
 
 /** One app the management page offers (the site's www/catalog.json): a repository and a commit. */
 export interface CatalogEntry { name: string; version?: string; url: string; hash: string; image?: string; description?: string }

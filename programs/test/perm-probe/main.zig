@@ -8,6 +8,10 @@
 //     op "launch" {prog: <cid>} — a thread of `prog` with args {probe: "launched"}; recorded {op, ok}
 //     op "mail"   {to: bytes(33), box} — a message {kind: "probe", op: "seen"} to `to` in `box`
 //     op "seen"   recorded {op: "seen", as: <its input's `as`, or null>}
+//     op "rewrite" {drop?: [<field>], name?: text} — the app rewrites its own record at `<app>/app`
+//                 (an app may: the head is under its name); recorded {op, ok}
+//     op "putprog" a copy of its own program record, named "stray", put by the step (installed by
+//                 no one); recorded {op, prog: <its cid>}
 //   a launched thread (args.probe = "launched"): recorded {op: "launched", as}
 //   a call:
 //     fn "who"    → {as: <its input's `as`, or null>, signed: bool, error?}
@@ -111,9 +115,34 @@ fn run(a: Allocator) !void {
         try mb.put("op", cbor.string("seen"));
         _ = sk.emit(a, to, Value.str(body.get("box")) orelse return sk.report("mail wants {to, box}"), mb.value(), null) catch return sk.report(sk.lastError());
         try m.put("ok", .{ .bool = true });
+    } else if (eql(u8, op, "rewrite")) {
+        const head = try std.fmt.allocPrint(a, "{s}/app", .{app});
+        const rec = try sk.get(a, (try sk.head(a, head)) orelse return sk.report("no app record"));
+        const drop = body.get("drop");
+        var nm = cbor.MapBuilder.init(a);
+        for (rec.map) |e| {
+            var dropped = false;
+            if (drop) |d| if (d == .array) for (d.array) |x| if (Value.str(x)) |k| if (eql(u8, k, e.key)) {
+                dropped = true;
+            };
+            if (dropped) continue;
+            if (eql(u8, e.key, "name")) if (body.get("name")) |n| {
+                try nm.put("name", n);
+                continue;
+            };
+            try nm.put(e.key, e.value);
+        }
+        try sk.advance(head, try sk.put(a, nm.value()));
+        try m.put("ok", .{ .bool = true });
+    } else if (eql(u8, op, "putprog")) {
+        const origin = try sk.get(a, Value.cidOf(in.get("thread")) orelse return sk.report("the step names no thread"));
+        const prog = try sk.get(a, Value.cidOf(origin.get("program")) orelse return sk.report("the thread names no program"));
+        var pm = cbor.MapBuilder.init(a);
+        for (prog.map) |e| try pm.put(e.key, if (eql(u8, e.key, "name")) cbor.string("stray") else e.value);
+        try m.put("prog", cbor.cidv(try sk.put(a, pm.value())));
     } else if (eql(u8, op, "seen")) {
         try m.put("as", in.get("as") orelse .null);
-    } else return sk.report("perm-probe: op is call, sign, launch, mail or seen");
+    } else return sk.report("perm-probe: op is call, sign, launch, mail, seen, rewrite or putprog");
     return record(a, app, &m);
 }
 

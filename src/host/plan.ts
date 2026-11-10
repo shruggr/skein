@@ -119,11 +119,28 @@ export type GrantOp =
   | { op: "add" | "remove"; calls: { caller: string; callee: string; name: string } }
   | { op: "add" | "remove"; service: { caller: string; service: string } };
 
-/** The grants an app record asks for (its `calls` and `services`), as adds: what root approves at install. */
-export function grantsOf(record: { name: string; calls?: Record<string, string[] | "*">; services?: string[] }): GrantOp[] {
+/**
+ * The grants a manifest asks for (its `calls` and `services`), as adds for `caller` — the name the
+ * install is for (the operation's, never a record's own `name`): what root approves at install.
+ */
+export function grantsOf(caller: string, asked: { calls?: Record<string, string[] | "*">; services?: string[] }): GrantOp[] {
   const out: GrantOp[] = [];
-  for (const [callee, names] of Object.entries(record.calls ?? {})) for (const name of names === "*" ? ["*"] : names) out.push({ op: "add", calls: { caller: record.name, callee, name } });
-  for (const service of record.services ?? []) out.push({ op: "add", service: { caller: record.name, service } });
+  for (const [callee, names] of Object.entries(asked.calls ?? {})) for (const name of names === "*" ? ["*"] : names) out.push({ op: "add", calls: { caller, callee, name } });
+  for (const service of asked.services ?? []) out.push({ op: "add", service: { caller, service } });
+  return out;
+}
+
+/**
+ * What the grants head holds for `caller` (its `calls` and `services`), as adds — the kernel's record,
+ * which no app writes: what an upgrade or an uninstall takes back from (an app's own record at
+ * `<app>/app` is the app's to rewrite, so it is never read for that).
+ */
+export async function grantsHeld(view: InstanceView, caller: string): Promise<GrantOp[]> {
+  const root = view.heads.find((h) => h.name === "grants")?.root;
+  const g = root ? await view.store.get(root).catch(() => undefined) as { calls?: Record<string, Record<string, string[]>>; services?: Record<string, string[]> } | undefined : undefined;
+  const out: GrantOp[] = [];
+  for (const [callee, names] of Object.entries(g?.calls?.[caller] ?? {})) for (const name of names) out.push({ op: "add", calls: { caller, callee, name } });
+  for (const service of g?.services?.[caller] ?? []) out.push({ op: "add", service: { caller, service } });
   return out;
 }
 
@@ -347,9 +364,10 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }];
   const publishes = gossipOf(m.config);
   // Call permissions: what this version asks; what an earlier one asked and this one does not is taken back.
-  const asked = grantsOf(record);
+  const asked = grantsOf(m.name, m);
   const askedKeys = new Set(asked.map(grantKey));
-  const grants: GrantOp[] = [...asked, ...(before ? grantsOf(before.record).filter((g) => !askedKeys.has(grantKey(g))).map((g) => ({ ...g, op: "remove" as const })) : [])];
+  // An upgrade: what the grants head holds for this name and the new manifest does not ask is taken back.
+  const grants: GrantOp[] = [...asked, ...(before ? (await grantsHeld(view, m.name)).filter((g) => !askedKeys.has(grantKey(g))).map((g) => ({ ...g, op: "remove" as const })) : [])];
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
     rows: sendRows, grants, ...(m.start ? { start: m.start.body } : {}),
@@ -418,7 +436,7 @@ export async function planUninstall(name: string, view: InstanceView): Promise<U
   return {
     app: name, record: a.record, ...(a.record.stop ? { stop: a.record.stop.body } : {}),
     rows: view.dispatch.filter((r) => r.app === name).map((r) => ({ op: "remove" as const, row: r })),
-    grants: grantsOf(a.record).map((g) => ({ ...g, op: "remove" as const })),
+    grants: (await grantsHeld(view, name)).map((g) => ({ ...g, op: "remove" as const })),
   };
 }
 
