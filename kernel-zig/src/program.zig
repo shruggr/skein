@@ -44,8 +44,10 @@
 //                                  last: the facts emitted under that name (or every name
 //                                  the prefix starts), strictly after `after`, the last per
 //                                  name with `latest`, the first `limit`. A read: a pure
-//                                  function of the log up to this step (this step's own
-//                                  emits are indexed when its update is written)
+//                                  function of the log up to this step, plus (0.8.0) the
+//                                  facts this step emitted so far — its in-VM callees' too —
+//                                  at the places its update will give them: exactly what the
+//                                  index answers once the update is written
 //   on(name, len, fn, fn_len) → 0  (0.5.2) subscribe: `fn` ("<role>.<fn>", or "<fn>" for an app
 //                                  with one program) of the calling app is stepped on each fact
 //                                  named `name` exactly that lands after this step; kept when
@@ -157,10 +159,124 @@ pub fn eventsQueryOf(a: std.mem.Allocator, bytes: []const u8) !union(enum) { ok:
     return .{ .ok = out };
 }
 
+/// 0.8.0: a fact the running step emitted, not yet in the index: its name (log.zig indexedName)
+/// and its index in the step's `emitted` (`i`), the record's CID.
+pub const PendingFact = struct { name: []const u8, i: i64, record: []const u8 };
+
+/// 0.8.0: the facts the running step emitted so far, at the place its update will give them —
+/// the entry's `n`, the update's `seq` (the step's number), their `i`, the thread — each listed
+/// once (one per CID, in `i` order); `by_name`: name → indices into `facts`, in `i` order.
+pub const Pending = struct {
+    n: i64,
+    seq: i64,
+    thread: []const u8,
+    facts: []const PendingFact,
+    by_name: ?*const std.StringHashMap(std.ArrayListUnmanaged(u32)) = null,
+};
+
+/// The order of the event index (index.zig placeKey: n ‖ seq ‖ i ‖ thread).
+pub fn placeOrder(x: storem.Place, y: storem.Place) std.math.Order {
+    if (x.n != y.n) return std.math.order(x.n, y.n);
+    if (x.seq != y.seq) return std.math.order(x.seq, y.seq);
+    if (x.i != y.i) return std.math.order(x.i, y.i);
+    return std.mem.order(u8, x.thread, y.thread);
+}
+
+/// 0.8.0: the event index read as it will stand once the running step's update is written: the
+/// index's rows and the step's own pending facts, one ordering (the place), `after`, `latest`
+/// (the last per name by place) and `limit` (the first, after the merge) applied to both alike.
+/// No pending fact matching: exactly the index's answer.
+pub fn eventsRows(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery, pending: ?Pending) ![]storem.EventRow {
+    const pd = pending orelse return s.events(a, q);
+    // The step's own facts the query takes, in `i` order (so in place order: n, seq, thread are one).
+    var mine = std.array_list.Managed(storem.EventRow).init(a);
+    const take = struct {
+        fn f(out: *std.array_list.Managed(storem.EventRow), p: Pending, qq: storem.EventsQuery, x: PendingFact) !void {
+            const place = storem.Place{ .n = p.n, .seq = p.seq, .i = x.i, .thread = p.thread };
+            if (qq.after) |af| if (placeOrder(place, af) != .gt) return;
+            try out.append(.{ .name = @constCast(x.name), .place = place, .record = @constCast(x.record) });
+        }
+    }.f;
+    if (pd.by_name) |by| {
+        // By name: one lookup (a name) or each name the prefix starts; with `latest` only a name's
+        // last (the greatest place of the name's own: if it is not after `after`, none is).
+        const one = struct {
+            fn f(out: *std.array_list.Managed(storem.EventRow), p: Pending, qq: storem.EventsQuery, ixs: []const u32) !void {
+                if (ixs.len == 0) return;
+                if (qq.latest) return take(out, p, qq, p.facts[ixs[ixs.len - 1]]);
+                for (ixs) |k| try take(out, p, qq, p.facts[k]);
+            }
+        }.f;
+        if (!q.prefix) {
+            if (by.get(q.name)) |ixs| try one(&mine, pd, q, ixs.items);
+        } else {
+            var it = by.iterator();
+            while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, q.name)) try one(&mine, pd, q, e.value_ptr.items);
+            // The map's order is not the place's: by `i`.
+            std.mem.sort(storem.EventRow, mine.items, {}, struct {
+                fn lt(_: void, x: storem.EventRow, y: storem.EventRow) bool {
+                    return x.place.i < y.place.i;
+                }
+            }.lt);
+        }
+    } else for (pd.facts) |x| {
+        const ok = if (q.prefix) std.mem.startsWith(u8, x.name, q.name) else std.mem.eql(u8, x.name, q.name);
+        if (ok) try take(&mine, pd, q, x);
+    }
+    if (mine.items.len == 0) return s.events(a, q);
+    // With `latest` and `limit`, each pending name may displace one of the index's rows: ask for that many more.
+    var names: usize = 0;
+    if (q.latest) {
+        var seen = std.StringHashMap(void).init(a);
+        for (mine.items) |r| if (!(try seen.getOrPut(r.name)).found_existing) {
+            names += 1;
+        };
+    }
+    var cq = q;
+    if (q.limit) |l| cq.limit = l +| names;
+    const committed = try s.events(a, cq);
+    var all = std.array_list.Managed(storem.EventRow).init(a);
+    try all.ensureTotalCapacity(committed.len + mine.items.len);
+    // Both lists are in place order; merge them.
+    var ci: usize = 0;
+    var pi: usize = 0;
+    while (ci < committed.len or pi < mine.items.len) {
+        if (pi >= mine.items.len or (ci < committed.len and placeOrder(committed[ci].place, mine.items[pi].place) == .lt)) {
+            all.appendAssumeCapacity(committed[ci]);
+            ci += 1;
+        } else {
+            all.appendAssumeCapacity(mine.items[pi]);
+            pi += 1;
+        }
+    }
+    var rows = all.items;
+    if (q.latest) {
+        // The last per name: walk from the newest, keep each name's first, then back in place order.
+        var seen = std.StringHashMap(void).init(a);
+        var keep = std.array_list.Managed(storem.EventRow).init(a);
+        var k = rows.len;
+        while (k > 0) {
+            k -= 1;
+            if (!(try seen.getOrPut(rows[k].name)).found_existing) try keep.append(rows[k]);
+        }
+        std.mem.reverse(storem.EventRow, keep.items);
+        rows = keep.items;
+    }
+    if (q.limit) |l| if (rows.len > l) {
+        rows = rows[0..l];
+    };
+    return rows;
+}
+
 /// The answer of `events` (0.5.0): the index's rows for the query, each with its record, as
-/// dag-cbor [{name, place: {n, seq, i, thread}, cid, record}].
+/// dag-cbor [{name, place: {n, seq, i, thread}, cid, record}]; 0.8.0: in a step, with the step's
+/// own facts so far (`pending`, eventsRows).
 pub fn eventsRead(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery) ![]u8 {
-    const rows = try s.events(a, q);
+    return eventsReadWith(a, s, q, null);
+}
+
+pub fn eventsReadWith(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery, pending: ?Pending) ![]u8 {
+    const rows = try eventsRows(a, s, q, pending);
     const out = try a.alloc(Value, rows.len);
     for (rows, out) |r, *o| {
         var p = cbor.MapBuilder.init(a);

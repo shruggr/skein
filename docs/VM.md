@@ -1232,9 +1232,12 @@ answer   dag-cbor [{name, place: {n, seq, i, thread: <cid>}, cid: <the record's 
 
 Newest last: the facts under that name (or every name the prefix starts),
 strictly after `after`, with `latest` the last per name, the first `limit`.
-A read, a pure function of the log as it stands before this step's update
-(the step's own emits are indexed when its update is written); in a kernel
-`call` the committed index. Errors: `events: want {name: <a name> | prefix:
+A read, a pure function of the log as it stands before this step's update,
+plus (0.8.0) the facts this step emitted so far — its in-VM callees' too, one
+step — at the places its update will give them (`n` the entry's, `seq` the
+step's number, `i` the index in `emitted`, the thread): the answer is exactly
+what the index gives once the update is written, merged by place, `after`,
+`latest` and `limit` applied alike. In a kernel `call` the committed index. Errors: `events: want {name: <a name> | prefix:
 <a name prefix>, after?: {n, seq, i, thread: <cid>}, limit?: <n > 0>,
 latest?: bool}` · `events: the query is not dag-cbor`. The host reads the same
 map from the store, no step (docs/MESSAGES.md "The event index (0.5.0)":

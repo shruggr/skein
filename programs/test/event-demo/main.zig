@@ -10,6 +10,15 @@
 //!   a message {kind: "event-demo-read", query: {name | prefix, after?, limit?, latest?}}: reads
 //!                  the event index in the step (`sk.events`) and moves `<app>/read` to
 //!                  {kind: "event-demo-read", answer: <the read's dag-cbor bytes>}
+//!   a message {kind: "event-demo-emit-read", names, value, query, via?, count?, fail?} (skein
+//!                  0.8.0: a step reads its own facts): emits as -emit does, then reads `query`
+//!                  as -read does, in the same step; `via` "callee-emit": the emits are an in-VM
+//!                  callee's (this program called, fn "emit"), "callee-read": the read is (fn
+//!                  "read"); `count`: emits `count` facts under names[0] (value 0…count-1), reading
+//!                  after each (the last read's answer kept, `reads` counted); `fail`: then the
+//!                  step errors (nothing it emitted stands)
+//!   called (kind "call"): fn "emit" {names, value} emits them; fn "read" {query} answers the
+//!                  read's dag-cbor
 //!   a message {kind: "event-demo-on", name, fn}: subscribes (`sk.on`, skein 0.5.2) — the step
 //!                  errors with the kernel's refusal; finishes "on <name>"
 //!   a message {kind: "event-demo-off", name, fn}: ends the app's one subscription of `fn` to
@@ -54,7 +63,8 @@ fn appOf(a: Allocator, in: Value) ![]const u8 {
 
 fn run(a: Allocator) !void {
     const in = try sk.input(a);
-    if (!eql(u8, Value.str(in.get("kind")) orelse "", "step")) return sk.report("event-demo takes steps only");
+    if (eql(u8, Value.str(in.get("kind")) orelse "", "call")) return called(a, in);
+    if (!eql(u8, Value.str(in.get("kind")) orelse "", "step")) return sk.report("event-demo takes steps and calls");
     const args = in.get("args") orelse return sk.report("no args");
     const app = try appOf(a, in);
     if (args.get("place") != null) return heard(a, app, args);
@@ -74,6 +84,7 @@ fn run(a: Allocator) !void {
     const kind = Value.str(body.get("kind")) orelse "";
     if (eql(u8, kind, "event-demo-emit")) return emitAll(a, body);
     if (eql(u8, kind, "event-demo-read")) return read(a, app, body);
+    if (eql(u8, kind, "event-demo-emit-read")) return emitRead(a, app, in, body);
     if (eql(u8, kind, "event-demo-on")) {
         const name = Value.str(body.get("name")) orelse return sk.report("event-demo-on wants {name, fn}");
         sk.on(name, Value.str(body.get("fn")) orelse return sk.report("event-demo-on wants {name, fn}")) catch return sk.report(sk.lastError());
@@ -85,6 +96,78 @@ fn run(a: Allocator) !void {
         return out(a, "off {s}", .{name});
     }
     return sk.report("event-demo: want event-demo-emit, -read, -on or -off");
+}
+
+fn emitNames(a: Allocator, names: Value, value: Value) !void {
+    if (names != .array) return sk.report("want names: [<name>…]");
+    for (names.array) |n| try emitOne(a, n, value);
+}
+
+fn emitOne(a: Allocator, name: Value, value: Value) !void {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("event", name);
+    try m.put("value", value);
+    const bytes = try cbor.encode(a, m.value());
+    _ = sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) }) catch return sk.report(sk.lastError());
+}
+
+/// This thread's program record's CID (the callee of `via`).
+fn selfProgram(a: Allocator, in: Value) ![]const u8 {
+    const origin = try sk.get(a, Value.cidOf(in.get("thread")) orelse return sk.report("the step names no thread"));
+    return Value.cidOf(origin.get("program")) orelse sk.report("the thread names no program");
+}
+
+fn emitRead(a: Allocator, app: []const u8, in: Value, body: Value) !void {
+    const names = body.get("names") orelse return sk.report("event-demo-emit-read wants {names, value, query}");
+    const value = body.get("value") orelse .null;
+    const query = body.get("query") orelse return sk.report("event-demo-emit-read wants {names, value, query}");
+    const via = Value.str(body.get("via")) orelse "";
+    const prog = try selfProgram(a, in);
+    var answer: []const u8 = "";
+    var reads: i64 = 0;
+    if (Value.intOf(body.get("count"))) |count| {
+        if (names != .array or names.array.len == 0) return sk.report("count wants names: [<name>]");
+        var k: i128 = 0;
+        while (k < count) : (k += 1) {
+            try emitOne(a, names.array[0], cbor.int(@as(i64, @intCast(k))));
+            answer = try cbor.encode(a, sk.events(a, query) catch return sk.report(sk.lastError()));
+            reads += 1;
+        }
+    } else {
+        if (eql(u8, via, "callee-emit")) {
+            var arg = cbor.MapBuilder.init(a);
+            try arg.put("names", names);
+            try arg.put("value", value);
+            _ = sk.call(a, prog, "emit", try cbor.encode(a, arg.value())) catch return sk.report(sk.lastError());
+        } else try emitNames(a, names, value);
+        if (eql(u8, via, "callee-read")) {
+            var arg = cbor.MapBuilder.init(a);
+            try arg.put("query", query);
+            answer = sk.call(a, prog, "read", try cbor.encode(a, arg.value())) catch return sk.report(sk.lastError());
+        } else answer = try cbor.encode(a, sk.events(a, query) catch return sk.report(sk.lastError()));
+        reads = 1;
+    }
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("event-demo-read"));
+    try m.put("answer", .{ .bytes = answer });
+    try m.put("reads", cbor.int(reads));
+    try sk.advance(try std.fmt.allocPrint(a, "{s}/read", .{app}), try sk.put(a, m.value()));
+    if (body.get("fail")) |f| if (f == .bool and f.bool) return sk.report("event-demo-emit-read: failing as asked");
+    return out(a, "emitted and read", .{});
+}
+
+fn called(a: Allocator, in: Value) !void {
+    const func = Value.str(in.get("fn")) orelse return sk.report("a call names no fn");
+    const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("a call's arg is dag-cbor");
+    if (eql(u8, func, "emit")) {
+        try emitNames(a, arg.get("names") orelse return sk.report("emit wants {names, value}"), arg.get("value") orelse .null);
+        return std.Io.File.stdout().writeStreamingAll(sk.io(), "ok");
+    }
+    if (eql(u8, func, "read")) {
+        const answer = sk.events(a, arg.get("query") orelse return sk.report("read wants {query}")) catch return sk.report(sk.lastError());
+        return std.Io.File.stdout().writeStreamingAll(sk.io(), try cbor.encode(a, answer));
+    }
+    return sk.report("event-demo: a call's fn is emit or read");
 }
 
 fn emitAll(a: Allocator, body: Value) !void {

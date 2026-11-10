@@ -5,6 +5,8 @@ const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
 const index = @import("index.zig");
+const program = @import("program.zig");
+const storem = @import("store.zig");
 const Value = cbor.Value;
 
 const Mem = struct {
@@ -439,4 +441,85 @@ test "index: the event index (0.5.0) — facts by name and place; prefix, after,
     }
     ix2.setCursor(5);
     try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
+}
+
+fn sameRows(want: []const storem.EventRow, got: []const storem.EventRow) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| {
+        try std.testing.expectEqualStrings(w.name, g.name);
+        try std.testing.expectEqualSlices(u8, w.record, g.record);
+        try std.testing.expectEqual(std.math.Order.eq, program.placeOrder(w.place, g.place));
+    }
+}
+
+test "events (0.8.0): a step's own facts, read before its update, are exactly what the index answers after it — name, prefix, latest, after across the boundary, limit; the same-entry order by seq" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = Mem.init(gpa);
+    defer mem.deinit();
+    const ix = try index.Index.init(gpa, mem.backend(), false);
+    defer ix.deinit();
+    const s = ix.store();
+
+    const t1 = try s.chainOpen(a, try thread(a, 1, "a"));
+    const t2 = try s.chainOpen(a, try thread(a, 2, "b"));
+    const e3 = try entry(a, s, 3);
+    const e5 = try entry(a, s, 5);
+    const x0 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 0));
+    const y0 = try putV(s, a, try evRec(a, "amm/pool/y", "amm", 0));
+    const z5 = try putV(s, a, try evRec(a, "amm/pool/z", "amm", 5));
+    const x5 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 50));
+    // Committed: t1 step 1 at entry 3; t2 steps 1, 2 at entry 3, step 3 at entry 5 (seq 3 there).
+    _ = try s.chainAppend(a, t1, try emitting(a, 10, e3, &.{ x0, y0 }));
+    const nf = try putV(s, a, try evRec(a, "subscribe", "amm", 0)); // an intention: not indexed
+    _ = try s.chainAppend(a, t2, try emitting(a, 11, e3, &.{nf}));
+    _ = try s.chainAppend(a, t2, try emitting(a, 12, e3, &.{nf}));
+    _ = try s.chainAppend(a, t2, try emitting(a, 13, e5, &.{ z5, x5 }));
+
+    // The running step: t1's step 2 at entry 5 — emitted p1 (x), an intention (not a fact), p2 (y), p3 (x).
+    const p1 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 1));
+    const sub = try putV(s, a, try evRec(a, "subscribe", "amm", 1));
+    const p2 = try putV(s, a, try evRec(a, "amm/pool/y", "amm", 2));
+    const p3 = try putV(s, a, try evRec(a, "amm/pool/x", "amm", 3));
+    const facts = [_]program.PendingFact{
+        .{ .name = "amm/pool/x", .i = 0, .record = p1 },
+        .{ .name = "amm/pool/y", .i = 2, .record = p2 },
+        .{ .name = "amm/pool/x", .i = 3, .record = p3 },
+    };
+    var by = std.StringHashMap(std.ArrayListUnmanaged(u32)).init(a);
+    try by.put("amm/pool/x", .{ .items = @constCast(&[_]u32{ 0, 2 }), .capacity = 2 });
+    try by.put("amm/pool/y", .{ .items = @constCast(&[_]u32{1}), .capacity = 1 });
+    const pd = program.Pending{ .n = 5, .seq = 2, .thread = t1, .facts = &facts, .by_name = &by };
+    const pd_scan = program.Pending{ .n = 5, .seq = 2, .thread = t1, .facts = &facts };
+
+    const committed_x = try s.events(a, .{ .name = "amm/pool/x" });
+    const mid = storem.Place{ .n = 5, .seq = 2, .i = 0, .thread = t1 };
+    var qs = std.array_list.Managed(storem.EventsQuery).init(a);
+    for ([_]bool{ false, true }) |latest| for ([_]?usize{ null, 1, 2, 3 }) |limit| for ([_]?storem.Place{ null, committed_x[0].place, mid }) |after| {
+        try qs.append(.{ .name = "amm/pool/x", .latest = latest, .limit = limit, .after = after });
+        try qs.append(.{ .name = "amm/pool/y", .latest = latest, .limit = limit, .after = after });
+        try qs.append(.{ .name = "amm/pool/", .prefix = true, .latest = latest, .limit = limit, .after = after });
+        try qs.append(.{ .name = "", .prefix = true, .latest = latest, .limit = limit, .after = after });
+        try qs.append(.{ .name = "amm/none", .latest = latest, .limit = limit, .after = after });
+    };
+    const before = try a.alloc([]storem.EventRow, qs.items.len);
+    for (qs.items, before) |q, *b| {
+        b.* = try program.eventsRows(a, s, q, pd);
+        try sameRows(b.*, try program.eventsRows(a, s, q, pd_scan)); // the by-name map and the scan agree
+    }
+    // The examples by hand: x exact → x0, p1, p3, then t2's x5 (entry 5, seq 3 > 2: the place, not the run order).
+    try std.testing.expectEqual(@as(usize, 4), before[0].len);
+    try std.testing.expectEqualSlices(u8, p3, before[0][2].record);
+    try std.testing.expectEqualSlices(u8, x5, before[0][3].record);
+    try std.testing.expectEqual(@as(i64, 3), before[0][2].place.i);
+    try std.testing.expectEqual(@as(i64, 2), before[0][2].place.seq);
+    try std.testing.expectEqual(@as(i64, 5), before[0][2].place.n);
+
+    // The update is written: the index now holds them at the same places, and answers the same.
+    _ = try s.chainAppend(a, t1, try emitting(a, 14, e5, &.{ p1, sub, p2, p3 }));
+    for (qs.items, before) |q, b| try sameRows(try s.events(a, q), b);
+    // Nothing pending: exactly the index.
+    try sameRows(try s.events(a, .{ .name = "", .prefix = true }), try program.eventsRows(a, s, .{ .name = "", .prefix = true }, null));
 }

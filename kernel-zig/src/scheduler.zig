@@ -2197,6 +2197,14 @@ pub const Runtime = struct {
         progs: std.array_list.Managed(Running),
         /// The messages the step emitted (#70), in order: listed on its update, sent when it ends without error.
         emitted: std.array_list.Managed([]const u8),
+        /// 0.8.0: each CID in `emitted` → its index there (the first): a record is listed once, in O(1).
+        emitted_at: std.StringHashMap(u32),
+        /// 0.8.0: the facts among them (log.zig indexedName), in order, and by name — what the
+        /// step's `events` reads see beside the index (program.zig eventsRows).
+        facts: std.array_list.Managed(program.PendingFact),
+        fact_names: std.StringHashMap(std.ArrayListUnmanaged(u32)),
+        /// The entry's `n` (the place's first part); null: an entry without one (nothing is indexed).
+        entry_n: ?i64 = null,
         /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
         subscribed: bool = false,
         /// 0.5.2: the `on` / `off` calls the step made, in order (on.zig): kept when it ends without error.
@@ -2291,6 +2299,13 @@ pub const Runtime = struct {
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
         const n: i64 = @intCast(1 + if (try rt.store.chainUpdates(a, origin)) |us| us.len else 0);
         const tip_cid = (try rt.store.chainTip(a, origin)).?;
+        // 0.8.0: the step's own facts are read at the place its update will give them, `seq` = `n`
+        // (chainAppend: the tip's seq + 1). An invariant: were it ever otherwise, the step fails here,
+        // before it runs, rather than answer a place the index will not hold.
+        {
+            const tip_seq: i128 = if (std.mem.eql(u8, tip_cid, origin)) 0 else Value.intOf((try rt.getOrNotFound(a, tip_cid)).get("seq")) orelse -1;
+            if (tip_seq + 1 != n) return rt.failf(a, "the thread's tip is at seq {d}, its step {d}: the place of this step's facts is not known", .{ tip_seq, n });
+        }
         const time = logm.stampOf(ctx.e.get("time")).?;
         const at = time.ms();
         const g = rt.genesis.?;
@@ -2349,6 +2364,10 @@ pub const Runtime = struct {
             .children = .init(a),
             .progs = .init(a),
             .emitted = .init(a),
+            .emitted_at = .init(a),
+            .facts = .init(a),
+            .fact_names = .init(a),
+            .entry_n = if (Value.intOf(ctx.e.get("n"))) |x| @intCast(x) else null,
             .ons = .init(a),
             .rests = .init(a),
         };
@@ -2430,9 +2449,7 @@ pub const Runtime = struct {
             // wired (the host's waker: a timer) and answers it with an entry at `at`; that answer
             // steps the thread with `woke`.
             const c = try rt.deadlineEvent(a, origin, n, until, st.progs.items[0]);
-            var listed = false;
-            for (st.emitted.items) |x| listed = listed or std.mem.eql(u8, x, c);
-            if (!listed) try st.emitted.append(c);
+            if (!st.emitted_at.contains(c)) try appendEmitted(&st, c);
             try st.awaits.append(c);
         };
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
@@ -2909,9 +2926,24 @@ pub const Runtime = struct {
     /// Put an event record and list it on the update (once per step).
     fn listEvent(st: *StepState, imp: *program.Imports, rec: Value) program.Err![]const u8 {
         const c = st.rt.store.put(st.a, rec) catch return imp.failWith("emit: the event is not IPLD, or a store error");
-        for (st.emitted.items) |x| if (std.mem.eql(u8, x, c)) return c;
-        try st.emitted.append(c);
+        if (st.emitted_at.contains(c)) return c;
+        try appendEmitted(st, c);
+        // 0.8.0: a fact (as index.zig writeEvents takes it) is seen by the step's own `events` reads.
+        if (st.entry_n != null) if (logm.indexedName(rec)) |name| {
+            const k: u32 = @intCast(st.facts.items.len);
+            try st.facts.append(.{ .name = name, .i = @intCast(st.emitted.items.len - 1), .record = c });
+            const g = try st.fact_names.getOrPut(name);
+            if (!g.found_existing) g.value_ptr.* = .empty;
+            try g.value_ptr.append(st.a, k);
+        };
         return c;
+    }
+
+    /// Append `c` to the step's `emitted`, its first index kept in `emitted_at`.
+    fn appendEmitted(st: *StepState, c: []const u8) !void {
+        const g = try st.emitted_at.getOrPut(c);
+        if (!g.found_existing) g.value_ptr.* = @intCast(st.emitted.items.len);
+        try st.emitted.append(c);
     }
 
     /// The address book as this step sees it (its own `peers` moves included): `key`'s entry.
@@ -2957,7 +2989,7 @@ pub const Runtime = struct {
         }
         st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
-        try st.emitted.append(c);
+        try appendEmitted(st, c);
         return c;
     }
     /// Replaying a log written before #126 step 4, whose emits were signed (BRC-169's way, [2,
@@ -3031,18 +3063,20 @@ pub const Runtime = struct {
         }
     }
 
-    /// 0.5.0: the event index read (program.zig eventsRead), as the log stands before this step's update.
+    /// 0.5.0: the event index read (program.zig eventsRead); 0.8.0: with the facts this step (and
+    /// its in-VM callees, one `emitted`) emitted so far, at the places its update will give them.
     fn hEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
-        return eventsAnswer(imp, st.a, st.rt.store, query);
+        const pending: ?program.Pending = if (st.entry_n) |en| .{ .n = en, .seq = st.n, .thread = st.origin, .facts = st.facts.items, .by_name = &st.fact_names } else null;
+        return eventsAnswer(imp, st.a, st.rt.store, query, pending);
     }
 
-    fn eventsAnswer(imp: *program.Imports, a: std.mem.Allocator, store: Store, query: []const u8) program.Err![]const u8 {
+    fn eventsAnswer(imp: *program.Imports, a: std.mem.Allocator, store: Store, query: []const u8, pending: ?program.Pending) program.Err![]const u8 {
         const q = switch (program.eventsQueryOf(a, query) catch return error.OutOfMemory) {
             .ok => |x| x,
             .bad => |why| return imp.failWith(why),
         };
-        return program.eventsRead(a, store, q) catch |err| switch (err) {
+        return program.eventsReadWith(a, store, q, pending) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("events: {s}", .{@errorName(err)}),
         };
@@ -3427,7 +3461,7 @@ pub const Runtime = struct {
     }
     fn cEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
-        return eventsAnswer(imp, cs.a, cs.store, query);
+        return eventsAnswer(imp, cs.a, cs.store, query, null);
     }
     fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const cs = callOf(imp);
