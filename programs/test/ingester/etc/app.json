@@ -1,0 +1,10 @@
+{
+  "kind": "app",
+  "name": "ingester",
+  "version": "0.1.0",
+  "programs": { "ingester": "bin/ingester.wasm" },
+  "description": "A test caller: a message {beef} in box ingester → the chain app's ingest as an in-VM call in this step.",
+  "routes": [
+    { "transport": "mailbox", "address": "ingester", "filters": ["kernel.beef"], "handler": "ingester" }
+  ]
+}

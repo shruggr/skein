@@ -1,5 +1,28 @@
 # Changes
 
+## 0.7.1
+
+Host only: the kernel and the log are 0.7.0's.
+
+- **The broadcaster posts Extended Format or nothing.** The raw-transaction
+  fallbacks are gone (src/host/arc.ts). A broadcast event with no BEEF, a
+  BEEF of another transaction, one whose subject lacks an input's source, or
+  one that proves its subject (it is mined: a chain-app defect, which
+  broadcasts only an unlinked transaction) is a host error, named with the
+  txid on the instance's log. Nothing is queued and the instance is told
+  nothing.
+- **Arcade's answers by one table** (`ARC_CODES`, David to review). An
+  invalid transaction (ARC 461-466, 471-474, and 467 on the stream) is
+  REJECTED. Our payload or request at fault (a 400 with no ARC code, 460,
+  467 at intake, 468, 469, 475, 401, 403, 404, any other 4xx) is not a
+  rejection: an error on the instance's log, the row off the queue, no
+  status. 476 (not final) keeps the row, tried again. 408, 425, 429, a 5xx
+  or no answer are tried again as before. A REJECTED on the stream or a
+  webhook with one of our codes or 476 is logged and not routed.
+- The equivs pin skein-chain v0.11.0 (`chain.ts` on its status words), with
+  `chain-proof-events.ts`, `chain-bundle.ts` and the test caller
+  programs/test/ingester.
+
 ## 0.7.0
 
 **Existing instances do not replay on this kernel. Fresh instances only.**

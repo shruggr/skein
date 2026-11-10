@@ -147,6 +147,8 @@ export function statusOf(v: unknown): Record<string, unknown> | string {
   if (typeof o.blockHeight === "number") ev.blockHeight = o.blockHeight;
   if (typeof o.blockHash === "string" && o.blockHash) ev.blockHash = o.blockHash;
   if (typeof o.extraInfo === "string" && o.extraInfo) ev.extraInfo = o.extraInfo;
+  // Arcade's ARC code on a status (its numeric `status`, 460-499: arc.ts ARC_CODES).
+  if (typeof o.status === "number" && o.status >= 460 && o.status < 500) ev.code = o.status;
   return ev;
 }
 

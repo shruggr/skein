@@ -12,14 +12,16 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Transaction } from "@bsv/sdk";
 
-export interface ArcadeStatus { txStatus: string; merklePath?: string; blockHash?: string; blockHeight?: number }
+export interface ArcadeStatus { txStatus: string; merklePath?: string; blockHash?: string; blockHeight?: number; status?: number; extraInfo?: string }
 interface Logged { id: string; token: string; data: Record<string, unknown> }
 
 export class FakeArcade {
   url = "";
   eventsUrl = "";
-  /** "ok"; "reject": a 400 with a reason; "busy": 503 + Retry-After (not taken). */
+  /** "ok"; "reject": Arcade's 400 for an invalid transaction (ARC 465, fees); "busy": 503 + Retry-After (not taken). */
   mode: "ok" | "reject" | "busy" = "ok";
+  /** Set: every post is answered this (HTTP status, JSON body; `{txid}` filled in), whatever the mode. */
+  answer?: { status: number; body: Record<string, unknown> };
   readonly txs = new Map<string, ArcadeStatus & { token: string }>();
   readonly posts: Uint8Array[] = [];
   readonly postHeaders: Array<Record<string, string | string[] | undefined>> = [];
@@ -47,6 +49,11 @@ export class FakeArcade {
     try { return Transaction.fromEF([...body]); } catch { return Transaction.fromBinary([...body]); } // not EF: raw, whose failure the caller answers 400
   }
 
+  /** Whether a POST body is Extended Format. */
+  static isEF(body: Uint8Array): boolean {
+    try { Transaction.fromEF([...body]); return true; } catch { return false; }
+  }
+
   private async api(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -56,11 +63,16 @@ export class FakeArcade {
     if (req.method === "POST" && path === "/tx") {
       this.posts.push(body);
       this.postHeaders.push({ ...req.headers });
+      if (this.answer) {
+        let txid: string | undefined;
+        try { txid = FakeArcade.txOf(body).id("hex"); } catch { /* not a transaction: no txid */ }
+        return send(this.answer.status, { ...(txid ? { txid } : {}), ...this.answer.body });
+      }
       if (this.mode === "busy") return send(503, { status: 503, title: "Service Unavailable", detail: "backpressure" }, { "retry-after": "1" });
       let tx: Transaction;
       try { tx = FakeArcade.txOf(body); } catch (e) { return send(400, { status: 400, reason: `not a transaction: ${(e as Error).message}` }); }
       const txid = tx.id("hex");
-      if (this.mode === "reject") return send(400, { status: 400, txid, reason: "rejected by the test" });
+      if (this.mode === "reject") return send(400, { error: "transaction failed validation", txid, reason: "fee is too low", status: 465, title: "Fee too low" });
       const had = this.txs.get(txid);
       if (had) return send(202, { txid, status: 202, txStatus: had.txStatus });
       this.txs.set(txid, { txStatus: "RECEIVED", token: String(req.headers["x-callbacktoken"] ?? "") });
