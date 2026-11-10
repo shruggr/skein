@@ -92,6 +92,11 @@ pub const Host = struct {
     /// head moves and records are the step's); from a kernel `call` it reads
     /// only (no entry, no writes, nothing recorded).
     call: *const fn (imp: *Imports, prog: []const u8, func: []const u8, arg: []const u8) Err![]const u8,
+    /// A NAMED in-VM call (call permissions): the same call, stating `name`. The kernel runs it only
+    /// when the calling app is approved to call the callee's app under that exact name (the grants
+    /// head's `calls`, grants.zig), and hands the callee the name as `as` in its input; otherwise the
+    /// call fails (an error to the caller; the callee does not run).
+    callAs: *const fn (imp: *Imports, prog: []const u8, func: []const u8, name: []const u8, arg: []const u8) Err![]const u8 = noCallAs,
     /// The edges into `to` (#42): dag-cbor [{from, seq, rel, locator}] (edgesRead).
     edges: *const fn (imp: *Imports, to: []const u8, rel: ?[]const u8) Err![]const u8 = noEdges,
     /// A BRC-104 request (#126, authfetch.zig): dag-cbor {url, method?, path?, headers?, body?,
@@ -104,6 +109,10 @@ pub const Host = struct {
     /// 0.5.3: end the calling app's one subscription of a function to a name (on.zig).
     off: *const fn (imp: *Imports, name: []const u8, func: []const u8) Err!void = noOff,
 };
+
+fn noCallAs(imp: *Imports, _: []const u8, _: []const u8, _: []const u8, _: []const u8) Err![]const u8 {
+    return imp.failWith("callAs: this host makes no named calls");
+}
 
 fn noOn(imp: *Imports, _: []const u8, _: []const u8) Err!void {
     return imp.failWith("on: this host keeps no subscriptions");
@@ -312,6 +321,13 @@ pub const Imports = struct {
                 const func = try imp.strAt(p, a[2], a[3]);
                 const arg = try imp.alloc.dupe(u8, p.slice(a[4], a[5]) catch return error.OutOfMemory);
                 return imp.out(p, try h.call(imp, prog, func, arg), a[6], a[7]);
+            },
+            .callAs => {
+                const prog = try imp.alloc.dupe(u8, try imp.cidAt(p, a[0], a[1]));
+                const func = try imp.strAt(p, a[2], a[3]);
+                const name = try imp.alloc.dupe(u8, p.slice(a[4], a[5]) catch return error.OutOfMemory);
+                const arg = try imp.alloc.dupe(u8, p.slice(a[6], a[7]) catch return error.OutOfMemory);
+                return imp.out(p, try h.callAs(imp, prog, func, name, arg), a[8], a[9]);
             },
             .edges => {
                 const to = try imp.alloc.dupe(u8, try imp.cidAt(p, a[0], a[1]));

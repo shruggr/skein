@@ -43,7 +43,7 @@ import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
-import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
+import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type GrantOp, type InstanceView, type ViewStore } from "./plan.ts";
 import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import { appIgnore } from "./install.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
@@ -289,7 +289,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   let apps: Booted["apps"];
   if (t.apps) {
     const born = await installAtBirth(k, src.objects, t, s, c, src.apps);
-    s = { ...s, dispatch: [...s.dispatch, ...born.rows], heads: born.heads };
+    s = { ...s, dispatch: [...s.dispatch, ...born.rows], heads: born.heads, ...withGrants(s, born.grants) };
     n += born.put;
     apps = born.apps;
   }
@@ -306,7 +306,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
  * at creation (`appConfig`) is merged over its manifest's, as an install's `--config` is. Their
  * objects and records are put into the store; the routes and heads go into the genesis.
  */
-export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, imageObjects: Objects, t: SystemTree, s: System, c: Genesis2Config, resolved: Record<string, CID> = {}): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
+export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, imageObjects: Objects, t: SystemTree, s: System, c: Genesis2Config, resolved: Record<string, CID> = {}): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; grants: GrantOp[]; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
   const fetched = new MemBlocks();
   const objects = anyOf(imageObjects, fetched);
   const local = new MemBlocks();
@@ -328,6 +328,8 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
   };
   const rows: DispatchRow[] = [];
   const heads = new Map<string, CID>();
+  // Call permissions: what each app's manifest asks (calls, services), written into the genesis: at birth the image is the approver.
+  const grants: GrantOp[] = [];
   let put = 0;
   const put1 = async (r: { cid: CID; bytes: Uint8Array }) => { if (!(await k.hasBlock(r.cid))) { await k.putBlock(r.cid, r.bytes); put++; } };
   const apps: Array<{ name: string; version: string; notes: string[] }> = [];
@@ -349,6 +351,7 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
       view.heads = [...view.heads.filter((x) => x.name !== h.name), { name: h.name, root: h.tree }];
     }
     for (const r of p.rows) { rows.push(r.row); view.dispatch.push(r.row); }
+    grants.push(...p.grants.filter((g) => g.op === "add"));
     apps.push({ name: p.app, version: p.version, notes: p.notes });
   }
   // #147: a root route's handler may be `<app>.<role>` — an app installed above, its program record (as `skein routes add`).
@@ -366,7 +369,20 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
     const p = await planRootRoute(view, "add", r);
     for (const x of p.rows) { rows.push(x.row); view.dispatch.push(x.row); }
   }
-  return { rows, heads: Object.fromEntries(heads), put, apps };
+  return { rows, heads: Object.fromEntries(heads), grants, put, apps };
+}
+
+/** A system with `grants` (adds) folded into its genesis's `calls` and `services` (call permissions). */
+export function withGrants(s: Pick<System, "calls" | "services">, grants: GrantOp[]): Pick<System, "calls" | "services"> {
+  const calls: Record<string, Record<string, string[]>> = JSON.parse(JSON.stringify(s.calls ?? {}));
+  const services: Record<string, string[]> = JSON.parse(JSON.stringify(s.services ?? {}));
+  for (const g of grants) {
+    if ("calls" in g) {
+      const by = (calls[g.calls.caller] ??= {});
+      by[g.calls.callee] = [...new Set([...(by[g.calls.callee] ?? []), g.calls.name])].sort();
+    } else services[g.service.caller] = [...new Set([...(services[g.service.caller] ?? []), g.service.service])].sort();
+  }
+  return { calls, services };
 }
 
 /** The program records' CIDs a tree's bin/ yields (as `boot` puts them), without a kernel. */

@@ -694,7 +694,7 @@ function over the current state and return a value. It writes nothing.
 
 - **The ABI** is the program's ordinary entry (`_start`, or `wasi:cli/run`
   for a component), so it is the same for preview1 modules and components.
-  `input()` returns `{kind: "call", fn, arg: bytes, caller?, now, self:
+  `input()` returns `{kind: "call", fn, arg: bytes, as?: <a named call's name>, caller?, now, self:
   {handle, domain, identity}, programs, peers, defaults, names,
   dispatch: [<route>], pending: [entry CIDs
   admitted and not yet processed], state: <the committed state record>}`
@@ -748,6 +748,47 @@ function over the current state and return a value. It writes nothing.
   store, not a different kind of execution; a kernel call's puts are the
   same cache, dropped with the call. When a cache flushes, and what it may
   forget that nothing reaches, is the store's policy (retention).
+
+### Call permissions: named calls and kernel services
+
+(kernel-zig/src/grants.zig, scheduler.zig `stepCall` / `callCall` / `signerProblem`.) One
+mechanism, two uses.
+
+**A named call.** Beside `call(prog, fn, arg)` (unchanged, no name) a program may make
+`callAs(prog, fn, name, arg)` — the import `skein.callAs(prog, prog_len, fn, fn_len, name,
+name_len, arg, arg_len, out, cap) → i32`, from a step and from a kernel call alike. Before the
+callee runs the kernel checks that the calling program's party is approved to call the
+callee's party under that exact `name` (1 to 256 bytes of UTF-8, no NUL), and otherwise
+fails the call (an error to the caller, which goes on; the callee does not run):
+`callAs: <caller> is not approved to call <callee> as "<name>"`, `callAs: a named call needs an
+installed caller …` (a program record a step put), `callAs: <cid> is no installed app's
+program`. The callee finds the name at the top of its call input as `as` (text), written by the
+kernel only: absent from a call that stated none, from a nested call (never inherited), and
+from every step (a launched thread, a message, an event, an `on` delivery) and filter. The
+kernel compares names byte for byte and never interprets one; what a name means is the
+callee's. A call between two programs of one app is checked like any other.
+
+**A party** is an installed app's name for its programs (the record's `app`, the program
+listed in `<app>/app`), and `genesis:<program name>` for a genesis-wired program (or a program
+a dispatch row names with no app). A record a step put has none.
+
+**Kernel services.** An import may be a service a party must hold. One is defined: `signer`,
+the raw signer (the `wallet` import). The kernel answers it only for the program running now
+(the step's, or the callee's inside a call) whose party holds `signer`; any other gets
+`wallet: <party> does not hold the signer service`. No other import is restricted. The
+kernel's own signing (the door's BRC-104 checks, delivery answers) is no import and is
+unchanged.
+
+**The record** is the grants head's (`grants`, the kernel's alone): beside `roles`,
+`calls: {<caller>: {<callee>: [<name> …]}}` ("*" among the names: any name) and `services:
+{<caller>: [<service> …]}`, lists sorted. Written by root's `grant` operation —
+`{op: "add" | "remove", calls: {caller, callee, name}}`, `{op, service: {caller, service}}` —
+and at birth by the genesis's `calls` / `services` (the same shapes; `"*"` alone for any
+name), as `root` is. The stock genesis (src/host/genesis.ts `STOCK_SERVICES`) gives the
+front door and the wallet the signer service at birth, like any grant; an image's apps
+add their manifests' `calls` and `services` to the genesis (src/host/boot.ts
+`installAtBirth`). An app installed by message asks for them in its manifest and root's
+install sends a `grant` each (docs/APPS.md §2).
 
 ### The door: filters, before anything is logged (#121, #143)
 

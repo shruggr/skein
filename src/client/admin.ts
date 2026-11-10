@@ -19,7 +19,8 @@ import { handlerCid, hashDir, recordBundles } from "./client.ts";
 import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
-import { appHead, describe, mergeConfig, planInstall, planRootRoute, planUninstall, sendInstall, sendUninstall, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
+import { appHead, describe, mergeConfig, planInstall, planRootRoute, planUninstall, sendInstall, sendUninstall, showGrant, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
+import { isCallName, MAX_CALL_NAME, SERVICES } from "../host/manifest.ts";
 import { lookup, readBlob } from "../runtime/tree.ts";
 
 import type { Objects } from "../host/boot.ts";
@@ -62,7 +63,7 @@ export async function planInstallApp(tree: AppTree, view: InstanceView, o: { con
 export async function planUninstallApp(name: string, view: InstanceView): Promise<AdminPlan> {
   const p = await planUninstall(name, view);
   const messages = await collect((send) => sendUninstall(p, send));
-  const prompt = [`uninstall ${name} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length} · head ${name}/app left`, ...p.rows.map((r) => `    dispatch remove ${r.row.transport} ${r.row.address}${r.row.prefix ? " prefix" : ""}`)];
+  const prompt = [`uninstall ${name} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length}${p.grants.length ? ` · grant remove ×${p.grants.length}` : ""} · head ${name}/app left`, ...p.rows.map((r) => `    dispatch remove ${r.row.transport} ${r.row.address}${r.row.prefix ? " prefix" : ""}`), ...p.grants.map((g) => `    grant ${showGrant(g)}`)];
   return { prompt, recipient: view.identity, messages };
 }
 
@@ -223,6 +224,28 @@ export async function planGrant(view: InstanceView, key: string, o: { role?: str
   if (holds === (op === "add")) return { prompt: [`grant ${op} ${role} ${key}: the grants say so already`], recipient: view.identity, messages: [] };
   return { prompt: [`grant ${op} ${role} ${key}`], recipient: view.identity, messages: [{ box: "grant", body: { op, role, principal: keyBytes(key) } }] };
 }
+
+/**
+ * A call permission or a kernel service (call permissions; `skein grant --calls | --service`): the
+ * kernel's `grant` operation with `calls: {caller, callee, name}` ("*": any name) or `service:
+ * {caller, service}`, root's choice without a manifest. A caller or callee is an app's name or
+ * `genesis:<program name>`. One message to box `grant`.
+ */
+export function planGrantCalls(view: InstanceView, caller: string, callee: string, name: string, o: { remove?: boolean } = {}): AdminPlan {
+  for (const p of [caller, callee]) if (!PARTY.test(p)) throw new Error(`${p}: a caller or callee is an app's name or genesis:<program name>`);
+  if (!isCallName(name)) throw new Error(`${JSON.stringify(name)}: a call's name is 1 to ${MAX_CALL_NAME} bytes with no NUL ("*": any)`);
+  const op = o.remove ? "remove" : "add";
+  return { prompt: [`grant ${op}: ${caller} calls ${callee} as ${name === "*" ? "ANY NAME (admin)" : JSON.stringify(name)}`], recipient: view.identity, messages: [{ box: "grant", body: { op, calls: { caller, callee, name } } }] };
+}
+
+export function planGrantService(view: InstanceView, caller: string, service: string, o: { remove?: boolean } = {}): AdminPlan {
+  if (!PARTY.test(caller)) throw new Error(`${caller}: a caller is an app's name or genesis:<program name>`);
+  if (!SERVICES.includes(service)) throw new Error(`${service}: not a kernel service (${SERVICES.join(", ")})`);
+  const op = o.remove ? "remove" : "add";
+  return { prompt: [`grant ${op}: ${caller} ${o.remove ? "loses" : "holds"} service ${service}${service === "signer" ? " (the raw signer import: any derivation)" : ""}`], recipient: view.identity, messages: [{ box: "grant", body: { op, service: { caller, service } } }] };
+}
+
+const PARTY = /^(genesis:)?[a-z0-9][a-z0-9_-]*$/;
 
 /** One app the management page offers (the site's www/catalog.json): a repository and a commit. */
 export interface CatalogEntry { name: string; version?: string; url: string; hash: string; image?: string; description?: string }

@@ -1,0 +1,17 @@
+.{
+    .name = .skein_test_perm_probe,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x767a94331e7bab5d,
+    .dependencies = .{
+        .skein_sdk = .{
+            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.17.2.tar.gz",
+            .hash = "skein_sdk-0.17.2-YroFBACkGwB7r7sFiMmGoOJdA9xqa_3c65u67kGjngzN",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+    },
+}

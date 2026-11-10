@@ -49,6 +49,12 @@
 //               — `writes` required; `args`/`answer` shapes: a type name (string, int,
 //               ms, bytes, cid, bool, map, any), [shape], or {key[?]: shape}
 //   requires[]  "<name>/<major>"
+//   calls       {<callee>: [<name> …] | "*"} (call permissions): the names this app may call each
+//               callee under (`callAs`; the kernel checks them, the callee reads the name as `as`).
+//               A callee is an app's name or `genesis:<program name>`; "*" any name (admin). Root
+//               approves them at install: each is a `grant` message (calls: {caller, callee, name}).
+//   services    ["signer"]: the kernel services this app asks for (the raw signer import, any
+//               derivation); each a `grant` message (service: {caller, service}).
 //   start, stop {body: {…}}; into the app's box: a mailbox route at it
 //   config      a map (the programs read it from the head's root record)
 //   config.overlay   an overlay app (APPS.md §6): {topics?: {<topic>: <role>}, lookups?: {<service>:
@@ -79,6 +85,10 @@ export interface Manifest {
   config?: Record<string, unknown>;
   provides?: Provide[];
   requires?: string[];
+  /** Call permissions: per callee, the names this app may call it under ("*": any). */
+  calls?: Record<string, string[] | "*">;
+  /** Kernel services this app asks for (defined: "signer"). */
+  services?: string[];
   start?: { body: Record<string, unknown> };
   stop?: { body: Record<string, unknown> };
   description?: string;
@@ -125,6 +135,11 @@ const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const INTERFACE = /^[a-z0-9][a-z0-9._-]*\/\d+$/;
 const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
 const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef"];
+/** Call permissions (kernel-zig grants.zig): a caller or callee, the kernel services, a name's bound. */
+const PARTY = /^(genesis:)?[a-z0-9][a-z0-9_-]*$/;
+export const SERVICES = ["signer"];
+export const MAX_CALL_NAME = 256;
+export const isCallName = (n: unknown): n is string => typeof n === "string" && n.length > 0 && new TextEncoder().encode(n).length <= MAX_CALL_NAME && !n.includes("\0");
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -332,6 +347,17 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     if (typeof r !== "string" || !INTERFACE.test(r)) bad.push(`requires: ${JSON.stringify(r)} is not <name>/<major>`);
     else requires.push(r);
   }
+
+  // calls, services (call permissions): what root approves at install, as grants.
+  if (m.calls !== undefined) {
+    if (!isMap(m.calls)) bad.push("calls: want {<callee>: [<name> …] | \"*\"}");
+    else for (const [callee, names] of Object.entries(m.calls)) {
+      if (!PARTY.test(callee)) bad.push(`calls: ${JSON.stringify(callee)} is not an app's name or genesis:<program name>`);
+      if (names === "*") continue;
+      if (!Array.isArray(names) || !names.length || names.some((n) => !isCallName(n))) bad.push(`calls.${callee}: want "*" or a list of names (1 to ${MAX_CALL_NAME} bytes, no NUL)`);
+    }
+  }
+  if (m.services !== undefined && (!Array.isArray(m.services) || m.services.some((x) => !SERVICES.includes(x as string)))) bad.push(`services: a list of kernel services (${SERVICES.join(", ")})`);
 
   // config.overlay: the overlay app's wiring, derived (APPS.md §6), under what the manifest names itself.
   const derived: Derived = { routes: [] };

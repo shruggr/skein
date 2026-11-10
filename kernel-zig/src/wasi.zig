@@ -214,6 +214,7 @@ pub const Fn = enum {
     emit,
     deadline,
     call,
+    callAs,
     edges,
     authfetch,
     events,

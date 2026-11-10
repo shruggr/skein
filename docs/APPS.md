@@ -239,6 +239,8 @@ anything."
 | `config` | per-program configuration the programs read from the app record (the overlay engine reads `config.overlay`, §6; the app's own program `config.<name>`). Changing it is a new manifest and a head advance (root), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: it may put records, move heads, emit; false: it reads only), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map`, `any`, `[shape]`, `{key: shape}`; a `?` suffix on a key = optional). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
+| `calls` | call permissions: `{<callee>: [<name> …] \| "*"}` — the names this app may call each callee under (`callAs`; a callee an app's name or `genesis:<program name>`; `"*"` any name). Root approves them at install: the prompt reads each aloud (`grant calls <callee> as "<name>"`, `… as ANY NAME (admin)`) and the install sends one `grant` message each; an upgrade takes back what the new version no longer asks; uninstall takes them all back (docs/VM.md "Call permissions") |
+| `services` | kernel services this app asks for: `["signer"]`, the raw signer import (any derivation). The prompt: `grant holds service signer (the raw signer import: any derivation)`; one `grant` message each |
 | `start` | optional: a message root sends into the app's box (a `mailbox` route at it) as the last install message; sending it again is the restart. (#76) |
 | `stop` | optional: a message root sends into the app's box at uninstall, before its routes are removed. (#76) |
 

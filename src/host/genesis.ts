@@ -10,6 +10,8 @@
 //   genesis  {kind: "genesis", identity: bytes(33), root?: [bytes(33)], handle, domain, programs,
 //             dispatch: [<route>], roles?: {<role>: ["<program>.<fn>"]},
 //             scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes(33)},
+//             calls?: {<caller>: {<callee>: [<name>]}}, services?: {<caller>: [<service>]}
+//             (call permissions: written into the grants head at birth, kernel-zig grants.zig),
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
@@ -199,6 +201,14 @@ export const STOCK_DISPATCH: DispatchSpec[] = [...STOCK_HTTP];
  * change; the mail program's delivery reads them for a key the address book
  * does not name).
  */
+/**
+ * Call permissions (kernel-zig grants.zig): the kernel services the stock genesis-wired programs
+ * hold at birth — the raw signer for the programs that sign today, the front door (the BRC-103
+ * handshake, signed answers) and the wallet (BRC-29 keys). Written into the genesis like any grant
+ * (resolveSystem), no special case in the kernel; the signer app takes this over when it lands.
+ */
+export const STOCK_SERVICES: Record<string, string[]> = { "genesis:frontdoor": ["signer"], "genesis:wallet": ["signer"] };
+
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
   resolve: ["resolve/"],
@@ -258,6 +268,10 @@ export interface System {
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
   /** #141: heads the genesis sets (an image's installed apps: `<app>/app`), name → record CID. */
   heads?: Record<string, CID>;
+  /** Call permissions written at birth: per caller, per callee, the names ("*": any). */
+  calls?: Record<string, Record<string, string[]>>;
+  /** Kernel services held at birth, per caller (STOCK_SERVICES, and an image's apps' `services`). */
+  services?: Record<string, string[]>;
 }
 
 /** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those the tree lacks). */
@@ -372,6 +386,7 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
   return {
     programs, dispatch, roles: mergeRoles(STOCK_ROLES, config.roles ?? {}), scopes: { ...STOCK_SCOPES, ...c.scopes, ...config.scopes }, ...(peers ? { peers } : {}),
+    services: { ...STOCK_SERVICES },
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
@@ -432,6 +447,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "root" | "han
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}), ...(s.heads && Object.keys(s.heads).length ? { heads: s.heads } : {}),
+    ...(s.calls && Object.keys(s.calls).length ? { calls: s.calls } : {}), ...(s.services && Object.keys(s.services).length ? { services: s.services } : {}),
   };
 }
 

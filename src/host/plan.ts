@@ -114,6 +114,26 @@ export function mergeConfig(base: Record<string, unknown> | undefined, over: Rec
 /** A route change the install sends: the route as the kernel takes it (filters named in full, program a CID, address as served, `app`), and the role it runs. */
 export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app?: string }; role?: string }
 export interface HeadOp { name: string; tree: CID }
+/** A grant the install sends (call permissions): the kernel's `grant` operation's body. */
+export type GrantOp =
+  | { op: "add" | "remove"; calls: { caller: string; callee: string; name: string } }
+  | { op: "add" | "remove"; service: { caller: string; service: string } };
+
+/** The grants an app record asks for (its `calls` and `services`), as adds: what root approves at install. */
+export function grantsOf(record: { name: string; calls?: Record<string, string[] | "*">; services?: string[] }): GrantOp[] {
+  const out: GrantOp[] = [];
+  for (const [callee, names] of Object.entries(record.calls ?? {})) for (const name of names === "*" ? ["*"] : names) out.push({ op: "add", calls: { caller: record.name, callee, name } });
+  for (const service of record.services ?? []) out.push({ op: "add", service: { caller: record.name, service } });
+  return out;
+}
+
+const grantKey = (g: GrantOp): string => ("calls" in g ? `calls ${g.calls.caller} ${g.calls.callee} ${g.calls.name}` : `service ${g.service.caller} ${g.service.service}`);
+
+/** A grant as one line of the prompt. */
+export function showGrant(g: GrantOp): string {
+  if ("calls" in g) return `${g.op === "remove" ? "no longer " : ""}calls ${g.calls.callee} as ${g.calls.name === "*" ? "ANY NAME (admin)" : JSON.stringify(g.calls.name)}`;
+  return `${g.op === "remove" ? "no longer holds" : "holds"} service ${g.service.service}${g.service.service === "signer" ? " (the raw signer import: any derivation)" : ""}`;
+}
 
 /** What an install sends, in order, and what it shows. */
 export interface Plan {
@@ -125,6 +145,8 @@ export interface Plan {
   records: Rec[];
   heads: HeadOp[];
   rows: RowOp[];
+  /** Call permissions (the kernel's `grant` operation): adds for what the record asks, removes for what an earlier version asked and this one does not. */
+  grants: GrantOp[];
   start?: Record<string, unknown>;
   /** An install over an earlier version. */
   upgrade?: string;
@@ -324,9 +346,13 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   }
   const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }];
   const publishes = gossipOf(m.config);
+  // Call permissions: what this version asks; what an earlier one asked and this one does not is taken back.
+  const asked = grantsOf(record);
+  const askedKeys = new Set(asked.map(grantKey));
+  const grants: GrantOp[] = [...asked, ...(before ? grantsOf(before.record).filter((g) => !askedKeys.has(grantKey(g))).map((g) => ({ ...g, op: "remove" as const })) : [])];
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
-    rows: sendRows, ...(m.start ? { start: m.start.body } : {}),
+    rows: sendRows, grants, ...(m.start ? { start: m.start.body } : {}),
     ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, notes,
   };
 }
@@ -357,9 +383,10 @@ export function describe(p: Plan, record = p.record): string[] {
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
   if (p.requires.length) out.push(`  requires  ${p.requires.join(", ")}`);
   for (const pr of record.provides) out.push(`  provides  ${pr.interface}: ${Object.entries(pr.functions).map(([f, x]) => `${f}${x.writes ? "" : " (read)"}`).join(", ")}`);
+  for (const g of p.grants) out.push(`  grant     ${showGrant(g)}`);
   if (p.publishes.length) out.push(`  publishes ${p.publishes.join(", ")} (for information: emitting needs no grant)`);
   for (const n of p.notes) out.push(`  note      ${n}`);
-  out.push(`  messages  objects ×${Math.max(1, [...chunk(p.records)].length)} (${p.records.length} records) · head ×${p.heads.length} · dispatch ×${p.rows.length}${p.start ? " · start" : ""}`);
+  out.push(`  messages  objects ×${Math.max(1, [...chunk(p.records)].length)} (${p.records.length} records) · head ×${p.heads.length} · dispatch ×${p.rows.length}${p.grants.length ? ` · grant ×${p.grants.length}` : ""}${p.start ? " · start" : ""}`);
   for (const r of p.rows) out.push(`    dispatch ${r.op} ${showRow(r)}`);
   return out;
 }
@@ -372,6 +399,7 @@ export async function sendInstall(p: Plan, send: (box: string, body: Uint8Array)
   for (const h of p.heads) await go("head", dagCbor.encode({ name: h.name, tree: h.tree }));
   // Removes first: an upgrade frees what it no longer asks for.
   for (const r of [...p.rows].sort((a, b) => (a.op === b.op ? 0 : a.op === "remove" ? -1 : 1))) await go("dispatch", dagCbor.encode(rowBody(r)));
+  for (const g of p.grants) await go("grant", dagCbor.encode(g));
   if (p.start) await go(p.app, dagCbor.encode(p.start));
   return { messages: n };
 }
@@ -381,7 +409,7 @@ const rowBody = (r: RowOp) => ({ op: r.op, row: r.row });
 
 // ---------------------------------------------------------------- uninstall
 
-export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[] }
+export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[]; grants: GrantOp[] }
 
 /** What uninstalling `name` sends: `stop`, then its routes removed (every route the table holds with `app: name`). The app's heads are left. */
 export async function planUninstall(name: string, view: InstanceView): Promise<UninstallPlan> {
@@ -390,6 +418,7 @@ export async function planUninstall(name: string, view: InstanceView): Promise<U
   return {
     app: name, record: a.record, ...(a.record.stop ? { stop: a.record.stop.body } : {}),
     rows: view.dispatch.filter((r) => r.app === name).map((r) => ({ op: "remove" as const, row: r })),
+    grants: grantsOf(a.record).map((g) => ({ ...g, op: "remove" as const })),
   };
 }
 
@@ -398,6 +427,7 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
   if (p.stop) await go(p.app, dagCbor.encode(p.stop));
   for (const r of p.rows) await go("dispatch", dagCbor.encode(rowBody(r)));
+  for (const g of p.grants) await go("grant", dagCbor.encode(g));
   return { messages: n };
 }
 

@@ -1171,6 +1171,19 @@ pub const Runtime = struct {
             if (g.get("root")) |r| for (r.array) |k| {
                 if (try grants.apply(a, rt.store, "add", grants.ROOT, Value.bytesOf(k).?, .{ .thread = null, .input = entry, .at = at })) roots += 1;
             };
+            // Call permissions (grants.zig): the genesis's approvals and kernel services, written at birth like any grant.
+            const gby = heads.By{ .thread = null, .input = entry, .at = at };
+            if (g.get("calls")) |cs| if (cs == .map) for (cs.map) |byc| if (byc.value == .map) for (byc.value.map) |byt| {
+                // [<name> …], or "*" alone: any name.
+                if (Value.str(byt.value)) |nm| {
+                    _ = try grants.applyCalls(a, rt.store, "add", byc.key, byt.key, nm, gby);
+                } else if (byt.value == .array) for (byt.value.array) |x| if (Value.str(x)) |nm| {
+                    _ = try grants.applyCalls(a, rt.store, "add", byc.key, byt.key, nm, gby);
+                };
+            };
+            if (g.get("services")) |sv| if (sv == .map) for (sv.map) |se| if (se.value == .array) for (se.value.array) |x| if (Value.str(x)) |svc| {
+                _ = try grants.applyService(a, rt.store, "add", se.key, svc, gby);
+            };
             if (roots > 0) {
                 rt.say("#{d} genesis: {s}@{s}, root {s}{s}, {d} routes", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("root").?.array[0]).?), if (roots > 1) " (and more)" else "", rows.len });
             } else rt.say("#{d} genesis: {s}@{s}, no root (an image: root comes with the claim), {d} routes", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, rows.len });
@@ -1777,8 +1790,30 @@ pub const Runtime = struct {
             return;
         }
         if (std.mem.eql(u8, op, grants.OP)) {
-            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, role, principal}}", .{});
+            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, role, principal}}, {{op, calls: {{caller, callee, name}}}} or {{op, service: {{caller, service}}}}", .{});
             if (!std.mem.eql(u8, what, "add") and !std.mem.eql(u8, what, "remove")) return refuse(a, "op {s}: add or remove", .{try json.quoted(a, what)});
+            // Call permissions: who may call whom under which name.
+            if (body.get("calls")) |c| {
+                const caller = Value.str(c.get("caller")) orelse "";
+                const callee = Value.str(c.get("callee")) orelse "";
+                const name = Value.str(c.get("name")) orelse "";
+                if (!grants.isParty(caller)) return refuse(a, "calls.caller {s}: an app's name or genesis:<program name>", .{try json.quoted(a, caller)});
+                if (!grants.isParty(callee)) return refuse(a, "calls.callee {s}: an app's name or genesis:<program name>", .{try json.quoted(a, callee)});
+                if (!grants.isCallName(name)) return refuse(a, "calls.name: 1 to {d} bytes of UTF-8 with no NUL (\"*\": any name)", .{grants.MAX_NAME});
+                const moved = try grants.applyCalls(a, rt.store, what, caller, callee, name, by);
+                rt.say("kernel grant: {s} calls {s} → {s} as {s}{s}", .{ what, caller, callee, try json.quoted(a, name), if (moved) "" else " (no change)" });
+                return;
+            }
+            // A kernel service (the raw signer: "signer").
+            if (body.get("service")) |c| {
+                const caller = Value.str(c.get("caller")) orelse "";
+                const service = Value.str(c.get("service")) orelse "";
+                if (!grants.isParty(caller)) return refuse(a, "service.caller {s}: an app's name or genesis:<program name>", .{try json.quoted(a, caller)});
+                if (!grants.isService(service)) return refuse(a, "service {s}: not a kernel service (signer)", .{try json.quoted(a, service)});
+                const moved = try grants.applyService(a, rt.store, what, caller, service, by);
+                rt.say("kernel grant: {s} service {s} to {s}{s}", .{ what, service, caller, if (moved) "" else " (no change)" });
+                return;
+            }
             const role = Value.str(body.get("role")) orelse return refuse(a, "want {{op: add|remove, role, principal}}", .{});
             if (!grants.isGrantable(role)) return refuse(a, "role {s}: root, or <app>.<role> (user is any principal: it is never granted)", .{try json.quoted(a, role)});
             const key = grants.keyOf(a, body.get("principal")) orelse return refuse(a, "`principal` is not an identity key", .{});
@@ -2330,6 +2365,7 @@ pub const Runtime = struct {
             .emit = hEmit,
             .deadline = hDeadline,
             .call = hCall,
+            .callAs = hCallAs,
             .edges = hEdges,
             .authfetch = hAuthfetch,
             .events = hEvents,
@@ -2577,16 +2613,52 @@ pub const Runtime = struct {
     /// The lookup over the tables as they stand (the store's state at this point in the log — the
     /// same on replay): no copy to keep in step with the dispatch table, `<app>/app` and the genesis.
     pub fn installedAs(rt: *Runtime, a: std.mem.Allocator, c: []const u8, record: Value) !Install {
-        const g = rt.genesis orelse return .none;
+        return installedIn(a, rt.store, rt.genesis, c, record);
+    }
+
+    /// installedAs over `store` and `genesis` (a kernel call's: #158's view as committed, or the runtime's).
+    pub fn installedIn(a: std.mem.Allocator, store: Store, genesis: ?Value, c: []const u8, record: Value) !Install {
+        const g = genesis orelse return .none;
         if (mapHasCid(g.get("programs"), c) or mapHasCid(g.get("middleware"), c)) return .owner;
-        if (try dispatch.current(a, rt.store)) |rows| for (rows) |r| if (r.program) |p| if (std.mem.eql(u8, p, c)) return .owner;
+        if (try dispatch.current(a, store)) |rows| for (rows) |r| if (r.program) |p| if (std.mem.eql(u8, p, c)) return .owner;
         const app = Value.str(record.get("app")) orelse return .none;
         const head = try std.fmt.allocPrint(a, "{s}/app", .{app});
         if (!heads.isHeadName(head)) return .none;
-        const root = (try heads.headTree(a, rt.store, head)) orelse return .none;
-        const ar = rt.store.getOpt(a, root) orelse return .none;
+        const root = (try heads.headTree(a, store, head)) orelse return .none;
+        const ar = store.getOpt(a, root) orelse return .none;
         if (!std.mem.eql(u8, Value.str(ar.get("kind")) orelse "", "app")) return .none;
         return if (mapHasCid(ar.get("programs"), c)) .app else .none;
+    }
+
+    /// A running program's party name for call permissions and kernel services (grants.zig): an
+    /// installed app's program is its app's name; a genesis-wired program, or a dispatch row's
+    /// program with no app, `genesis:<its name>`; a record a step put (installed as `none`) has none.
+    pub fn partyOf(a: std.mem.Allocator, record: Value, install: Install) !?[]const u8 {
+        if (install == .none) return null;
+        if (Value.str(record.get("app"))) |app| return app;
+        const name = Value.str(record.get("name")) orelse return null;
+        return try std.fmt.allocPrint(a, "{s}{s}", .{ grants.GENESIS_PREFIX, name });
+    }
+
+    /// Why the program running now (`run`) may not use the raw signer — the `signer` kernel service
+    /// (grants.zig) — or null when it may.
+    fn signerProblem(a: std.mem.Allocator, store: Store, genesis: ?Value, me: *Running) !?[]const u8 {
+        if (me.install == null) me.install = try installedIn(a, store, genesis, me.cid, me.record);
+        const party = (try partyOf(a, me.record, me.install.?)) orelse return try std.fmt.allocPrint(a, "wallet: {s} (a program record no install put in place) does not hold the signer service", .{fmtCid(a, me.cid)});
+        if (grants.holdsService(try grants.load(a, store), party, grants.SIGNER)) return null;
+        return try std.fmt.allocPrint(a, "wallet: {s} does not hold the signer service", .{party});
+    }
+
+    /// Why `caller` (the program running now) may not call `prog` (`callee`, its record) under
+    /// `name`, or null when it may: both installed, and the grants' `calls` approve (caller app,
+    /// callee app, name) exactly, or "*".
+    fn namedCallProblem(a: std.mem.Allocator, store: Store, genesis: ?Value, caller: *Running, prog: []const u8, callee: Value, name: []const u8) !?[]const u8 {
+        if (!grants.isCallName(name)) return try std.fmt.allocPrint(a, "callAs: the name is not 1 to {d} bytes of UTF-8 with no NUL", .{grants.MAX_NAME});
+        if (caller.install == null) caller.install = try installedIn(a, store, genesis, caller.cid, caller.record);
+        const from = (try partyOf(a, caller.record, caller.install.?)) orelse return try a.dupe(u8, "callAs: a named call needs an installed caller (this program record was put by a step)");
+        const to = (try partyOf(a, callee, try installedIn(a, store, genesis, prog, callee))) orelse return try std.fmt.allocPrint(a, "callAs: {s} is no installed app's program", .{fmtCid(a, prog)});
+        if (grants.mayCall(try grants.load(a, store), from, to, name)) return null;
+        return try std.fmt.allocPrint(a, "callAs: {s} is not approved to call {s} as {s}", .{ from, to, try json.quoted(a, name) });
     }
 
     /// Whether a program record installed as `install` may advance `name`.
@@ -2623,6 +2695,8 @@ pub const Runtime = struct {
             allowed = true;
         };
         if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(st.a, "{d}", .{frame[0]}) else "undefined"});
+        // Call permissions: the raw signer is the `signer` kernel service's, held by the program running now's app.
+        if (signerProblem(st.a, st.rt.store, st.rt.genesis, &st.progs.items[st.progs.items.len - 1]) catch return imp.failWith("store error")) |why| return imp.failWith(why);
         return signerCall(st, imp, frame);
     }
 
@@ -3042,14 +3116,27 @@ pub const Runtime = struct {
     /// recorded calls, kept records, launches and head moves are the step's,
     /// on the step's fuel and clock — with its own input.
     fn hCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        return stepCall(imp, prog, func, null, arg);
+    }
+
+    /// A named in-VM call from a step (call permissions): checked against the grants' `calls`
+    /// before the callee runs; the callee's input carries the name as `as`.
+    fn hCallAs(imp: *program.Imports, prog: []const u8, func: []const u8, name: []const u8, arg: []const u8) program.Err![]const u8 {
+        return stepCall(imp, prog, func, name, arg);
+    }
+
+    fn stepCall(imp: *program.Imports, prog: []const u8, func: []const u8, name: ?[]const u8, arg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
         const a = st.a;
         if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
         const loaded = try loadCallee(st.rt, st.rt.store, imp, a, prog);
+        if (name) |n| if (namedCallProblem(a, st.rt.store, st.rt.genesis, &st.progs.items[st.progs.items.len - 1], prog, loaded.record, n) catch return imp.failWith("store error")) |why| return imp.failWith(why);
         // #77: the callee's writes are the step's, in the callee's own write scope.
         try st.progs.append(.{ .record = loaded.record, .cid = prog });
         defer _ = st.progs.pop();
         var ctx = st.rt.callContext(a, st.rt.store, st.rt.genesis, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
+        // Call permissions: the checked name, written by the kernel only (a nameless call has none).
+        if (name) |n| try ctx.put("as", cbor.string(n));
         var extra = cbor.MapBuilder.init(a);
         try extra.put("thread", cbor.cidv(st.origin));
         try extra.put("step", cbor.int(st.n));
@@ -3161,7 +3248,7 @@ pub const Runtime = struct {
     /// the call reads it; a filter's input is the request record's CID and it runs in (program,
     /// fn); a call's input is (program, fn, arg, caller) and nothing else.
     fn callIn(rt: *Runtime, a: std.mem.Allocator, store: Store, genesis: ?Value, cursor: i64, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64, request: ?[]const u8) !struct { result: CallResult, puts: std.StringHashMap([]const u8) } {
-        var cs = CallState{ .rt = rt, .store = store, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = undefined, .random = undefined };
+        var cs = CallState{ .rt = rt, .store = store, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = undefined, .random = undefined, .genesis = genesis, .progs = .init(a) };
         if (genesis == null) return .{ .result = .{ .ok = false, .err = "call: no genesis", .fuel = 0 }, .puts = cs.overlay };
         var meter = engine.Meter.init(callFuelLimit(genesis));
         cs.meter = &meter;
@@ -3197,6 +3284,7 @@ pub const Runtime = struct {
             error.Failed => return .{ .result = .{ .ok = false, .err = imp.last_error, .fuel = 0 }, .puts = cs.overlay },
             else => return err,
         };
+        try cs.progs.append(.{ .record = loaded.record, .cid = prog });
         const out = program.runProgramLimit(a, rt.runner, loaded.mod, loaded.name, &host, &svc, CALL_OUTPUT_LIMIT) catch |err| switch (err) {
             error.Fatal => {
                 const f = rs.fatal orelse wasi.Fatal{ .message = "fatal" };
@@ -3222,6 +3310,11 @@ pub const Runtime = struct {
         svc: ?*wasi.Services = null,
         host: ?*const program.Host = null,
         depth: u8 = 0,
+        /// What the call reads as its genesis (the runtime's, or #158's view's).
+        genesis: ?Value = null,
+        /// The program running now (the call's, and under it each nested callee): who asks the signer
+        /// and who makes a named call (call permissions).
+        progs: std.array_list.Managed(Running),
     };
 
     const callHost = program.Host{
@@ -3239,6 +3332,7 @@ pub const Runtime = struct {
         .emit = cEmit,
         .deadline = cDeadline,
         .call = cCall,
+        .callAs = cCallAs,
         .edges = cEdges,
         .authfetch = cAuthfetch,
         .events = cEvents,
@@ -3334,23 +3428,36 @@ pub const Runtime = struct {
             allowed = true;
         };
         if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(cs.a, "{d}", .{frame[0]}) else "undefined"});
+        if (signerProblem(cs.a, cs.store, cs.genesis, &cs.progs.items[cs.progs.items.len - 1]) catch return imp.failWith("store error")) |why| return imp.failWith(why);
         const f = cs.rt.peers.wallet orelse return imp.failWith("wallet: this host has no signer");
         return f(cs.rt.peers.ctx, cs.a, frame) catch |err| imp.failFmt("wallet: {s}", .{@errorName(err)});
     }
     /// A call within a call: the same world (records put, fuel, clock), its own fn and arg.
     fn cCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        return callCall(imp, prog, func, null, arg);
+    }
+    /// A named call within a call: checked as from a step (call permissions).
+    fn cCallAs(imp: *program.Imports, prog: []const u8, func: []const u8, name: []const u8, arg: []const u8) program.Err![]const u8 {
+        return callCall(imp, prog, func, name, arg);
+    }
+    fn callCall(imp: *program.Imports, prog: []const u8, func: []const u8, name: ?[]const u8, arg: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
         const a = cs.a;
         if (cs.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
         const loaded = try loadCallee(cs.rt, cs.store, imp, a, prog);
+        if (name) |n| if (namedCallProblem(a, cs.store, cs.genesis, &cs.progs.items[cs.progs.items.len - 1], prog, loaded.record, n) catch return imp.failWith("store error")) |why| return imp.failWith(why);
         const outer = cbor.decode(a, cs.input) catch return imp.failWith("call: bad input");
         var m = cbor.MapBuilder.init(a);
         for (outer.map) |e| {
-            if (std.mem.eql(u8, e.key, "fn") or std.mem.eql(u8, e.key, "arg")) continue;
+            // `as` is the kernel's for this call alone: never inherited by a nested one.
+            if (std.mem.eql(u8, e.key, "fn") or std.mem.eql(u8, e.key, "arg") or std.mem.eql(u8, e.key, "as")) continue;
             try m.put(e.key, e.value);
         }
         try m.put("fn", cbor.string(func));
         try m.put("arg", .{ .bytes = arg });
+        if (name) |n| try m.put("as", cbor.string(n));
+        try cs.progs.append(.{ .record = loaded.record, .cid = prog });
+        defer _ = cs.progs.pop();
         const saved = cs.input;
         cs.input = cbor.encode(a, m.value()) catch return error.OutOfMemory;
         cs.depth += 1;

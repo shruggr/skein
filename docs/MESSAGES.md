@@ -111,7 +111,7 @@ stepped:
 | `head` | `{name, tree}` | the head advanced to a record in the store (not `grants`: the kernel's) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the route added (replacing the route with its key: transport, address, prefix), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
-| `grant` | `{op: "add" \| "remove", role, principal}` | the grants (#143): `root` or `<app>.<role>` to (or from) a key |
+| `grant` | `{op: "add" \| "remove", role, principal}` \| `{op, calls: {caller, callee, name}}` \| `{op, service: {caller, service}}` | the grants (#143): `root` or `<app>.<role>` to (or from) a key; call permissions — `caller` may call `callee` under `name` ("*": any), `caller` holds the kernel service (`signer`); a party is an app's name or `genesis:<program name>` (docs/VM.md "Call permissions") |
 | `claim` | `{messagebox?, handle?, domain?}` | an image's claim route, open (#89): **root is granted to the message's sender** (#127, #143; a body's key is not read), the claim route removed, the head `claim` → `{claimant: <the sender>, messagebox?, handle?, domain?}`, the claimant's messagebox into the address book (source `claim`) — in one step; refused if root is held or the sender is not a key |
 
 Every genesis seeds the admin routes and its `root` (the initial root

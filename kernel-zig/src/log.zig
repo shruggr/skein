@@ -105,6 +105,7 @@ const cbor = @import("cbor");
 const cidm = @import("cid");
 const secp = @import("secp");
 const syscalls = @import("syscalls.zig");
+const grants = @import("grants.zig");
 const dispatch = @import("dispatch.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
@@ -472,6 +473,29 @@ pub fn isGenesis(x: ?Value) bool {
         for (sc.map) |e| {
             if (e.value != .array) return false;
             for (e.value.array) |h| if (h != .string or h.string.len == 0) return false;
+        }
+    }
+    // Call permissions (grants.zig): {<caller>: {<callee>: [<name> …] | "*"}} and {<caller>: [<service> …]},
+    // written into the grants head when the genesis is processed.
+    if (g.get("calls")) |cs| {
+        if (cs != .map) return false;
+        for (cs.map) |byc| {
+            if (!grants.isParty(byc.key) or byc.value != .map) return false;
+            for (byc.value.map) |byt| {
+                if (!grants.isParty(byt.key)) return false;
+                if (Value.str(byt.value)) |any| {
+                    if (!std.mem.eql(u8, any, grants.ANY)) return false;
+                } else if (byt.value == .array) {
+                    for (byt.value.array) |nm| if (!grants.isCallName(Value.str(nm) orelse return false)) return false;
+                } else return false;
+            }
+        }
+    }
+    if (g.get("services")) |sv| {
+        if (sv != .map) return false;
+        for (sv.map) |e| {
+            if (!grants.isParty(e.key) or e.value != .array) return false;
+            for (e.value.array) |svc| if (!grants.isService(Value.str(svc) orelse return false)) return false;
         }
     }
     if (g.get("peers")) |p| {

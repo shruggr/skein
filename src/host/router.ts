@@ -272,7 +272,8 @@ export interface RouterOptions {
   /**
    * An application host's requests (shruggr/open-exchange 0.11.0, the public read API; every method
    * since 0.3.2, so the hook checks `req.method` itself): a request for an
-   * instance (its hostname, `/@<handle>/`, or the root instance's hostname), asked AFTER the host's own
+   * instance (its hostname, `/@<handle>/`, or the root instance's hostname; and a bare-host POST
+   * /submit or /lookup routed by its topic to an instance, before it is forwarded), asked AFTER the host's own
    * reads there (the instance card, `/<app>/.live/<topic>`) and BEFORE the request is forwarded to the
    * instance's program. `route` is the path at the instance (`/amm/pools`); `undefined`: not the host's,
    * forwarded as before. An answer with `stream` is held open (RouterResponse). What the host needs
@@ -864,8 +865,9 @@ export class Router {
    * box `<app>/submit`, signed as the instance itself (signMessage) and appended as any message
    * (messageLocal: the front door checks the signature, the route's `kernel.beef` the BEEF). → the
    * front door's verdict; turned away at the door, or not accepted, → reject (a bad BEEF) or ignore.
+   * Public: an application host submits through it too (the one submit path).
    */
-  private async submitAsSelf(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer> {
+  async submitAsSelf(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer> {
     const id = this.o.db.get(handle)?.identity;
     if (!id) return { verdict: "ignore", reason: `no instance ${handle} with an identity here` };
     const { message, body } = await this.signMessage(handle, { recipient: id, box: `${app}/submit`, body: dagCbor.encode({ fn: "submit", args: { beef, topics: [topic] } }) });
@@ -1969,7 +1971,14 @@ export class Router {
     if (req.method === "POST" && (url.pathname === "/submit" || url.pathname === "/lookup") && (!t || t.route === url.pathname)) {
       const o = this.overlayTarget(url.pathname, req);
       if ("problem" in o) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: o.problem });
-      if (o.handle) return await this.held(this.forward(o.handle, url.pathname, url, req));
+      if (o.handle) {
+        // An application host answers its instance's overlay door first (appRead), as at the instance's own paths.
+        if (this.o.appRead) {
+          const a = await this.o.appRead(o.handle, url.pathname, url, req);
+          if (a) return a;
+        }
+        return await this.held(this.forward(o.handle, url.pathname, url, req));
+      }
     }
     const serve = async (x: { handle: string; route: string }): Promise<RouterResponse> => {
       // The instance's own card, the host's read (no program): whether anyone holds root yet.

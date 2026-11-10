@@ -311,3 +311,13 @@ test("config.overlay: no prefix declarations (#120): prefixes refused, in the ov
   assert.match(p({ lookups: { ls_demo: { program: "lookup-demo", prefixes: ["tm_"] } } }), /lookups\.ls_demo: prefixes: not a field \(want program, topics\)/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, extra: 1 }), /extra: not a field/);
 });
+
+test("calls and services (call permissions): per callee, names or \"*\"; services from the kernel's list", () => {
+  assert.deepEqual(problems({ ...base(), calls: { signer: ["1/amm pool", "2/skein instance/self"], "genesis:wallet": "*" }, services: ["signer"] }), []);
+  assert.match(problems({ ...base(), calls: { signer: [] } }).join("\n"), /calls\.signer: want "\*" or a list of names/);
+  assert.match(problems({ ...base(), calls: { signer: ["a\0b"] } }).join("\n"), /calls\.signer: want "\*" or a list of names/);
+  assert.match(problems({ ...base(), calls: { signer: ["x".repeat(257)] } }).join("\n"), /1 to 256 bytes/);
+  assert.match(problems({ ...base(), calls: { "Not An App": ["x"] } }).join("\n"), /is not an app's name or genesis:<program name>/);
+  assert.match(problems({ ...base(), calls: ["signer"] }).join("\n"), /calls: want \{<callee>/);
+  assert.match(problems({ ...base(), services: ["http"] }).join("\n"), /services: a list of kernel services \(signer\)/);
+});

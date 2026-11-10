@@ -6,6 +6,8 @@
 //   skein uninstall <app> <where> [--dry-run]
 //   skein routes add|remove [--transport t] [--prefix] [--filters f,g] [--fn f] [--settings json] <address> [<handler>] <where> [--dry-run]
 //   skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]
+//   skein grant add|remove --calls <caller> <callee> <name> <where> [--dry-run]
+//   skein grant add|remove --service <caller> <service> <where> [--dry-run]
 //   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
 //   skein peers remove <key> <where> [--dry-run]
 //   skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]
@@ -33,7 +35,7 @@ import type { CID } from "multiformats/cid";
 import { appHead, readStoredApp, type AppTree, type InstanceView } from "../host/plan.ts";
 import { identityOf, operatorKey, type Vars } from "../host/hostenv.ts";
 import { keyWallet } from "../wallet.ts";
-import { catalogOf, messageJson, planClaim, planDeploy, planGrant, planInstallApp, planPeers, planRoute, planUninstallApp, type AdminPlan, type PeerChange, type RouteArgs } from "./admin.ts";
+import { catalogOf, messageJson, planClaim, planDeploy, planGrant, planGrantCalls, planGrantService, planInstallApp, planPeers, planRoute, planUninstallApp, type AdminPlan, type PeerChange, type RouteArgs } from "./admin.ts";
 import { localTarget, remoteTarget, stdoutOf, type Target } from "./target.ts";
 
 export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key):
@@ -47,6 +49,8 @@ export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OP
                                                      (the site at /: routes add --prefix --filters site.get --settings '{"root":"www"}' /)
   skein routes remove [--transport t] [--prefix] <address> <where> [--dry-run]
   skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]     a grant (#143; root by default)
+  skein grant add|remove --calls <caller> <callee> <name> <where> [--dry-run]     a call permission ("*": any name)
+  skein grant add|remove --service <caller> <service> <where> [--dry-run]         a kernel service (signer)
   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
   skein peers remove <key> <where> [--dry-run]      an address-book entry (#70)
   skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]               an image's claim (#127, #143): root to the key that sends it
@@ -147,7 +151,15 @@ export async function adminMain(cmd: string, argv: string[], env: AdminEnv): Pro
         return await deliver(await planRoute(await s.view(), { op, address, ...(v.transport ? { transport: v.transport as RouteArgs["transport"] } : {}), ...(v.prefix ? { prefix: true } : {}), ...(filters ? { filters } : {}), ...(handler ? { handler } : {}), ...(v.fn ? { fn: v.fn } : {}), ...(settings ? { settings } : {}) }, programs), s, env);
       }
       case "grant": {
-        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, role: { type: "string" } } });
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, role: { type: "string" }, calls: { type: "boolean" }, service: { type: "boolean" } } });
+        if (v.calls || v.service) {
+          const n = v.calls ? 4 : 3;
+          const { args: [op, ...xs], origin } = splitOrigin(positionals, n);
+          if (xs.length !== n - 1 || (op !== "add" && op !== "remove") || (v.calls && v.service) || v.role !== undefined) { env.err(ADMIN_USAGE); return 2; }
+          s = await sessionOf(v, origin, env);
+          const remove = op === "remove" ? { remove: true } : {};
+          return await deliver(v.calls ? planGrantCalls(await s.view(), xs[0]!, xs[1]!, xs[2]!, remove) : planGrantService(await s.view(), xs[0]!, xs[1]!, remove), s, env);
+        }
         const { args: [op, key, ...more], origin } = splitOrigin(positionals, 2);
         if (!key || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
         s = await sessionOf(v, origin, env);
