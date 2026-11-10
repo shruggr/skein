@@ -151,6 +151,11 @@ echo "== call permissions: one router, three apps (programs/test/perm-probe's mo
 "${node[@]}" "$kz/equiv/call-permissions.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/call-permissions.ts" || status=1
 
+echo "== an event's place identifies one event: one router, two apps (programs/test/perm-probe's module); one step's facts from the caller and an in-VM callee, then the same with the caller resting on its own first fact (its delivery steps the thread again before the later facts go out): every fact on the live stream at the index's place, Last-Event-ID resumes right after; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/event-place.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-place.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/event-place.ts" || status=1
+
 echo "== a thread resting on an event name (skein 0.5.4): on(name) with no fn ends the step resting; each fact under the name wakes the resting threads in the order they began resting, never another name's, their context intact, and they rest again; a kernel killed mid-delivery commits nothing of the entry and, restarted, wakes each once; index-store.ts derives the waits index; replayed — on SQLite, on RocksDB and on the WASM host"
 "${node[@]}" "$kz/equiv/rest-on.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/rest-on.ts" || status=1

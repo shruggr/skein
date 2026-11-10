@@ -318,7 +318,7 @@ pub const Runtime = struct {
             if (isBroadcast(m)) {
                 // #65: a broadcast whose transaction the thread still awaits goes out again (a host
                 // keeps a queue; one that lost it posts it again, and Arcade answers a duplicate).
-                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m, origin);
+                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m, try rt.placeOf(a, c, origin));
                 continue;
             }
             // #126: an event the thread awaits (a `deadline`, a `fetch`) goes out again: the host
@@ -326,7 +326,7 @@ pub const Runtime = struct {
             // ignores it (hosts dedupe by the record's CID). #119: any other event is handed over
             // once, after its step's commit; a host that needs it again reads it from the log.
             if (isEvent(m)) {
-                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m, origin);
+                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m, try rt.placeOf(a, c, origin));
                 continue;
             }
             if (!cidIn(tip.get("awaits"), c)) continue;
@@ -347,9 +347,9 @@ pub const Runtime = struct {
     /// Queue an event for the host (#65, #119): transport "event", address its
     /// name (`broadcast`, or the record's `event`); `message` the record's
     /// dag-cbor, `body` a broadcast's transaction bytes (empty for any other).
-    fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value, thread: []const u8) !void {
+    /// `place`: the record's place in the log (placeOf, placeIn), null when no update lists it.
+    fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value, place: ?Place) !void {
         if (rt.peers.emit == null) return;
-        const place = try rt.placeOf(a, c, thread);
         const bytes = (try rt.store.bytes(a, c)) orelse return;
         const broadcast = isBroadcast(m);
         const tx: []const u8 = if (broadcast) (try rt.store.bytes(a, Value.cidOf(m.get("tx")).?)) orelse return else "";
@@ -363,11 +363,17 @@ pub const Runtime = struct {
         });
     }
 
-    /// #148: where event record `c` is in the log — in the update at `thread`'s tip (the step that
-    /// listed it, or the waiting tip a start hands over again): its input entry's `n`, its `seq`,
-    /// the record's index in its `emitted`. Null when the tip does not list it.
+    /// #148: where event record `c` is in the log — in the update at `thread`'s tip (the waiting tip
+    /// a start hands over again, a shell's sleep just recorded): placeIn that update.
     fn placeOf(rt: *Runtime, a: std.mem.Allocator, c: []const u8, thread: []const u8) !?Place {
         const tip = (try rt.tipOf(a, thread)) orelse return null;
+        return rt.placeIn(a, c, tip, thread);
+    }
+
+    /// #148: where event record `c` is in the log, in update `tip` of `thread` (the update that
+    /// listed it): its input entry's `n`, its `seq`, the record's index in its `emitted`. Null when
+    /// the update does not list it.
+    fn placeIn(rt: *Runtime, a: std.mem.Allocator, c: []const u8, tip: Value, thread: []const u8) !?Place {
         const emitted = tip.get("emitted") orelse return null;
         if (emitted != .array) return null;
         const i = for (emitted.array, 0..) |x, k| {
@@ -1245,19 +1251,27 @@ pub const Runtime = struct {
     /// the rest handed to the host after the commit. A function of the
     /// update and the state, so replay launches the same threads (and hands
     /// nothing over: it has no host).
-    fn deliver(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, thread: []const u8, emitted: []const []const u8) !void {
+    ///
+    /// Each event's place is in `update`, the step's own update (the one that lists `emitted`), never
+    /// the thread's tip: delivering a fact steps other threads, and the thread itself when it rests
+    /// on the fact's name, so the tip moves on before the step's later events go out.
+    fn deliver(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, thread: []const u8, update: []const u8, emitted: []const []const u8) !void {
         const root = try rt.store.headTree(a, addressbook.HEAD);
+        const u = try rt.getOrNotFound(a, update);
         for (emitted) |mc| {
             if (rt.stopped) return;
             const m = rt.store.getOpt(a, mc) orelse continue;
             if (isBroadcast(m) or isEvent(m)) {
+                const place = try rt.placeIn(a, mc, u, thread);
                 // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
-                try rt.handOverEvent(a, mc, m, thread);
+                try rt.handOverEvent(a, mc, m, place);
                 // 0.5.2: a fact steps every subscription to its name (on.zig), in the order they were made.
                 if (logm.indexedName(m)) |name| {
-                    try rt.deliverFact(a, ctx, mc, name, thread);
-                    // 0.5.4: then every thread resting on the name (on.zig), in the order they began resting.
-                    try rt.wakeResting(a, ctx, mc, name, thread);
+                    if (place) |p| {
+                        try rt.deliverFact(a, ctx, mc, name, p);
+                        // 0.5.4: then every thread resting on the name (on.zig), in the order they began resting.
+                        try rt.wakeResting(a, ctx, mc, name, p);
+                    }
                 }
                 continue;
             }
@@ -1291,10 +1305,9 @@ pub const Runtime = struct {
     /// function. A function of the update and the state: replay launches the same threads; a step
     /// run again (an entry reprocessed after a crash: everything it derived is committed with the
     /// entry, the cursor with it) finds its threads under way and launches none twice.
-    fn deliverFact(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
+    fn deliverFact(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, place: Place) !void {
         const subs = try rt.store.subscribers(a, name);
         if (subs.len == 0) return;
-        const place = (try rt.placeOf(a, ev, thread)) orelse return;
         for (subs) |sub| {
             if (rt.stopped) return;
             const ps = try subsm.programsOf(a, rt.store, sub.app);
@@ -1333,10 +1346,9 @@ pub const Runtime = struct {
     /// the emitting entry with `event` {event, box: <the name>, place: {n, seq, i, thread}} beside
     /// its own context, and resting on the name again (stepBody carries `restsOn`). A function of
     /// the update and the state: replay steps the same threads.
-    fn wakeResting(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, thread: []const u8) !void {
+    fn wakeResting(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, place: Place) !void {
         const ts = try rt.store.restingOn(a, name);
         if (ts.len == 0) return;
-        const place = (try rt.placeOf(a, ev, thread)) orelse return;
         for (ts) |t| {
             if (rt.stopped) return;
             const tip = rt.tipOf(a, t) catch null orelse continue;
@@ -2213,6 +2225,7 @@ pub const Runtime = struct {
         try rt.stepping.put(key, {});
         var after_launched: []const []const u8 = &.{};
         var after_emitted: []const []const u8 = &.{};
+        var after_update: []const u8 = "";
         var after_rested = false;
         var after_stdout: []const u8 = "";
         const request_input: ?[]const u8 = blk: {
@@ -2254,6 +2267,7 @@ pub const Runtime = struct {
             };
             after_launched = r.launched;
             after_emitted = r.emitted;
+            after_update = r.update;
             after_rested = r.rested;
             after_stdout = r.stdout;
         }
@@ -2264,12 +2278,12 @@ pub const Runtime = struct {
             if (after_stdout.len > 0 and !rt.stopped) try rt.routeAdmits(a, ctx, after_stdout);
         }
         // What the step emitted goes out (#70).
-        if (after_emitted.len > 0 and !rt.stopped) try rt.deliver(a, ctx, origin, after_emitted);
+        if (after_emitted.len > 0 and !rt.stopped) try rt.deliver(a, ctx, origin, after_update, after_emitted);
         for (after_launched) |c| try rt.run(a, c);
         if (after_rested) try rt.rested(a, origin);
     }
 
-    const After = struct { launched: []const []const u8, emitted: []const []const u8 = &.{}, rested: bool, stdout: []const u8 = "" };
+    const After = struct { launched: []const []const u8, emitted: []const []const u8 = &.{}, update: []const u8 = "", rested: bool, stdout: []const u8 = "" };
 
     fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
         const o = try rt.getOrNotFound(a, origin);
@@ -2460,7 +2474,7 @@ pub const Runtime = struct {
             try em.put("message", cbor.string(if (last.len > 0) last else try std.fmt.allocPrint(a, "exit {d}", .{out.exit_code})));
             try u.put("error", em.value());
         }
-        _ = try rt.store.chainAppend(a, origin, u.value());
+        const uc = try rt.store.chainAppend(a, origin, u.value());
 
         // The log line.
         var line = std.array_list.Managed(u8).init(a);
@@ -2489,7 +2503,7 @@ pub const Runtime = struct {
         if (errored) try w.print(" · {s}", .{stderr_text}) else if (stderr_text.len > 0) try w.print(" · stderr: {s}", .{stderr_text});
         rt.say("{s}", .{line.items});
 
-        return .{ .launched = st.launched.items, .emitted = if (errored) &.{} else st.emitted.items, .rested = !waiting, .stdout = if (errored) "" else out.stdout };
+        return .{ .launched = st.launched.items, .emitted = if (errored) &.{} else st.emitted.items, .update = uc, .rested = !waiting, .stdout = if (errored) "" else out.stdout };
     }
 
     // -------------------------------------------------- the program host (skein imports)
@@ -3754,7 +3768,7 @@ pub const Runtime = struct {
             return;
         }
         // Resting on its deadline: the event goes to the host once this is committed (a start hands it over again).
-        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m, t.origin) catch |err| return shStop(t, err);
+        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m, rt.placeOf(t.a, c, t.origin) catch |err| return shStop(t, err)) catch |err| return shStop(t, err);
         return error.Park;
     }
 

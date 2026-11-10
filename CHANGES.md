@@ -23,6 +23,14 @@ used the genesis wallet program (gone).
 - **Billing is out of the kernel** (#130: the host row, tick, meter, pay
   step, asleep gate) and **`kernel.pay` is gone** (#149), with their host
   halves (`skein-host billing`, `reclaim`, `skein host`). Per-step fuel stays.
+- **An event's place identifies one event.** A step's facts are handed over,
+  delivered to subscriptions and wake resting threads at their place in the
+  step's own update (`n.seq.i.thread`), not in the thread's tip at the
+  moment: delivering a fact the step's own thread rests on steps it again,
+  and its later facts went out with no place (lost to live streams, their
+  subscriptions and resting threads not stepped) or another update's place
+  (de-duplicated away by the host). A log where that happened replays
+  differently on this kernel.
 - **`skein-dev install` is gone** (it installed the pinned wallet module; the
   kernel installs its own pinned modules).
 - docs/WALLET.md is gone; its proofs and settlement sections are

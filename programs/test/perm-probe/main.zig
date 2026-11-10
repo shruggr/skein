@@ -12,6 +12,11 @@
 //                 (an app may: the head is under its name); recorded {op, ok}
 //     op "putprog" a copy of its own program record, named "stray", put by the step (installed by
 //                 no one); recorded {op, prog: <its cid>}
+//     op "facts"  {before: [name], call?: {prog, names: [name]}, after: [name], rest?: name} — emits the
+//                 facts `before`, then has `prog` emit `names` in an in-VM call (fn "facts"), then emits
+//                 `after`, and rests the thread on `rest` (on(name)); recorded {op, ok}
+//   a thread woken from its rest (input `event`): recorded {op: "woke"}
+//     fn "facts"  arg {names: [name]} → emits each, {as, n}
 //   a launched thread (args.probe = "launched"): recorded {op: "launched", as}
 //   a call:
 //     fn "who"    → {as: <its input's `as`, or null>, signed: bool, error?}
@@ -79,6 +84,11 @@ fn run(a: Allocator) !void {
     if (in.get("resolved") != null) return print(a, "done\n");
     const app = try appOf(a, in);
     const args = in.get("args") orelse return sk.report("no args");
+    if (in.get("event") != null) {
+        var wm = cbor.MapBuilder.init(a);
+        try wm.put("op", cbor.string("woke"));
+        return record(a, app, &wm);
+    }
     var m = cbor.MapBuilder.init(a);
     if (eql(u8, Value.str(args.get("probe")) orelse "", "launched")) {
         try m.put("op", cbor.string("launched"));
@@ -140,9 +150,20 @@ fn run(a: Allocator) !void {
         var pm = cbor.MapBuilder.init(a);
         for (prog.map) |e| try pm.put(e.key, if (eql(u8, e.key, "name")) cbor.string("stray") else e.value);
         try m.put("prog", cbor.cidv(try sk.put(a, pm.value())));
+    } else if (eql(u8, op, "facts")) {
+        try emitFacts(a, body.get("before"));
+        if (body.get("call")) |cl| {
+            const prog = Value.cidOf(cl.get("prog")) orelse return sk.report("facts: call wants {prog, names}");
+            var ca = cbor.MapBuilder.init(a);
+            try ca.put("names", cl.get("names") orelse .{ .array = &.{} });
+            _ = sk.call(a, prog, "facts", try cbor.encode(a, ca.value())) catch return sk.report(sk.lastError());
+        }
+        try emitFacts(a, body.get("after"));
+        if (Value.str(body.get("rest"))) |n| sk.on(n, null) catch return sk.report(sk.lastError());
+        try m.put("ok", .{ .bool = true });
     } else if (eql(u8, op, "seen")) {
         try m.put("as", in.get("as") orelse .null);
-    } else return sk.report("perm-probe: op is call, sign, launch, mail, seen, rewrite or putprog");
+    } else return sk.report("perm-probe: op is call, sign, launch, mail, seen, rewrite, putprog or facts");
     return record(a, app, &m);
 }
 
@@ -167,6 +188,21 @@ fn onCall(a: Allocator, in: Value) !void {
             try m.put("ok", .{ .bool = false });
             try m.put("error", cbor.string(try a.dupe(u8, sk.lastError())));
         }
-    } else return sk.report("perm-probe: a call's fn is who, nest or callAs");
+    } else if (eql(u8, func, "facts")) {
+        try emitFacts(a, arg.get("names"));
+        try m.put("n", cbor.int(if (arg.get("names")) |ns| (if (ns == .array) @as(i64, @intCast(ns.array.len)) else 0) else 0));
+    } else return sk.report("perm-probe: a call's fn is who, nest, callAs or facts");
     return print(a, try cbor.encode(a, m.value()));
+}
+
+/// Emit a fact {event: <name>} for each name in `names` (a list of text).
+fn emitFacts(a: Allocator, names: ?Value) !void {
+    const ns = names orelse return;
+    if (ns != .array) return;
+    for (ns.array) |n| {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("event", n);
+        const bytes = try cbor.encode(a, m.value());
+        _ = sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) }) catch return sk.report(sk.lastError());
+    }
 }
