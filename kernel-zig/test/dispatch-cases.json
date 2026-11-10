@@ -366,51 +366,6 @@
           "want": null
         }
       ]
-    },
-    {
-      "name": "mailbox: the host row (#130) is a kernel route like an admin route; its key is `host`, a setting",
-      "updates": [
-        {
-          "op": "add",
-          "row": {
-            "transport": "mailbox",
-            "address": "billing",
-            "program": "kernel",
-            "fn": "tick",
-            "host": "$A",
-            "x": 500,
-            "id": "host"
-          }
-        },
-        {
-          "op": "add",
-          "row": {
-            "transport": "mailbox",
-            "address": "billing2",
-            "program": "kernel",
-            "fn": "tick",
-            "host": "$B",
-            "x": 9,
-            "id": "second"
-          }
-        }
-      ],
-      "fold": [
-        "host",
-        "second"
-      ],
-      "cases": [
-        {
-          "kind": "mail",
-          "box": "billing",
-          "want": "host"
-        },
-        {
-          "kind": "mail",
-          "box": "billing2",
-          "want": "second"
-        }
-      ]
     }
   ]
 }

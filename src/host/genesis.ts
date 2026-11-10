@@ -16,7 +16,7 @@
 //             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}],
 //             heads?: {<head name>: <record CID>}}  (#141: an image's installed apps, `<app>/app`)
 //   route    {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
-//             filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"], program?: <program record CID> | "kernel",
+//             filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"], program?: <program record CID> | "kernel",
 //             fn?, …settings}
 //            (`dispatch`: the seed of the kernel's route table, docs/APPS.md §2 — the admin routes (boxes
 //            objects, head, dispatch, peers, grant → the kernel, gated by root), the boxes programs take,
@@ -138,7 +138,7 @@ export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" 
  * `/<protocol>`; `filters` what runs before anything is recorded
  * ("kernel.brc104", "kernel.beef", "<app>.<filter>"); `program` a program name
  * (bin/<name>), a program record's CID, or `kernel` (an admin route: `fn` the
- * operation — objects, head, dispatch, peers, grant, claim, tick), absent for a
+ * operation — objects, head, dispatch, peers, grant, claim), absent for a
  * read route (http: its filters answer); `fn` a handler's function; anything
  * else a handler's own setting (a file handler's `root`, `index`). No `sender`
  * (#143).
@@ -153,8 +153,8 @@ export interface DispatchSpec { transport?: Transport; address: string; prefix?:
  */
 export const ADMIN_OPS = ["objects", "head", "dispatch", "peers", "grant"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, program: "kernel", fn: op }));
-/** What a kernel route may name: the admin operations, the claim (#89), and the host's tick (#130: the host row, billing.ts). */
-export const KERNEL_OPS = [...ADMIN_OPS, "claim", "tick"] as const;
+/** What a kernel route may name: the admin operations and the claim (#89). */
+export const KERNEL_OPS = [...ADMIN_OPS, "claim"] as const;
 
 /**
  * The claim route (#89, #143): an image's route to the kernel. A message in box `claim`, from anyone:
@@ -327,8 +327,7 @@ export function rowsOf(specs: DispatchSpec[], programs: Record<string, CID>): Di
     if (s.sender !== undefined) throw new Error(`etc/dispatch.json: route ${s.address}: \`sender\` is gone (#143: a route has none — filters say who it is from, roles gate functions)`);
     const transport = s.transport ?? "mailbox";
     if (!TRANSPORTS.includes(transport)) throw new Error(`etc/dispatch.json: route ${s.address}: transport ${JSON.stringify(transport)} is not mailbox, event, http, libp2p or local`);
-    if (s.filters !== undefined && (!Array.isArray(s.filters) || !s.filters.every(isFilterRef))) throw new Error(`etc/dispatch.json: route ${s.address}: filters is a list of "kernel.brc104", "kernel.beef", "kernel.pay" or "<app>.<filter>"`);
-    if (s.filters?.includes("kernel.pay") && !s.filters.slice(0, s.filters.indexOf("kernel.pay")).includes("kernel.brc104")) throw new Error(`etc/dispatch.json: route ${s.address}: kernel.pay needs kernel.brc104 before it (#149: the sender must be authenticated)`);
+    if (s.filters !== undefined && (!Array.isArray(s.filters) || !s.filters.every(isFilterRef))) throw new Error(`etc/dispatch.json: route ${s.address}: filters is a list of "kernel.brc104", "kernel.beef" or "<app>.<filter>"`);
     if (s.program === undefined) {
       if (!(transport === "http" || (transport === "libp2p" && s.address.startsWith("/"))) || !s.filters?.length) throw new Error(`etc/dispatch.json: route ${s.address}: no program — only an http or libp2p protocol (/…) read route (its filters answer) has none`);
       const { transport: _t, ...rest } = s;

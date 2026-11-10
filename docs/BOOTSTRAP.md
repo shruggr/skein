@@ -39,7 +39,7 @@ outpoint later. A new skein starts from it and is then claimed.
 ```
 images/default/
   bin/frontdoor.cid, bin/mail.cid         the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
-  bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
+  bin/wallet.cid, bin/*.json              the wallet (#116) and the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the handshake and the skein's own /sendMessage (no route to the wallet);
                                           the explorer row (root's)
   etc/config.json                         {collect: []}
@@ -522,7 +522,7 @@ There are three ways to install an app.
   handler a program record CID, a genesis program or `<app>.<role>`, an
   installed app's; an app's own routes come through `install`), `skein
   grant add|remove <key> [--role root|<app>.<role>]`, `skein peers …`,
-  `skein host …` (#130), `skein claim`.
+  `skein claim`.
 - **By hash, from a page** (#91, built): the clone happens in the VM. With
   the git app installed, two owner-signed steps:
 

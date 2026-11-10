@@ -25,8 +25,6 @@
 //            for one with the instance's key and gives it to the service it is
 //            wired to (`route`: its waker, its HTTP proxy), whose signed answer
 //            names the event and carries the request (intention, below);
-//            `payment` (#130) — the kernel's pay step's, the host's own: its
-//            billing (billing.ts, Router.payment) keeps and broadcasts it;
 //            and every event, whatever its name, to the event streams (#148,
 //            events.ts: a page's subscription to its app's events) too
 //
@@ -113,9 +111,6 @@
 //              and the subject's copy with encrypted fields and its keyring (what a
 //              wallet's acquireCertificate takes) — handles.ts. It records nothing:
 //              the host skein's onboarding app records the issue
-//   billing    (#130) the host's billing key: it takes no messages and is in no address
-//              book; it signs the host's ticks to the instances whose host row names it
-//              (billing.ts) — the key an owner grants (`skein host`)
 //
 // How this host obtains the providers' keys is its own business (signer.ts:
 // children of its master secret); the instance knows them from its address
@@ -147,11 +142,9 @@ export interface Outgoing {
 }
 
 /** The stock providers' names (each one's address on this host: `local`, <name>). */
-export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager", "certifier", "billing"] as const;
+export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager", "certifier"] as const;
 /** The providers only the host skein's address book names (#90, #113): they act for it alone. */
 export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certifier"];
-/** Keys no address book names (#130: the host's billing key signs its ticks; it is not reached). */
-export const UNADDRESSED: readonly ProviderName[] = ["billing"];
 export type ProviderName = typeof PROVIDERS[number];
 
 /** The intentions a step records and the runtime answers (#126). */
@@ -205,7 +198,7 @@ export interface ProvidersOptions {
   certifier?(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   /**
    * #164: an application host's wiring — an event record {kind: "event", event, app?, …} from `handle`
-   * whose name no stock wiring takes (not broadcast, an intention, payment, nor the libp2p node's),
+   * whose name no stock wiring takes (not broadcast, an intention, nor the libp2p node's),
    * handed over after its step's commit as `topicEvent`'s are. Absent: logged as ignored.
    */
   appEvent?(handle: string, record: Record<string, unknown>): void;
@@ -215,8 +208,6 @@ export interface ProvidersOptions {
    * start while the thread awaits it: carried again then only if no answer came. Absent: ignored.
    */
   deliver?(handle: string, event: CID, record: Record<string, unknown>): Promise<boolean>;
-  /** #130: a `payment` event from `handle` — its pay step's (the kernel lets no other step emit one). Absent: no billing (ignored). */
-  payment?(handle: string, record: Record<string, unknown>): void;
   /** The libp2p host, when there is one: the instance's node does the work. */
   p2p?: {
     publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }>;
@@ -266,7 +257,7 @@ export class Providers {
   }
 
   /** The address book entries a genesis seeds for this host's providers: key, transport `local`, address the name (#126: no role). */
-  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => !HOST_SKEIN_PROVIDERS.includes(n) && !UNADDRESSED.includes(n))): Array<{ key: Uint8Array; transport: "local"; address: string }> {
+  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => !HOST_SKEIN_PROVIDERS.includes(n))): Array<{ key: Uint8Array; transport: "local"; address: string }> {
     return names.map((n) => ({ key: Uint8Array.from(Buffer.from(this.key(n), "hex")), transport: "local" as const, address: n }));
   }
 
@@ -341,12 +332,6 @@ export class Providers {
       this.track(this.o.deliver(handle, id, m).then((ok) => { if (!ok) this.taken.delete(k); }, (e) => { this.taken.delete(k); this.say(handle, `provider: deliver: ${(e as Error).message}`); }));
       return;
     }
-    if (out.address === "payment" && m.kind === "event" && m.event === "payment") {
-      // #130: the payee is the host: its billing keeps it (and broadcasts it).
-      if (!this.o.payment) { this.say(handle, "payment: this host bills no one: ignored"); return; }
-      this.o.payment(handle, m);
-      return;
-    }
     if (TOPIC_EVENTS.includes(out.address) && m.kind === "event" && m.event === out.address) {
       if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
       this.o.topicEvent(handle, m);
@@ -394,7 +379,6 @@ export class Providers {
           if (!this.o.certifier) return await this.answer(handle, "certifier", out.message, id, { error: "this host has no certifier" });
           return await this.answer(handle, "certifier", out.message, id, await this.o.certifier(box, body));
         }
-        case "billing": return await this.answer(handle, "billing", out.message, id, { error: "the host's billing key takes no messages (#130: it signs the host's ticks)" });
       }
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });

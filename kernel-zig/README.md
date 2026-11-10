@@ -314,7 +314,7 @@ docs/BOOTSTRAP.md). The kernel adds only this:
   heads of an image's installed apps (`<app>/app`, `reads`), their records
   pre-filled by the loader. Processing the genesis advances each, after the
   dispatch rows and `main`, with no `thread`; refused if a record is not in
-  the store, and a genesis naming `main`, `claim` or `billing` there is
+  the store, and a genesis naming `main`, `claim` or `grants` there is
   malformed. No format bump: a genesis without it reads as before.
 - **genesis `owner?`** (#89, `log.zig`): an image names no owner. Its
   `claim` row is the kernel's `claim` operation (`scheduler.zig` claim):

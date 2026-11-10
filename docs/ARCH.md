@@ -106,23 +106,6 @@ provider's own).
 **Fuel** is on for every step and summed across everything in it; running
 out ends the step errored, deterministically, and it is never retried.
 
-**Billing** (#130; `VM.md` "Billing"). A hosted skein pays for its own
-hosting from its own wallet, by terms its owner grants: the host row, a
-kernel row of the dispatch table naming the host's key, X (the block it
-prepays) and the rates. The kernel meters what is in its log — every
-step's fuel, the `fetch`, `authfetch` and libp2p publish events, storage at
-each tick — onto a tally under its own head, `billing`; the host meters
-what never reaches it (its read calls' fuel, the bytes it serves) and
-reports it on a tick it signs. When the tally reaches the allocation (the
-host's free allowance plus every payment), the kernel itself starts the
-wallet's pay step: X to the host, or all it has, in a transaction emitted
-as the event `payment` whose other output commits the state record's CID
-(an on-chain checkpoint). With nothing to pay it is asleep: the host
-forwards it nothing, root's messages included: nothing wakes it today.
-Root funds a skein by the wallet's `internalize` message; a BRC-169
-delivery message to its mailbox is the coming path. No host row, nothing
-billed.
-
 The kernel has no disk, network or process table, and a step has no
 clock. A `call` (no entry, never replayed) is the exception: when the host
 passes no `now` it reads the process clock, and its random stream is

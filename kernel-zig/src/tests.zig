@@ -27,7 +27,6 @@ test {
     _ = @import("beef.zig");
     _ = @import("door_test.zig");
     _ = @import("authfetch.zig");
-    _ = @import("billing.zig");
     _ = @import("grants.zig");
     _ = @import("rocksdb_store.zig");
     _ = @import("host.zig");

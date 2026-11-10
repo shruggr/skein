@@ -37,7 +37,7 @@
 //                                         liveness on the topic (liveness.ts), served by the host, no program:
 //                                         JSON [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer
 //                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
-//                                         Unsigned, nothing logged; metered as a read (billing.ts)
+//                                         Unsigned, nothing logged
 //   GET  /events/<name path>?after=<place>&limit=<n>&latest=1
 //                                         at an instance's origin (0.5.0, events.ts): the instance's event index,
 //                                         read from the store with no step and no fuel — the events under that
@@ -150,7 +150,6 @@ import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest
 import { closeControl, listenControl } from "./control.ts";
 import { Deliverer } from "./deliver.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
-import { allocation, BILLING_HEAD, closedBy, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -248,8 +247,6 @@ export interface RouterOptions {
   discovery?(req: RouterRequest, url: URL): Promise<RouterResponse | undefined>;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
-  /** #130: what this host bills (billing.ts; `skein-host run`: billingConfig over the environment). Absent: it bills no one. */
-  billing?: BillingConfig;
   /**
    * #160, #162: a one-key host's shared key's wallet (signer.ts Signer.oneKey). With it, an instance the
    * host creates (createInstance) with no forwarded claim is claimed by the host itself: the claim
@@ -477,14 +474,7 @@ export class Router {
   private readonly p2pConfig: P2PHostConfig;
   /** #156: the header intake, one run at a time (the image chain, then the host chains). */
   private intake: Promise<unknown> = Promise.resolve();
-  /** #130: each billed instance as last read (its host row's terms, the kernel's billing state), and what this host metered since its last tick. */
-  private views = new Map<string, BillingView>();
-  private periods = new Map<string, Period>();
-  /** Instances a tick is on its way to; and those sent their first (billing starts with it) since this router started: the timer sends it again. */
-  private ticking = new Set<string>();
-  private firstTicks = new Set<string>();
-  private tickTimer?: ReturnType<typeof setInterval>;
-  /** The host's provider keys (its billing key among them, #130). */
+  /** The host's provider keys. */
   private readonly providerKey: (name: ProviderName) => PrivateKey;
 
   /** The one-process kernels this router holds (#158), by database directory. */
@@ -623,8 +613,6 @@ export class Router {
       },
       // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
       certifier: (box, body) => certify(this.certifier, box, body),
-      // #130: a payment is this host's: kept and broadcast.
-      ...(o.billing ? { payment: (h: string, rec: Record<string, unknown>) => this.payment(h, rec) } : {}),
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
@@ -640,7 +628,6 @@ export class Router {
     const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
-    if (o.billing) this.tickTimer = setInterval(() => void this.tickAll(), o.billing.tickMs);
   }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
@@ -740,7 +727,6 @@ export class Router {
     if (this.stopped) throw new Error("the router is stopping");
     const server = await listenControl(path, {
       event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
-      reclaim: (h) => this.reclaim(h),
       message: async (h, m, body) => (await this.messageLocal(h, m, body)).toString(),
     });
     this.control = { server, path };
@@ -758,7 +744,6 @@ export class Router {
     }
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
-    clearInterval(this.tickTimer);
     this.flushLedger();
     const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
     this.servers = [];
@@ -807,8 +792,6 @@ export class Router {
   async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
-      const closed = this.closed(handle);
-      if (closed) throw new Error(`not forwarded (#130): ${closed}`);
       const e = await l.kernel.admit({ box, event: cidOf(event) } as never, { event }, this.now());
       this.settle(l);
       return e;
@@ -846,9 +829,6 @@ export class Router {
   async appendLocal(handle: string, pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
-      // #130: the gate lets through the instance's own messages to itself (the loopback), nothing else.
-      const closed = this.closed(handle);
-      if (closed && !isLoopback(pkg, l.identity)) throw new Error(`not forwarded (#130): ${closed}`);
       const e = await appendRequest(l.kernel, "local", pkg, this.now());
       this.settle(l);
       return e;
@@ -946,8 +926,6 @@ export class Router {
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
     const l = await this.hydrate(handle);
-    const closed = this.closed(handle);
-    if (closed) return { verdict: "ignore", reason: `not forwarded (#130): ${closed}` };
     const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
     try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name; the front door judges the record */ }
@@ -1012,7 +990,7 @@ export class Router {
   /**
    * Run `f` after everything else queued for this instance: the host's own admissions (events from its
    * wiring, `local` messages: the waker's, the providers', the loopback, a forwarded claim) reach the
-   * kernel in the order the host made them, each after its hydrate and `closed` check, and `settled`
+   * kernel in the order the host made them, each after its hydrate, and `settled`
    * waits on them. Not the log's order: the kernel assigns every entry's place (#163), so HTTP and
    * libp2p arrivals, which do not queue here, need no queue.
    */
@@ -1295,7 +1273,6 @@ export class Router {
     void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the start event not sent: ${(e as Error).message}`));
     // The settled sync design: the peers each overlay topic's beats came from (host.db), asked at once.
     if (this.sync) void this.askKnownPeers(l).catch((e) => this.say(handle, `sync: the known peers not asked: ${(e as Error).message}`));
-    await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
   }
@@ -1543,7 +1520,7 @@ export class Router {
     await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
-    // skein-amm#4: off its libp2p node too (as reclaim), so a stopped instance's beacons stop beating; a start's hydrate declares it again.
+    // skein-amm#4: off its libp2p node too, so a stopped instance's beacons stop beating; a start's hydrate declares it again.
     await this.p2p?.declare(handle, undefined).catch(() => {});
     this.events.drop(handle);
     this.say("router", `${handle}: stopped by the instance manager`);
@@ -1581,7 +1558,7 @@ export class Router {
    * headers feed follow the dispatch table (#72, #77, #102).
    */
   private settle(l: Loaded): void {
-    const p = l.kernel.idle().then(() => this.syncDispatch(l)).then(() => this.syncBilling(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
+    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
@@ -1700,25 +1677,21 @@ export class Router {
 
   /**
    * GET /<app>/.live/<topic> at an instance's origin (#138): the liveness tool's set for the app's
-   * liveness on the topic, served by the host — no program, no entry, nothing logged; metered as a
-   * read (bytes served). 404 when the app keeps no liveness for the topic (or the host has no libp2p).
+   * liveness on the topic, served by the host — no program, no entry, nothing logged. 404 when the app keeps no liveness for the topic (or the host has no libp2p).
    */
   private async liveRead(handle: string, route: string, app: string, topic: string): Promise<RouterResponse> {
     const none = () => json(404, { status: "error", code: "ERR_NOT_FOUND", description: `app ${app} keeps no liveness for ${topic}` });
     if (!this.p2p) return none();
     try { await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    const closed = this.closed(handle);
-    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     const beats = this.p2p.live.read(handle, app, topic);
     if (!beats) return none();
     const r = json(200, beats.map((b) => ({ sender: b.sender, at: b.at, body: Buffer.from(b.body).toString("base64"), from: b.from })));
-    this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: r.body.length });
     return r;
   }
 
   /**
    * GET /events/<name path> at an instance's origin (0.5.0, events.ts): the instance's event index,
-   * read from its store by CID — no step, no fuel, no entry. Answered as JSON; metered as a read.
+   * read from its store by CID — no step, no fuel, no entry. Answered as JSON.
    */
   private async eventsRead(handle: string, route: string, url: URL): Promise<RouterResponse> {
     const q = eventsQuery(route, url.searchParams);
@@ -1726,19 +1699,15 @@ export class Router {
     if ("problem" in q) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: q.problem });
     if (this.stopped) return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: "the host is shutting down" });
     try { await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    const closed = this.closed(handle);
-    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     const rows = await this.events.read(handle, q);
     const body = new TextEncoder().encode(`[${rows.map((d) => `{"id":${JSON.stringify(d.id)},"event":${JSON.stringify(d.event)},"record":${d.data}}`).join(",")}]`);
-    this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: body.length });
     return { status: 200, headers: { "content-type": "application/json" }, body };
   }
 
   /**
    * GET /events/<name path> with Accept: text/event-stream (0.5.0, events.ts): the same read as a
    * Server-Sent Events stream, then each matching event as it is handed over — held open until the
-   * client goes or the instance stops. The host's own (no program, no entry, nothing logged); each
-   * message metered as a read.
+   * client goes or the instance stops. The host's own (no program, no entry, nothing logged).
    */
   private async eventStream(handle: string, route: string, url: URL, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
     const answer = (r: RouterResponse) => { if (!res.headersSent) { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); } };
@@ -1749,18 +1718,12 @@ export class Router {
       if ("problem" in q) return answer(json(400, { status: "error", code: "ERR_BAD_REQUEST", description: q.problem }));
       if (this.stopped) return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: "the host is shutting down" }));
       try { await this.hydrate(handle); } catch (e) { return answer(json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message })); }
-      const closed = this.closed(handle);
-      if (closed) return answer(json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed }));
       res.writeHead(200, { ...cors, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       res.flushHeaders();
       let forget: (() => void) | undefined;
       let gone = false;
       res.on("close", () => { gone = true; forget?.(); });
-      const send = (d: Delivered) => {
-        const m = sseMessage(d);
-        res.write(m);
-        this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: Buffer.byteLength(m) });
-      };
+      const send = (d: Delivered) => { res.write(sseMessage(d)); };
       forget = await this.events.subscribe(handle, q, send, () => res.end());
       if (gone) forget();
     } catch (e) {
@@ -1936,152 +1899,6 @@ export class Router {
     try { this.o.db.charge(rows); } catch (e) { this.say("router", `ledger: ${(e as Error).message}`); }
   }
 
-  // ---------------------------------------------------------------- billing (#130, billing.ts)
-
-  /** Why this host forwards nothing to `handle` (undefined: it forwards as usual). */
-  closed(handle: string): string | undefined {
-    return closedBy(this.views.get(handle));
-  }
-
-  /** A billed instance as this host last read it (#130). */
-  billingView(handle: string): BillingView | undefined { return this.views.get(handle); }
-
-  /** A line of this host's log for `handle`'s period (#130): a request it served, a read call it made. */
-  private meter(handle: string, line: { at: number; op: string; caller?: string; fuel: number; bytes: number }): void {
-    if (!this.o.billing || !this.views.get(handle)?.terms) return;
-    let p = this.periods.get(handle);
-    if (!p) this.periods.set(handle, (p = new Period(line.at)));
-    p.add(line);
-  }
-
-  /**
-   * Read the instance's billing (#130): its host row's terms (the dispatch table) and its kernel's
-   * billing state (the head `billing`), checked against what this host supports. A skein with a host
-   * row this host has not ticked yet is ticked now; one whose unreported amounts would take its tally
-   * to its allocation, early. When it went asleep (and woke) goes to host.db (the grace).
-   */
-  private async syncBilling(l: Loaded): Promise<void> {
-    const cfg = this.o.billing;
-    if (!cfg || l.kernel.gone) return;
-    const handle = l.row.handle;
-    // The table as syncDispatch just read it (it follows the table when the host has libp2p or a headers feed), else read now.
-    const rows = (this.p2p || this.o.headersFeed) && l.rows ? l.rows : (await l.kernel.dispatch()).rows;
-    const terms = termsOf(rows);
-    if (!terms) {
-      if (this.views.has(handle)) { this.views.delete(handle); this.o.db.forgetBilling(handle); this.say(handle, "billing: no host row: not billed"); }
-      return;
-    }
-    const root = await l.kernel.call("head", BILLING_HEAD) as CID | null;
-    const state = root ? stateOf(await l.kernel.store.get(root)) : undefined;
-    const why = mismatch(cfg, this.providers.key("billing"), terms);
-    const was = this.views.get(handle);
-    const view: BillingView = { terms, ...(state ? { state } : {}), ...(why ? { mismatch: why } : {}) };
-    this.views.set(handle, view);
-    const mine = state && state.host === terms.host ? state : undefined;
-    this.o.db.setBilling(handle, { host: terms.host, ...(mine ? { tally: mine.tally, allocation: allocation(mine) } : {}), asleep: !!mine?.asleep, ...(why ? { mismatch: why } : {}) }, stampMs(this.now()));
-    const closed = closedBy(view);
-    if (closed !== closedBy(was)) this.say(handle, closed ? `billing: closed — ${closed}` : "billing: open");
-    if (why || mine?.asleep) return;
-    if (mine) this.firstTicks.delete(handle);
-    else if (this.firstTicks.has(handle)) return; // sent: the timer sends it again
-    else this.firstTicks.add(handle);
-    const p = this.periods.get(handle);
-    const owed = p ? priceHost(terms.rates, p.fuel, p.served) : 0n;
-    if (!mine || (p && !p.empty && mine.tally + owed >= allocation(mine))) void this.billingTick(handle).catch((e) => this.say(handle, `billing: tick: ${(e as Error).message}`));
-  }
-
-  /** Tick every billed instance this router holds (the timer, every tickMs). */
-  private async tickAll(): Promise<void> {
-    for (const [handle, l] of this.loaded) {
-      if (l.kernel.gone || !this.views.get(handle)?.terms) continue;
-      await this.billingTick(handle).catch((e) => this.say(handle, `billing: tick: ${(e as Error).message}`));
-    }
-  }
-
-  /**
-   * The host's tick to `handle` (#130 decided 4): signed by its billing key, in the host row's box —
-   * {kind: "tick", at, allowance, fuel, served, log} — the period since its last tick closed, its log
-   * record kept (host.db billing_ticks: `log` is that record's CID). Not to an instance the gate
-   * holds (asleep, other terms), nor twice at once. The tick's entry, or undefined.
-   */
-  async billingTick(handle: string): Promise<CID | undefined> {
-    const cfg = this.o.billing;
-    const v = this.views.get(handle);
-    if (!cfg || !v?.terms || this.closed(handle) || this.ticking.has(handle)) return undefined;
-    const l = this.loaded.get(handle);
-    if (!l || l.kernel.gone) return undefined;
-    this.ticking.add(handle);
-    try {
-      const at = stampMs(this.now());
-      const p = this.periods.get(handle) ?? new Period(at);
-      this.periods.set(handle, new Period(at));
-      const log = periodRecord(l.identity, p, at);
-      this.o.db.billingTick(handle, at, log.cid.toString(), log.bytes);
-      return await this.providers.send(handle, "billing", keyBytes(l.identity), v.terms.address, tickBody(at, cfg, p, log.cid)) as CID;
-    } finally {
-      this.ticking.delete(handle);
-    }
-  }
-
-  /**
-   * A `payment` event from `handle` (#130 decided 6: its pay step's, the kernel lets no other step
-   * emit one): this host is the payee. Its wiring: the payment kept (host.db billing_payments, with
-   * whether its output pays the key the BRC-29 remittance derives from this host's billing key) and
-   * broadcast (its Arcade, once).
-   */
-  private payment(handle: string, rec: Record<string, unknown>): void {
-    const p = (async () => {
-      const beef = rec.tx instanceof Uint8Array ? rec.tx : undefined;
-      const amount = typeof rec.amount === "number" ? rec.amount : undefined;
-      const vout = typeof rec.outputIndex === "number" ? rec.outputIndex : undefined;
-      const rem = rec.remittance as { derivationPrefix?: string; derivationSuffix?: string; senderIdentityKey?: string } | undefined;
-      if (!beef || amount === undefined || vout === undefined || !rem) { this.say(handle, "billing: a payment event without its transaction, amount or remittance: ignored"); return; }
-      const tx = Transaction.fromAtomicBEEF([...beef]);
-      let ours = false;
-      try {
-        const key = new KeyDeriver(this.providerKey("billing")).derivePrivateKey([2, "3241645161d8"], `${rem.derivationPrefix} ${rem.derivationSuffix}`, String(rem.senderIdentityKey));
-        const out = tx.outputs[vout];
-        ours = !!out && out.satoshis === amount && out.lockingScript.toHex() === new P2PKH().lock(key.toPublicKey().toHash()).toHex();
-      } catch { /* a remittance that derives nothing: kept, not ours */ }
-      const checkpoint = CID.asCID(rec.checkpoint)?.toString();
-      const txid = tx.id("hex");
-      const fresh = this.o.db.billingPayment({ instance: handle, txid, amount, at: stampMs(this.now()), beef, remittance: rem, ours, ...(checkpoint ? { checkpoint } : {}) });
-      if (fresh && this.arc) this.arc.enqueue(handle, Uint8Array.from(tx.toBinary()), beef);
-      this.say(handle, `billing: payment ${txid.slice(0, 8)}… ${amount} sats${ours ? "" : " (its output does not pay this host's derived key)"}${checkpoint ? `, checkpoint ${checkpoint.slice(-8)}` : ""}`);
-    })().catch((e) => this.say(handle, `billing: payment: ${(e as Error).message}`));
-    this.syncing.add(p);
-    void p.finally(() => this.syncing.delete(p));
-  }
-
-  /**
-   * Reclaim an instance (#130 decided 9; `skein-host reclaim`): its kernel stopped, its row and its
-   * billing removed, its store deleted. The host's call to make, after the grace; nothing here makes
-   * it on its own. Not the host skein.
-   */
-  async reclaim(handle: string): Promise<void> {
-    const row = this.o.db.get(handle);
-    if (!row) throw new Error(`no instance ${handle}`);
-    if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein`);
-    this.o.db.setStatus(handle, "disabled");
-    await this.refollowHeaders(handle);
-    const l = this.loaded.get(handle);
-    if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
-    await this.p2p?.declare(handle, undefined).catch(() => {});
-    this.events.drop(handle);
-    this.cron.forget(handle);
-    this.views.delete(handle);
-    this.periods.delete(handle);
-    this.o.db.forgetBilling(handle);
-    this.o.db.remove(handle);
-    if (isSet(row.store)) {
-      // #158: a set of a shared store (RocksDB, SQLite) is not deleted here; the set stays in it (its handle cannot be created again here).
-      this.say("router", `${handle}: reclaimed (its set in ${row.store} left in place: the host writes no instance store)`);
-      return;
-    }
-    await removeStore(row.store);
-    this.say("router", `${handle}: reclaimed (its store ${row.store} deleted)`);
-  }
-
   // ---------------------------------------------------------------- HTTP
 
   /** Whether a URL is this host's own (answered in process: no DNS, no socket). */
@@ -2139,10 +1956,7 @@ export class Router {
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
-      // #130: the terms this host bills by — what an owner grants as the host row (`skein host`).
-      const b = this.o.billing;
-      const billing = b ? { key: this.providers.key("billing"), x: b.x, rates: b.rates, allowance: b.allowance, tickMs: b.tickMs, graceMs: b.graceMs } : undefined;
-      return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });
+      return json(200, { origin: this.origin(), domain: await this.handleDomain() });
     }
     const t = this.target(url);
     // The router's own paths at its own hostname stay the router's when an instance takes that label (ownLabelInstance).
@@ -2333,16 +2147,11 @@ export class Router {
     if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    // #130: asleep, or terms this host does not serve: nothing is forwarded.
-    const closed = this.closed(handle);
-    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     // #135: two doors — a read by a call, a signed request through the door (serveHttp).
     const a: FrontAnswer = await serveHttp(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
     this.settle(l);
     // Charged to the identity the front door verified (H13), never to a header as the client sent it.
     if (a.fuel !== undefined) this.charge(handle, a.caller ?? "", `${route} (read)`, a.fuel);
-    // #130: what never reaches the log — the read call's fuel, the bytes served — for its next tick.
-    this.meter(handle, { at: stampMs(this.now()), op: `${req.method} ${route}`, ...(a.caller ? { caller: a.caller } : {}), fuel: a.fuel ?? 0, bytes: a.body.length });
     return { status: a.status, headers: a.headers, body: a.body };
   }
 
@@ -2454,17 +2263,3 @@ function claimProblem(c: SignedClaim, owner: string): void {
   if (!(m.signature instanceof Uint8Array)) throw new Error("claim: not signed");
 }
 
-/** #130: a package that is the instance's own message to itself (the loopback: unsigned, sender and recipient its identity). */
-function isLoopback(pkg: Record<string, unknown>, identity: string): boolean {
-  const m = pkg.message as { sender?: unknown; recipient?: unknown; signature?: unknown } | undefined;
-  const hex = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : "";
-  return !!m && m.signature === undefined && hex(m.sender) === identity && hex(m.recipient) === identity;
-}
-
-/** #130: a reclaimed instance's store: the file, its -wal and -shm, and its directory when that empties. */
-async function removeStore(store: string): Promise<void> {
-  const fs = await import("node:fs/promises");
-  const { dirname } = await import("node:path");
-  for (const f of [store, `${store}-wal`, `${store}-shm`]) await fs.rm(f, { force: true });
-  await fs.rmdir(dirname(store)).catch(() => {}); // not empty, or not its own: left
-}

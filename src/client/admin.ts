@@ -1,5 +1,5 @@
 // Root's admin messages (#124, #142, #143): building them is a library — installing an app, removing it,
-// a route, a read route, an address-book entry, the host row, a directory into `main`, a grant — each a
+// a route, a read route, an address-book entry, a directory into `main`, a grant — each a
 // few messages from root to the kernel's admin boxes (docs/MESSAGES.md "The dispatch table and the
 // kernel's operations": objects, head, dispatch, peers, grant) and the app's own box (start/stop). The
 // management page builds the same messages with the same code (src/host/plan.ts) and sends them with the
@@ -119,30 +119,6 @@ export async function planRoute(view: InstanceView, a: RouteArgs, programs: Reco
 export function planClaim(recipient: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): AdminPlan {
   const body = { ...(o.messagebox ? { messagebox: o.messagebox } : {}), ...(o.handle ? { handle: o.handle, ...(o.domain ? { domain: o.domain } : {}) } : {}) };
   return { prompt: [`claim ${recipient}: root to the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
-}
-
-/** The host's terms as it publishes them (/.well-known/skein-host `billing`, #130). */
-export interface HostTerms { key: string; x: number; rates?: Record<string, number> }
-
-/**
- * The host row (#130): root's choice of a host and its rates — one `dispatch` message adding (or
- * removing) the kernel route {mailbox, billing, host: <the host's key>, kernel, tick, x, rates} (#143:
- * the host's key a setting, no sender). The first such route is the host's; the kernel bills by it,
- * the host ticks it. Removing it ends billing.
- */
-export function planHost(recipient: string, op: "add" | "remove", t: HostTerms): AdminPlan {
-  if (!isKey(t.key)) throw new Error(`${t.key}: not the host's key (hex)`);
-  if (op === "add" && (!Number.isSafeInteger(t.x) || t.x < 1)) throw new Error("x: the sats the skein prepays at a time (a whole number ≥ 1)");
-  const rates = Object.fromEntries(Object.entries(t.rates ?? {}).map(([k, v]) => {
-    if (!Number.isSafeInteger(v) || v < 0) throw new Error(`rates.${k}: a whole number of sats`);
-    return [k, v];
-  }));
-  const row = { transport: "mailbox", address: "billing", host: keyBytes(t.key), program: "kernel", fn: "tick", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
-  const shown = Object.entries(rates).map(([k, v]) => `${k} ${v}`).join(", ");
-  return {
-    prompt: [op === "add" ? `host ${t.key}: bills this skein — x ${t.x} sats a block${shown ? `, rates ${shown}` : ""} (#130: the skein pays it from its own wallet, ahead)` : `host ${t.key}: removed (nothing is billed)`],
-    recipient, messages: [{ box: "dispatch", body: { op, row } }],
-  };
 }
 
 export type PeerChange = ({ op: "add" } & AddressEntry) | { op: "remove"; key: string };

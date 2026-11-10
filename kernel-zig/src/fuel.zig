@@ -1,4 +1,4 @@
-// `skein-kernel fuel <store.db> [--since n]`: billing as a query over the log
+// `skein-kernel fuel <store.db> [--since n]`: fuel as a query over the log
 // (issue #5). Every step's update carries the fuel the step burnt; this sums
 // it per thread and in total, over the steps whose input is log entry n or
 // later (all of them by default). Read only; anyone holding the log can

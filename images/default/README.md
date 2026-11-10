@@ -1,7 +1,7 @@
 # The default image
 
 One genesis for everyone, with no root in it (#89, #143). It has the front
-door, the messagebox, the wallet (#116, #130), the admin routes (root's:
+door, the messagebox, the wallet (#116), the admin routes (root's:
 nobody holds root yet) and the claim route, open: the first claim's sender
 is granted root (#127: never a key in its body) — the claimant's own
 message, or a claim signed before the instance existed, which the host
@@ -13,10 +13,9 @@ docs/BOOTSTRAP.md, "The default image".
 
 - `bin/frontdoor.cid`, `bin/mail.cid`: the kernel's pinned modules
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
-- `bin/wallet.cid`, `bin/wallet.json` (#116, #130): the wallet — core, in
+- `bin/wallet.cid`, `bin/wallet.json` (#116): the wallet — core, in
   every skein — the same program record as src/runtime/programs.ts
-  `WALLET`: a skein made from the image pays its host from it (docs/VM.md
-  "Billing").
+  `WALLET`.
 - `etc/dispatch.json` (#143: routes, no senders): the claim route, the
   handshake route, the skein's own `/sendMessage` (the mail program) and
   the explorer behind `kernel.brc104` (the explorer gated by root: every

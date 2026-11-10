@@ -423,7 +423,6 @@ bin/skein dispatch add|remove --http [--prefix] --fn f [--settings json] [--send
 bin/skein reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--dry-run]   # #135: the owner's own read (a call, anyone)
 bin/skein peers add <key> <address> [--transport …] [--handle h@d] <where> [--dry-run]
 bin/skein peers remove <key> <where> [--dry-run]
-bin/skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
 bin/skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]
 bin/skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]
 bin/skein-host grant <key> [--apps] [--instance <handle>]                # a key's admin rows in the host skein
@@ -588,91 +587,6 @@ bin/skein install|dispatch|… <where>               # the owner's admin message
   mailbox lists as `messageId`. Sent messages are logged in
   `~/.skein/client/sent.jsonl`.
 
-## Billing (#130)
-
-A hosted skein pays for its own hosting from its own wallet (docs/VM.md
-"Billing": the kernel's side). The host's side, `src/host/billing.ts` and
-`Router` ("billing"):
-
-**The terms.** The host bills by its **billing key** (a child of the master
-secret, the provider key `billing`: it takes no messages and is in no
-address book) and what it supports — X, the rates, the free allowance per
-skein, the tick interval, the grace — `SKEIN_BILLING_*` over small dev
-defaults (`billing.ts DEV_BILLING`; `SKEIN_BILLING=off`: it bills no one).
-It publishes them:
-
-```
-GET /.well-known/skein-host  → {origin, domain, billing: {key, x, rates: {fuel, storage, served, fetch, authfetch, publish},
-                                 allowance, tickMs, graceMs}}
-```
-
-The owner grants them as the skein's **host row** (a kernel row of its
-dispatch table, the owner's own admin message):
-
-```
-bin/skein host add --from <the host's origin> <the skein's origin>                         # the published terms
-bin/skein host add <host key> --x 1000 --rates '{"fuel":1,"storage":1}' <the skein's origin>
-bin/skein host remove <host key> <the skein's origin>                                       # nothing billed after it
-```
-
-A skein with no host row is not billed and is served as before (the host
-skein among them). One whose host row names another key, or X or a rate
-below this host's, is not served (the gate, below).
-
-**The meter.** What never reaches the skein's log is the host's to count: the
-fuel of the read calls it makes for it (the explorer's reads, frontdoor.ts)
-and the bytes of every response it serves for it. Each is a line of its log
-for the period since its last tick (in memory; the fuel ledger, host.db
-`fuel_ledger`, keeps the read calls per caller as before).
-
-**The tick.** Every `SKEIN_BILLING_TICK_MS`, to every billed skein it runs
-(and at once to one whose host row it has not ticked yet: the first tick
-starts its billing, its allowance the allocation; and early, when what it
-holds unreported would take the tally to the allocation): a message signed
-by the billing key, in the host row's box, appended as a `local` request —
-
-```
-{kind: "tick", at: <ms>, allowance: <sats>, fuel: <read calls' fuel>, served: <bytes served>, log: <cid>}
-```
-
-— `log` the CID of the period's record, `{kind: "host-log", instance:
-<its identity>, from, to, lines: [{at, op, caller?, fuel, bytes}]}`, which
-the host keeps (host.db `billing_ticks`): what it charged, provable.
-
-**The host reads the tally** after each settle, as it reads the dispatch
-table: the kernel's `head billing` and its record (`Router.syncBilling`),
-into host.db `billing` (tally, allocation, asleep since).
-
-**Payments.** The skein's pay step emits each payment as the event
-`payment` (its Atomic BEEF, the output index and amount, the BRC-29
-remittance, the checkpoint CID): the host keeps it (host.db
-`billing_payments`, with whether its output pays the key the remittance
-derives from the billing key) and broadcasts it (its Arcade, once). What
-else it does with it is its own.
-
-**Funding.** Root funds a skein by the wallet's `internalize` message on
-a route of its own to the wallet (docs/WALLET.md); the host has no funding
-endpoint. A BRC-169 delivery message to the skein's own mailbox is the
-coming path.
-
-**The gate.** Asleep (consumed ≥ allocation, nothing paid) or with terms this
-host does not serve, a skein gets nothing from the host but its own
-messages to itself (the loopback: its
-wallet's ingest at the chain app, the chain app's answers): a request is
-`402 {code: "ERR_PAYMENT_REQUIRED"}` (its owner's too), a libp2p message is
-ignored, a provider's answer, a cron tick, a feed's header, a status is not
-carried in (a log line), and no tick is sent. Nothing wakes it today.
-
-**Grace and reclaim.** host.db `billing.asleep_since` is when the host first
-saw it asleep. Past `SKEIN_BILLING_GRACE_MS` the host may reclaim it;
-nothing does it on its own:
-
-```
-bin/skein-host billing [handle]            # each billed skein: tally, allocation, asleep since, terms not served; its ticks and payments
-bin/skein-host reclaim [--grace ms]        # the skeins asleep past the grace
-bin/skein-host reclaim [--grace ms] --yes  # reclaim them: kernel stopped, row disabled and removed, store deleted (through the running router)
-```
-
 ## Checking by hand
 
 ```
@@ -710,9 +624,6 @@ where they use one. Unset means the default.
 | `SKEIN_HOST_URL` | where `event` finds the running host (default `http://127.0.0.1:8100`) |
 | `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above) |
 | `SKEIN_HEADERS_URL` | the host's headers feed (#102) |
-| `SKEIN_BILLING` | `off`: the host bills no one (#130, "Billing" above); else it bills a skein whose host row names its billing key |
-| `SKEIN_BILLING_X`, `SKEIN_BILLING_RATES`, `SKEIN_BILLING_ALLOWANCE` | what it supports: X (sats a skein prepays at a time), the rates (JSON `{fuel, storage, served, fetch, authfetch, publish}`, whole sats), the free allowance per skein (sats); dev defaults in `src/host/billing.ts` |
-| `SKEIN_BILLING_TICK_MS`, `SKEIN_BILLING_GRACE_MS` | how often it ticks a billed skein; how long after one went asleep `skein-host reclaim` lists it |
 | `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_UPNP`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |
 | `SKEIN_LIBP2P_VERBOSE` | set: log every libp2p verdict, accepted ones too (default: only reject and ignore) |
 | `SKEIN_SHELL_APP`, `SKEIN_CHAT_APP`, `SKEIN_ONBOARD_APP` | up.sh: the shell, chat and onboarding apps it installs (repo URL with a tag) |

@@ -8,7 +8,6 @@
 //   skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]
 //   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
 //   skein peers remove <key> <where> [--dry-run]
-//   skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
 //   skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]
 //   skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]
 //
@@ -34,7 +33,7 @@ import type { CID } from "multiformats/cid";
 import { appHead, readStoredApp, type AppTree, type InstanceView } from "../host/plan.ts";
 import { identityOf, operatorKey, type Vars } from "../host/hostenv.ts";
 import { keyWallet } from "../wallet.ts";
-import { catalogOf, messageJson, planClaim, planDeploy, planGrant, planHost, planInstallApp, planPeers, planRoute, planUninstallApp, type AdminPlan, type HostTerms, type PeerChange, type RouteArgs } from "./admin.ts";
+import { catalogOf, messageJson, planClaim, planDeploy, planGrant, planInstallApp, planPeers, planRoute, planUninstallApp, type AdminPlan, type PeerChange, type RouteArgs } from "./admin.ts";
 import { localTarget, remoteTarget, stdoutOf, type Target } from "./target.ts";
 
 export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key):
@@ -50,14 +49,12 @@ export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OP
   skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]     a grant (#143; root by default)
   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
   skein peers remove <key> <where> [--dry-run]      an address-book entry (#70)
-  skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
-                                                     the host row (#130)
   skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]               an image's claim (#127, #143): root to the key that sends it
   skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]               a directory into main (objects, head)
 <where>: --instance <handle> (this host machine: over its control socket) | <origin> (one BRC-104 session)
          | --store <runtime.db> (read only: planned and printed, nothing sent)`;
 
-export const ADMIN_COMMANDS = ["install", "uninstall", "routes", "grant", "peers", "host", "claim", "deploy"] as const;
+export const ADMIN_COMMANDS = ["install", "uninstall", "routes", "grant", "peers", "claim", "deploy"] as const;
 
 export interface AdminEnv {
   vars: Vars;
@@ -183,23 +180,6 @@ export async function adminMain(cmd: string, argv: string[], env: AdminEnv): Pro
         await s.target.claim(p.messages[0]!.body as Record<string, unknown>);
         env.out(`${s.target.where}: the claim sent`);
         return 0;
-      }
-      case "host": {
-        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, x: { type: "string" }, rates: { type: "string" }, from: { type: "string" } } });
-        const { args: [op, key, ...more], origin } = splitOrigin(positionals, v.from !== undefined ? 1 : 2);
-        if (more.length || (op !== "add" && op !== "remove") || (!key && v.from === undefined) || (key && v.from !== undefined)) { env.err(ADMIN_USAGE); return 2; }
-        let terms: HostTerms;
-        if (v.from !== undefined) {
-          const r = await fetch(new URL("/.well-known/skein-host", v.from));
-          const b = (await r.json() as { billing?: HostTerms }).billing;
-          if (!r.ok || !b) throw new Error(`${v.from}: no billing terms at /.well-known/skein-host`);
-          terms = { key: b.key, x: b.x, rates: b.rates };
-        } else {
-          const rates = v.rates !== undefined ? json("skein host --rates", v.rates) as Record<string, number> : undefined;
-          terms = { key: key!, x: Number(v.x ?? (op === "remove" ? 1 : NaN)), ...(rates ? { rates } : {}) };
-        }
-        s = await sessionOf(v, origin, env);
-        return await deliver(planHost(await s.identity(), op, terms), s, env);
       }
       case "deploy": {
         const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, only: { type: "string" }, all: { type: "boolean" } } });

@@ -167,11 +167,11 @@ test "deadlineRecord (#126): an event the wait owns — at, thread, step, the ap
     try std.testing.expect((try deadlineRecord(a, 5, t1, 1, null)).get("app") == null);
 }
 
-/// The intentions (#119, #126, #130, #138, #157): event names the kernel or the host wires as
+/// The intentions (#119, #126, #138, #157): event names the kernel or the host wires as
 /// requests of their own — not facts. They are not under the name rule (an app emits them by
 /// these names) and not in the event index (index.zig `events`); everything else a program emits
 /// as {event: <name>} is a fact, indexed by name.
-pub const intentions = [_][]const u8{ "fetch", "deadline", "deliver", "payment", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant" };
+pub const intentions = [_][]const u8{ "fetch", "deadline", "deliver", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness", "want", "unwant" };
 
 pub fn isIntention(name: []const u8) bool {
     for (intentions) |x| if (std.mem.eql(u8, x, name)) return true;
@@ -495,12 +495,12 @@ pub fn isGenesis(x: ?Value) bool {
     }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
     // An image's installed apps (#141): {<head name>: <record CID>}, each head advanced when the genesis is
-    // processed. Not `main` (the tree's), `claim` (the claim's) or `billing` (the kernel's own, #130).
+    // processed. Not `main` (the tree's), `claim` (the claim's) or `grants` (the kernel's own, #143).
     if (g.get("heads")) |hs| {
         if (!isCidMap(hs)) return false;
         for (hs.map) |e| {
             if (e.key.len == 0 or std.mem.indexOfAny(u8, e.key, " \t\n\r\x0b\x0c\x00") != null) return false;
-            for ([_][]const u8{ "main", "claim", "billing", "grants" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
+            for ([_][]const u8{ "main", "claim", "grants" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
         }
     }
     // #143: no reads table (a read is a route: filters only).

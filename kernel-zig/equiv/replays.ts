@@ -12,7 +12,7 @@
 //     order, sleepers, awaits, edges, heads, the cursor, fuel per thread and
 //     in total, every record's CID, the state CID (which covers every index
 //     node);
-//   - `skein-kernel fuel`, the billing query.
+//   - `skein-kernel fuel`, the fuel query.
 //
 // Also: every step that ended (finished/errored/waiting) records its fuel,
 // and a source the Zig kernel wrote itself (equiv/serve.ts; format 1) is

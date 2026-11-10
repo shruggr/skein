@@ -323,13 +323,9 @@ program named `wallet` writes `wallet/…` (its default write scope). Each step 
 a new `wallet-state`, advances `wallet/state`, puts a `wallet-result`, keeps
 it, and prints its CID. An error ends the step `errored`; no head moves.
 
-Its coins move on the messages its threads take — the owner's, and a
-program's that launches or calls it (as before #130) — the chain app's
-and the kernel's pay step (#130: a thread the kernel
-launched under the entry it processes; docs/VM.md "Billing"). Only the pay
-step is the kernel's alone: a thread another program launched with `pay`
-is refused. Since #130 (and #116) the default image carries the wallet,
-with no route to it: root funds a skein by the `internalize` message below,
+Its coins move on the messages its threads take — the owner's, a
+program's that launches or calls it, and the chain app's. Since #116 the
+default image carries the wallet, with no route to it: root funds a skein by the `internalize` message below,
 on a route of its own to the wallet (`skein routes add wallet wallet
 <where>`: box `wallet`, the genesis program `wallet`). A BRC-169 delivery message to the skein's own mailbox is the
 coming path for a payment from anyone else.
@@ -341,7 +337,6 @@ coming path for a payment from anyone else.
 | `{op: "signAction", reference, spends?: {"<inputIndex>": {unlockingScript (bytes), sequenceNumber?}}}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
-| args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
 
 (0.6.0: no `callback` op — the chain app's answers to an ingest are not awaited; its facts carry every status.)
 

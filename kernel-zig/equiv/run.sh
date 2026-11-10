@@ -175,9 +175,6 @@ SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/teranode.ts" || status=1
 echo "== the host chain (#156, #133): two instances on one RocksDB host take three header runs; their chain/state headers and heights roots are the host chain record's, the tip read off them the host's; a proof on A verifies; a heavier branch replacing two headers reverts it (unproven, broadcast again) and leaves B on the new record; the gate (a host chain block through every set, A's record not through B's); a serve (SQLite) instance's chain/state for the same runs is the RocksDB host's; replayed after the processes stopped; timings: a block's frame and its event to 8 instances, chain-import of an image (HOSTCHAIN_IMPORT headers)"
 "${node[@]}" "$kz/equiv/hostchain.ts" || status=1
 
-echo "== billing (#130): two skeins from the default image (its wallet, no route to it) on a host that bills, with the chain app (wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR) over a fake header feed and a fake Arcade; root funds alice by the wallet's internalize message (its own route to the wallet); alice's owner grants the host (skein host: the host row, the host's published terms), the host ticks at once (billing starts on its allowance); a tick charges storage and the host's amounts, its period's log record kept; an owner's head message for billing and a stranger's tick refused; usage consumes the allocation and the kernel's pay step pays X — a payment event the host keeps and broadcasts, its output the host's BRC-29 key, its other output OP_RETURN the state record's CID — then all she has, then nothing: asleep, 402, no tick, her owner held too (her internalize among it: nothing wakes her), reclaimable past the grace; bob (no host row) untouched; an app's payment event refused; replayed"
-"${node[@]}" "$kz/equiv/billing.ts" || status=1
-
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 

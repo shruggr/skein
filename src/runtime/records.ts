@@ -138,8 +138,8 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   return isCID(x.program);
 }
 
-/** What a kernel route may name (its `fn`): the admin operations (#143: `grant` among them), the claim (#89: an image's one route; root to the claimant, the route removed), and the host's tick (#130). */
-export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "grant", "claim", "tick"];
+/** What a kernel route may name (its `fn`): the admin operations (#143: `grant` among them), and the claim (#89: an image's one route; root to the claimant, the route removed). */
+export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "grant", "claim"];
 
 // ---------------------------------------------------------------- genesis
 

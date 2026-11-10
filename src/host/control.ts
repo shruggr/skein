@@ -7,7 +7,6 @@
 // The protocol is one JSON line each way, and it carries one request:
 //
 //   {"op": "event", "handle": h, "box": b, "event": {…}}   → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
-//   {"op": "reclaim", "handle": h}                       → {"ok": true, "entry": ""} | {"ok": false, "error": "…"}
 //   {"op": "message", "handle": h, "message": "<base64>", "body": "<base64>"}
 //                                                       → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //
@@ -29,15 +28,12 @@ export const CONTROL_SOCKET = "host.sock";
 
 export type ControlRequest =
   | { op: "event"; handle: string; box: string; event: Record<string, unknown> }
-  | { op: "reclaim"; handle: string }
   | { op: "message"; handle: string; message: string; body: string };
 export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
 
 /** What the socket's owner does with a request (the router: cronEvent). */
 export interface ControlHandler {
   event(handle: string, box: string, event: Record<string, unknown>): Promise<string>;
-  /** #130: `skein-host reclaim --yes` (Router.reclaim); absent: refused. */
-  reclaim?(handle: string): Promise<void>;
   /** #142: a signed message for `handle` (its mail record's dag-cbor and its body), appended as a `local` request (Router.messageLocal); absent: refused. */
   message?(handle: string, message: Uint8Array, body: Uint8Array): Promise<string>;
 }
@@ -55,11 +51,7 @@ function requestOf(line: string): ControlRequest {
     if (typeof o.message !== "string" || typeof o.body !== "string") throw new Error("a message is {message, body}, each base64");
     return o as unknown as ControlRequest;
   }
-  if (o && typeof o === "object" && o.op === "reclaim") {
-    if (typeof o.handle !== "string" || !o.handle) throw new Error("a reclaim names its instance (handle)");
-    return o as unknown as ControlRequest;
-  }
-  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event}, {op: \"reclaim\", handle} or {op: \"message\", handle, message, body}");
+  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event} or {op: \"message\", handle, message, body}");
   if (typeof o.handle !== "string" || !o.handle || typeof o.box !== "string" || !o.box) throw new Error("an event names its instance (handle) and its box");
   if (!o.event || typeof o.event !== "object" || Array.isArray(o.event)) throw new Error("the event is a JSON object");
   return o as unknown as ControlRequest;
@@ -105,11 +97,6 @@ function serveOne(s: Socket, h: ControlHandler): void {
     if (req.op === "message") {
       if (!h.message) { reply({ ok: false, error: "this router takes no messages here" }); return; }
       h.message(req.handle, Buffer.from(req.message, "base64"), Buffer.from(req.body, "base64")).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
-      return;
-    }
-    if (req.op === "reclaim") {
-      if (!h.reclaim) { reply({ ok: false, error: "this router reclaims nothing" }); return; }
-      h.reclaim(req.handle).then(() => reply({ ok: true, entry: "" }), (e: Error) => reply({ ok: false, error: e.message }));
       return;
     }
     h.event(req.handle, req.box, req.event).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));

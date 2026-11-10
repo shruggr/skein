@@ -22,17 +22,16 @@ export function rawCid(bytes: Uint8Array): CID {
 /** The modules as committed under wasm/ (see wasm/README.md). A test checks these against the files. */
 export const MODULES = {
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreiaufe7s52aqspvrfquzaupdbsmg44qlg3i7sr75zx7out6rm6cxfm"),
+  "wallet": CID.parse("bafkreidm4rgrxdyfixexre7naw2xz72sow2iduy2sxaefere5knkeugvcm"),
 } as const;
 
 /** The wallet program record's description (also the default image's bin/wallet.json: the same record, #116). */
-export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`). Prints the result record's CID.";
+export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app). Prints the result record's CID.";
 
 /**
  * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`
  * box's handler, written in Zig (programs/wallet, over the SDK's wallet library). In the default image
- * by CID (#116, #130: images/default/bin/wallet.cid and wallet.json — this very record): every skein made
- * from it pays its host from it. A code genesis has none: an instance that wants it subscribes a box to
+ * by CID (#116: images/default/bin/wallet.cid and wallet.json — this very record). A code genesis has none: an instance that wants it subscribes a box to
  * its record's CID (an owner's box).
  */
 export const WALLET = program({

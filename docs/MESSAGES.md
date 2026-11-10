@@ -88,8 +88,8 @@ chain of routes
 
 ```
 {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
- filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"],
- program?: <program record CID> | "kernel", fn?, app?, price?: <sats> (#149: kernel.pay's), …settings}
+ filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"],
+ program?: <program record CID> | "kernel", fn?, app?, …settings}
 ```
 
 — a box (`mailbox`: messages; `event`: the host's wiring, never a message),
@@ -108,7 +108,7 @@ stepped:
 | box | body | the operation |
 |---|---|---|
 | `objects` | `{records: [{cid, bytes}], root?}` | each block stored under its CID (hash-checked); `root` → `main` if there is none |
-| `head` | `{name, tree}` | the head advanced to a record in the store (not `billing` or `grants`: the kernel's) |
+| `head` | `{name, tree}` | the head advanced to a record in the store (not `grants`: the kernel's) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the route added (replacing the route with its key: transport, address, prefix), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
 | `grant` | `{op: "add" \| "remove", role, principal}` | the grants (#143): `root` or `<app>.<role>` to (or from) a key |
@@ -173,14 +173,7 @@ are apart. Every HTTP request goes to the kernel's door
    (every BEEF in the body decoded and every BUMP checked against the chain
    app's headers; the bytes replaced by the pointer record; a BUMP that does
    not check 400; no BEEF and no principal before it 400 "nothing to
-   validate" — signed or validated), `kernel.pay` (#149, after
-   `kernel.brc104`: the route's `price` on ts-stack's payment wire — no
-   `X-BSV-Payment` header: 402 with `x-bsv-payment-version`,
-   `x-bsv-payment-satoshis-required`, `x-bsv-payment-derivation-prefix`;
-   a payment whose nonce verifies, whose Atomic BEEF's first output covers
-   the price and whose txid the wallet does not hold: passed with the
-   `payment` block; else 400/409 in ts-stack's codes; docs/APPS.md "The
-   kernel's own filters"), and an app's own (`<app>.<filter>`, a
+   validate" — signed or validated), and an app's own (`<app>.<filter>`, a
    call in the deterministic profile). Each passes the request on (with a
    principal, with blocks it stored), rejects it, or answers it. A route
    lists only what it names: `["kernel.brc104"]` signed only;
@@ -194,16 +187,13 @@ are apart. Every HTTP request goes to the kernel's door
    holders; no principal 401, the wrong one 403.
 4. **The outcome.** A rejection, a filter's answer (a **read route**: no
    handler — the site's pages, a lookup, a resolver: anyone, any method,
-   signed or not; the fuel on the host's meter) and the gate's refusal
+   signed or not; the fuel on the host's fuel ledger) and the gate's refusal
    write **no entry**: the host answers at once — signed on the request's
    session when the request is signed and its session verifies (the front
    door's fn `respond`, a call), plain otherwise. What passes is the entry
-   — `door: {principal?, verified?, filters, beefs?, blocks?, payment?}` —
-   and (#149) a `payment` first goes to the wallet program, which the
-   kernel launches on the entry to internalize it (refused: the handler
-   does not run, and no answer comes); then the
-   front door's step on it runs the route's handler (its `caller` the
-   principal, its `payment` kernel.pay's) and signs its answer on the session when the request is
+   — `door: {principal?, verified?, filters, beefs?, blocks?}` —
+   and the front door's step on it runs the route's handler (its `caller` the
+   principal) and signs its answer on the session when the request is
    signed (#135: a signed request gets a signed answer, BRC-104 §6.4,
    whatever the route's filters). The handshake (`/.well-known/auth`) is a
    route of its own to the front door's `handshake`, no filters.
@@ -300,7 +290,6 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
   body:        bytes | {envelope}  as received; #121: on a row whose `filter` is `beef`, the BEEF's envelope {form, beef: <pointer record>, subject?, vout?} (#146; docs/VM.md "The door")
   contentType: text            the media type alone
   session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes (no payload when a filter replaced the body or a header: reconstructible)
-  payment?:    {satoshisPaid, txid, derivationPrefix, derivationSuffix, sender: bytes(33)}   #149: what kernel.pay admitted (the wallet internalized it before this call)
   match:       the dispatch row that matched, as the table holds it (`address`, `prefix: true` for a prefix row;
                a handler's own settings: static's root, index; the install's app). #79: no pre-#77 keys
   request:     <cid>           the request record: the package as received (its entry is `step.entry`)
@@ -406,15 +395,7 @@ sent, which is what the front door verifies.
 
 ```
 entry    {kind: "log", prev, n, time, genesis | request+transport (+ door | refused, #121) | mail | event+box}
-door     {verified?, filter?, beefs?: [<pointer record>], bodies?: [{of, is}], payment?}   the door's admission (docs/VM.md "The door")
-payment  {satoshisPaid, txid: <hex>, derivationPrefix, derivationSuffix, sender: bytes(33)}   #149: kernel.pay's; the request's
-         x-bsv-payment header logged as {kind: "x-bsv-payment", before, beef: <envelope>, after} (the text
-         with the transaction's base64 cut out, kernel.beef's envelope {form: "atomic", beef: <pointer record>,
-         subject} where it was, #146; restored: before ‖ base64(the BEEF's bytes) ‖ after). Processing the entry
-         launches the wallet program first: origin {kind: "thread", program: <wallet>, args: {body: {op:
-         "internalize", tx, outputs: [{outputIndex: 0, protocol: "wallet payment", paymentRemittance}],
-         description}}, launchedBy: <the entry>, input: <the entry>, at, nonce: "payment"}; the request's
-         thread runs only when that step did not error
+door     {verified?, filter?, beefs?: [<pointer record>], bodies?: [{of, is}]}   the door's admission (docs/VM.md "The door")
 refused  {stage: "middleware" | "filter", reason, status, code?}                   a refusal at the door: stored, nothing runs
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
@@ -1475,9 +1456,8 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
           only the beats newer than that app's window
       404 when <app> keeps no liveness for <topic>
 
-  An unsigned read: no entry, nothing logged; metered as a read (bytes
-  served, billing.ts). A runtime without the tool records the events and
-  nothing happens. Beats are unbilled for now (#130).
+  An unsigned read: no entry, nothing logged. A runtime without the tool
+  records the events and nothing happens.
 - **Overlay sync (#150, #154).** The pulling half is the host's, beside
   the liveness tool (src/host/sync.ts); the answering half is the overlay
   engine's (shruggr/skein-overlay ≥ 0.15.0, fn `sync`), through the front
@@ -1744,23 +1724,6 @@ every step's: fuel accounting is a query over the log. The host's **fuel ledger*
 (host.db `fuel_ledger`: instance, caller, op, calls, fuel; `skein-host
 ledger`) keeps what is not in the log: the kernel calls it makes (a read
 after a request's thread, op `<route> (read)`).
-
-## Billing (#130)
-
-The wire of billing (docs/VM.md "Billing" is the kernel's side,
-scripts/host/README.md "Billing" the host's):
-
-| what | from → to | shape |
-|---|---|---|
-| the host row | the owner → the skein, box `dispatch` (`skein host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
-| a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
-| a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
-| a funding | root → the skein, box `wallet` (root's own route to the wallet) | `{op: "internalize", tx, outputs, description}` (docs/WALLET.md); a BRC-169 delivery message to the skein's mailbox is the coming path |
-
-The payment's transaction has two outputs before any change: the host's
-(P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"<prefix>
-<suffix>"`, derived for the host by the skein, counterparty the host's key)
-and the checkpoint (0 sats, `OP_FALSE OP_RETURN <the CID, binary>`).
 
 ## Chat between instances
 
