@@ -134,6 +134,28 @@ pub const STATE_KIND = "skein-state";
 /// the event index keyed name ‖ 0 ‖ s ‖ i ‖ thread; `resting` by the tip's ord, `restsOn` by the ord that
 /// began the rest. A store in format 10 is refused: no migration (re-genesis).
 pub const FORMAT: i64 = 11;
+
+/// Whether a store's open logs its refusal (format_test.zig turns it off: the zig test runner fails
+/// a test that logs an error, and that test asserts the refusal itself).
+pub var log_refusals = true;
+
+/// Why a store in format `loaded` (lower than FORMAT) is refused for running, one line: what changed
+/// since, and what to do (every backend says the same, sqlite_store.zig and rocksdb_store.zig).
+pub fn formatRefusal(loaded: i64) []const u8 {
+    return switch (loaded) {
+        10 => "a store written in format 10, before format 11 (skein 0.8.0: events placed by the instance's step number — every thread update carries `ord`, an event's place is {s, i, thread}, its id <s>.<i>.<thread>): refused, no migration — start a fresh home (re-genesis)",
+        9 => "a store written before format 10 (issue #146: the BEEF envelope beside the pointer record, not in it; Subject BEEF): refused (start a new store: re-genesis)",
+        8 => "a store written before format 9 (issue #143: routes without senders, filters before anything is recorded, roles and the grants head, root instead of an owner): refused (start a new store: re-genesis)",
+        7 => "a store written before format 8 (issue #77: the kernel's four tables — one dispatch table, admin operations in the kernel, write scope by app name): refused (start a new store: re-genesis)",
+        6 => "a store written before format 7 (issues #65, #69: broadcast out an event, wakes and ticks messages from the waker and cron providers, no genesis jobs): refused (start a new store: re-genesis)",
+        5 => "a store written before format 6 (issues #70, #67: one outbound primitive, emit; no recorded http/libp2p calls or attestations): refused (start a new store: re-genesis)",
+        4 => "a store written before format 5 (issue #68: every request appended and the front door stepped on it, sessions as records): refused (start a new store: re-genesis)",
+        3 => "a store written before format 4 (issue #62: recorded calls attested by the host, its key in the genesis): refused (start a new store: re-genesis)",
+        2 => "a store written before format 3 (issue #40: messages as mail records, no envelopes or emits): refused (start a new store: re-genesis)",
+        1 => "a store written before format 2 (issue #33: unsigned entries, keys as bytes): refused (start a new store: re-genesis)",
+        else => if (loaded < 1) "a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)" else "a store in an older format: refused (start a new store: re-genesis)",
+    };
+}
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

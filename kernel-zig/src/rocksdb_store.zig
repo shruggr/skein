@@ -324,13 +324,19 @@ pub const RocksStore = struct {
         s.ix = try index.Index.init(alloc, s.backend(), read_only or bare);
         errdefer s.ix.deinit();
         if (!bare) _ = try s.ix.load();
+        // 0.8.0: a set whose log was written in an older format is refused for writing, before
+        // anything is rewritten (as SQLite's open does); a read-only open holds it, and says so.
+        if (!bare and !read_only and s.predatesFuel()) {
+            if (index.log_refusals) std.log.err("rocksdb set {s}: {s}", .{ set, index.formatRefusal(s.ix.loaded_format) });
+            return error.PredatesFuel;
+        }
         return s;
     }
 
-    /// No store in a database holds the format before #30 (only this kernel writes one; migrate
-    /// refuses an older store), so nothing here predates fuel.
-    pub fn predatesFuel(_: *RocksStore) bool {
-        return false;
+    /// Holds a log written in an older format than this kernel's (a state record with a lower
+    /// `format`, as sqlite_store.zig's).
+    pub fn predatesFuel(s: *RocksStore) bool {
+        return s.ix.loaded_format < index.FORMAT and s.ix.work.tip.get() != null;
     }
 
     pub fn close(s: *RocksStore) void {

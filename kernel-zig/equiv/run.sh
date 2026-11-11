@@ -147,7 +147,7 @@ echo "== a step reads its own facts (skein 0.8.0): one router, one app (programs
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/events-own-step.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/events-own-step.ts" || status=1
 
-echo "== facts placed by the instance's step number (skein 0.8.0): one router, one app (programs/test/order-probe's module); in one entry an old resting thread raises a fact and a fresh subscription thread raises the same name after it — latest is the later (and the reverse); the step numbers follow the log; SSE resumed after the first gets the second; after a kernel restart a step is numbered after every one before; index-store.ts derives the events, resting and awaits maps; replayed — on SQLite, on RocksDB and on the WASM host"
+echo "== facts placed by the instance's step number (skein 0.8.0): one router, one app (programs/test/order-probe's module); in one entry an old resting thread raises a fact and a fresh subscription thread raises the same name after it — latest is the later (and the reverse); the step numbers follow the log; SSE resumed after the first gets the second; after a kernel restart a step is numbered after every one before; killed mid-entry (a slow subscription step), restarted, the entry runs again numbered after every step committed before; index-store.ts derives the events, resting and awaits maps; skein-kernel dump decodes the place; replayed — on SQLite, on RocksDB and on the WASM host"
 "${node[@]}" "$kz/equiv/event-order.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-order.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/event-order.ts" || status=1

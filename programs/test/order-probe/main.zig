@@ -1,7 +1,7 @@
 //! order-probe (skein 0.8.0, kernel-zig/equiv/event-order.ts): facts under one name raised in one entry by threads of different step counts.
 //!   message {kind: "rest", name: T}             the thread rests on T (on(T), no fn)
 //!   message {kind: "on", name: T}               subscribe fn "heard" to T
-//!   message {kind: "go", name: T}               emit T
+//!   message {kind: "go", name: T, spin?}        (or a host's event of that shape in the app's box) emit T (with `spin`: the deliveries it steps hash that many times first)
 //!   woken (resting thread, its step ≥ 2)        emit {event: <app>/x/<tag>, value: "rested"} then, if its rest message
 //!                                               named `then`, emit that
 //!   delivery (fresh thread, seq 1)              emit {event: <app>/x/<tag>, value: "heard"}; read latest of it in-step → head <app>/read
@@ -60,6 +60,11 @@ fn run(a: Allocator) !void {
         // A subscription's delivery: a fresh thread (seq 1).
         const trig = Value.str(args.get("box")) orelse return sk.report("no box");
         const x = try xOf(a, app, trig);
+        // A slow delivery (equiv/event-order.ts kills the kernel in it).
+        const fact = try sk.get(a, Value.cidOf(args.get("event")) orelse return sk.report("no event"));
+        var h: [32]u8 = @splat(0);
+        var k: i128 = Value.intOf(fact.get("spin")) orelse 0;
+        while (k > 0) : (k -= 1) std.crypto.hash.sha2.Sha256.hash(&h, &h, .{});
         try emitX(a, x, "heard", step);
         return readLatest(a, app, x);
     }
@@ -76,7 +81,8 @@ fn run(a: Allocator) !void {
         }
         return;
     };
-    const body = try sk.get(a, Value.cidOf(args.get("body")) orelse return sk.report("no body"));
+    // A message (its body), or a host's event in the app's box (an event route: its record is the message).
+    const body = try sk.get(a, Value.cidOf(args.get("body")) orelse Value.cidOf(args.get("event")) orelse return sk.report("no body"));
     const kind = Value.str(body.get("kind")) orelse "";
     const name = Value.str(body.get("name")) orelse return sk.report("want name");
     if (eql(u8, kind, "rest")) return sk.on(name, null) catch sk.report(sk.lastError());
@@ -84,6 +90,7 @@ fn run(a: Allocator) !void {
     if (eql(u8, kind, "go")) {
         var m = cbor.MapBuilder.init(a);
         try m.put("event", cbor.string(name));
+        if (body.get("spin")) |sp| try m.put("spin", sp);
         const b = try cbor.encode(a, m.value());
         _ = sk.result(a, sk.raw.emit, .{ b.ptr, @as(u32, @intCast(b.len)) }) catch return sk.report(sk.lastError());
         return;

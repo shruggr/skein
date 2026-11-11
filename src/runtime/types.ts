@@ -54,7 +54,7 @@ export interface ThreadUpdate {
   waitingOn?: CID[];  // thread origins
   waitingFrom?: string; // an identity (pubkey hex): woken by a message from it
   awaits?: CID[];     // envelopes this thread emitted and rests on: an admitted envelope whose body's `replyTo` names one is its next input
-  restsOn?: { name: string; n: number }[]; // 0.5.4: the event names the thread rests on, each with the entry it began resting at: every fact under one steps it
+  restsOn?: { name: string; s: number }[]; // 0.5.4: the event names the thread rests on, each with (0.8.0) the step number that began the rest: every fact under one steps it
   until?: Ms;         // wake time (nudges, retries, David)
   resolution?: CID;   // node holding the result, when finished
   error?: { kind: "cant-do" | "blew-up"; message: string };

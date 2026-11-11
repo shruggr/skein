@@ -1385,9 +1385,10 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   topic, whatever its sender rule, and the subscription delivers nothing).
   The subscriptions are derived, never written: the fold, in log order, of
   every `subscribe` / `unsubscribe` record the steps' updates list in
-  `emitted` — by the processed entry's `n`, the step's `at`, the thread's
-  `at`, the thread's CID, the step's place in its thread, the event's place
-  in `emitted` (kernel-zig/src/subscriptions.zig `fold`). The kernel keeps
+  `emitted` — by (0.8.0) the instance's step number of the update listing it
+  (`ord`), then the event's place in `emitted`: the order the steps ran in
+  (kernel-zig/src/subscriptions.zig `fold`; the host's src/host/p2p.ts
+  `emittedEvents` the same). The kernel keeps
   the fold in memory and folds again after a step that subscribed or
   unsubscribed; replay folds the same. A subscription whose app's record no
   longer names the role (an uninstall) delivers nothing.
@@ -1537,15 +1538,15 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   the instance's state — index.zig `events`, held like `heads` among the
   index maps, part of the state CID, replayed byte for byte:
 
-      name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread  →  the record's CID
+      name ‖ 0 ‖ s ‖ i ‖ thread  →  the record's CID
 
   `name` raw (no NUL in a name, so a prefix of names is a prefix of keys);
-  the place as the stream ids it: the entry its step processed (`n`), the
-  update's `seq` in its thread, the record's index in `emitted` (`i`), the
-  thread's origin — numbers as every map's (8 bytes big-endian, the sign
-  bit flipped), so byte order is (n, seq, i, thread): the log's entry order,
-  and within one entry by seq, index and thread (not the order the steps
-  ran). An event nothing reads costs its index entry and nothing else.
+  the place as the stream ids it (0.8.0): the instance's step number of the
+  update listing it (`s`, its `ord`), the record's index in `emitted` (`i`),
+  the thread's origin (ordering nothing: it finds the update) — numbers as
+  every map's (8 bytes big-endian, the sign bit flipped), so byte order is
+  (s, i): the order the steps ran in, whichever thread and whichever entry
+  drove them. An event nothing reads costs its index entry and nothing else.
   **One read**, the same everywhere: `{name | prefix, after?, limit?,
   latest?}` → the matching records newest last with their places; `latest`
   = the last per distinct name under the prefix; `after` = strictly after a

@@ -15,8 +15,12 @@
 //     second (before, it sorted lower and was never sent);
 //   - a restart: the kernel killed and started again, a step after it is
 //     numbered after every step before it, its fact the latest;
+//   - killed mid-entry (a slow subscription step running): nothing of the
+//     entry committed; restarted, the entry runs again, numbered after every
+//     step committed before (the replay checks the numbers are the log's);
 //   - index-store.ts derives the kernel's events, resting and awaits maps
-//     from the chains (the rebuild = the live index);
+//     from the chains (the rebuild = the live index); `skein-kernel dump`
+//     decodes an event's place as the host's id gives it;
 //   - the store replays to itself exactly — SQLite by default,
 //     SKEIN_EQUIV_STORE=rocksdb / =wasm the others.
 //
@@ -39,7 +43,7 @@ import { SseStream, type SseEvent } from "../../src/host/feeds.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
 import { buildTree, derive, type IndexStore } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
-import { BACKEND, routerStore, specFor, storeFor } from "./backend.ts";
+import { BACKEND, WASM_MODE, routerStore, specFor, storeFor } from "./backend.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
@@ -64,7 +68,7 @@ function appTree(name: string): string {
   copyFileSync(wasm, join(dir, "bin/order-probe.wasm"));
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify({
     kind: "app", name, version: "0.1.0", programs: { probe: "bin/order-probe.wasm" }, provides: [], requires: [],
-    routes: [{ address: "", handler: "probe" }],
+    routes: [{ address: "", handler: "probe" }, { transport: "event", address: "go", handler: "probe" }],
     description: `skein 0.8.0's test app ${name}: order-probe's module`,
   }, null, 2));
   return dir;
@@ -88,6 +92,8 @@ const r = new Router({
 type Place = { s: number; i: number; thread: CID };
 type Row = { id: string; event: string; record: Record<string, unknown> };
 const sOf = (id: string) => Number(id.split(".")[0]);
+/** S1's later fact as the host serves it (its id and name): the dump checks the same place. */
+let known: { id: string; name: string } | undefined;
 
 try {
   await r.listen(0);
@@ -127,6 +133,7 @@ try {
   await send({ kind: "go", name: "op/t/s1" });
   const s1all = await hostRead("op/x/s1");
   const s1latest = await hostRead("op/x/s1", "latest=1");
+  known = { id: s1latest[0]!.id, name: "op/x/s1" };
   check(vals(s1all) === "rested,heard", `S1 in one entry: the old thread's fact, then the fresh thread's (${s1all.map((x) => `${x.id.split(".").slice(0, 2).join(".")} ${String(x.record.value)}`).join(" | ")})`);
   check(vals(s1latest) === "heard", `S1 latest: the later step's ("heard"; before 0.8.0 "rested") (${vals(s1latest)})`);
   const mine = await inStep();
@@ -166,6 +173,29 @@ try {
   check(after.length === 1 && sOf(after[0]!.id) > Math.max(...before) && sOf(after[0]!.id) > steps0, `after a restart (the state's steps ${steps0}), a step is numbered after every one before it (s ${after[0] && sOf(after[0].id)} > ${Math.max(...before)})`);
   check(vals(await hostRead("op/x/", "latest=1")).split(",").includes("heard"), "and its fact reads as the latest under its name");
 
+  // ------------------------------------------------ killed mid-entry: the entry is logged, its delivery step running
+  // The fact op/t/s5 steps a slow subscription; the kernel is killed while it runs. Nothing of the entry
+  // was committed; restarted, the entry is processed again and its steps are numbered after every step
+  // committed before the kill (the replay below checks the numbers are the log's).
+  await send({ kind: "on", name: "op/t/s5" });
+  const committedMax = Math.max(...(await hostRead("op/", "")).map((x) => sOf(x.id)), ...(await hostRead("op/x/", "")).map((x) => sOf(x.id)));
+  const spin = Number(process.env.SKEIN_EQUIV_SPIN ?? (WASM_MODE ? 400_000 : 40_000_000));
+  const n5 = lines.length;
+  // A host's event into op's box `op/go` (its event route): admitted (the entry durable), processed after — not settled.
+  await r.admitEvent(handle, "op/go", { kind: "go", name: "op/t/s5", spin });
+  for (const end = Date.now() + 30_000; !lines.slice(n5).some((l) => /event op\/t\/s5 \S+ → op\.heard/.test(l)) && Date.now() < end; ) await sleep(20);
+  await sleep(200);
+  const k5 = (await r.hydrate(handle)).kernel as unknown as { machine?: { worker: { terminate(): Promise<number> } }; proc?: { kill(s: string): void }; host?: { proc?: { kill(s: string): void } }; exited(): Promise<void> };
+  const started = lines.slice(n5).some((l) => /event op\/t\/s5 \S+ → op\.heard/.test(l));
+  const midway = started && (await hostRead("op/x/s5")).length === 0;
+  if (k5.machine) await k5.machine.worker.terminate(); else if (k5.host?.proc) k5.host.proc.kill("SIGKILL"); else k5.proc!.kill("SIGKILL");
+  await k5.exited();
+  check(midway, `killed while the slow delivery ran: op/x/s5 not indexed yet (spin ${spin})`);
+  await r.hydrate(handle);
+  await r.settled();
+  const s5 = await until("op/x/s5 after the restart", async () => { await r.settled(); const x = await hostRead("op/x/s5"); return x.length ? x : undefined; }, 60_000);
+  check(s5.length === 1 && sOf(s5[0]!.id) > committedMax, `restarted, the entry processed again: its fact once, numbered after every step committed before the kill (s ${sOf(s5[0]!.id)} > ${committedMax})`);
+
   // ------------------------------------------------ the rebuild (index-store.ts derive) = the live index
   const same = await withStore(async (st) => {
     const d = await derive(st);
@@ -180,6 +210,15 @@ try {
   await r.stop();
   hdb.close();
   const spec = specFor(home, handle);
+  // `skein-kernel dump` decodes the event index as the kernel keys it: [name, s, i, thread, record]
+  // (a native store; a wasm host's set is dumped once exported, replays.ts, on the same decoder).
+  if (!WASM_MODE) {
+    const dump = spawnSync(kernel, ["dump", spec], { encoding: "utf8", maxBuffer: 1 << 28 });
+    const events = dump.status === 0 ? (JSON.parse(dump.stdout) as { events: Array<[string, number, number, string, string]> }).events : [];
+    const [ks, ki, kt] = known ? known.id.split(".") : [];
+    const row = events.find((e) => e[0] === known?.name && e[1] === Number(ks) && e[2] === Number(ki));
+    check(!!row && row[3] === kt, `skein-kernel dump: S1's later fact at [s ${ks}, i ${ki}, thread ${kt?.slice(-8)}] as the host's id says (${JSON.stringify(row?.slice(0, 4))}${dump.status === 0 ? "" : ` ${dump.stderr}`})`);
+  }
   const rp = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), spec], { encoding: "utf8", env: { ...process.env, SKEIN_KERNEL_BIN: kernel } });
   process.stdout.write(rp.stdout);
   if (rp.status !== 0) process.stdout.write(rp.stderr);

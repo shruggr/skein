@@ -31,6 +31,7 @@ test {
     _ = @import("rocksdb_store.zig");
     _ = @import("host.zig");
     _ = @import("host_chain.zig");
+    _ = @import("format_test.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {

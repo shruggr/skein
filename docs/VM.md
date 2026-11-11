@@ -1183,11 +1183,11 @@ points at this record, what tree does this head name — are answered by
 Each query shape is its own map, keyed so that the question is a lookup, a
 range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p` event record's CID → entry),
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
-and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
-(record ‖ at ‖ origin; and, 0.5.4, name ‖ 0 ‖ n ‖ origin for a thread resting
-on an event name), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
-(name → tree), `events` (0.5.0, below: name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → a
-fact's record), `on` (0.5.2, below "Subscriptions": name ‖ 0 ‖ seq → the
+(at ‖ origin), `resting` (0.8.0: the tip's step number ‖ origin), `sleepers`
+(until ‖ origin), `awaits` (record ‖ at ‖ origin; and, 0.5.4, name ‖ 0 ‖ s ‖
+origin for a thread resting on an event name, `s` the step number that began
+the rest), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads` (name → tree),
+`events` (0.5.0, below: name ‖ 0 ‖ s ‖ i ‖ thread → a fact's record), `on` (0.5.2, below "Subscriptions": name ‖ 0 ‖ seq → the
 subscription's update).
 
 A map is a **Merkle search tree** of dag-cbor nodes (fan-out ~32; a key's
@@ -1198,7 +1198,9 @@ path and shares every other node with the previous version, which stays
 readable.
 
 One **state record** names it all:
-`{kind: "skein-state", format: 1, log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}}`
+`{kind: "skein-state", format, log: <log tip>, cursor, steps, heads: <root>, index: {<map>: <root>…}}`
+(0.8.0: `steps` the instance's step number so far — the greatest `ord` of any
+thread update; format 11)
 (`format` 1: every step's update carries its fuel; a store without it predates
 fuel and is not run on).
 Its CID is the instance's single mutable pointer; the store is otherwise a
@@ -1214,12 +1216,14 @@ intermediate trees; the log and what live chains reach are not.
 
 The `events` map is every fact the steps emitted (a `{kind: "event"}`
 record whose name is under its app's own and no intention's, above
-"emit"): `name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread` → the record's CID, written from
+"emit"): `name ‖ 0 ‖ s ‖ i ‖ thread` → the record's CID, written from
 each update's `emitted` when the update is recorded (the live path and a
-rebuild alike). The place is the event's in the log — the entry its step
-processed (the update's `input`'s `n`), the update's `seq`, the record's
-index in `emitted`, the thread's origin — numbers as every map's, so the
-key order is name, then (n, seq, i, thread). Programs read it with the
+rebuild alike). The place (0.8.0) is the event's step: `s` the instance's
+step number of the update that lists it (its `ord`: every thread update the
+scheduler appends takes the next one), `i` the record's index in `emitted`,
+and the thread's origin, which orders nothing (it finds the update) —
+numbers as every map's, so the key order is name, then (s, i): the order the
+steps ran in, whichever thread and whichever entry drove them. Programs read it with the
 **`events`** call:
 
 ```
@@ -1289,7 +1293,7 @@ emitting step's update, under the entry that drove it, steps every
 subscription to its name, in that order, as the subscriptions stand after the
 emitting step: each a thread launched by the fact's record, its program the
 app's role as `<app>/app` names it now (none: nothing runs, a log line), its
-args `{event: <the record's CID>, box: <the name>, fn, place: {n, seq, i,
+args `{event: <the record's CID>, box: <the name>, fn, place: {s, i,
 thread}}` — a fresh step at the emitting entry, no new log entry; the
 handler reads its context from state. A subscription hears only the facts
 that land after it exists (no history); one that never fires costs its key.
@@ -1305,18 +1309,18 @@ the same threads.
 `on(name)` with no fn — preview1 `fn_len` 0, WIT an empty `fn` — rests the
 calling THREAD on the name (the same name rule as above; refused in a kernel
 `call`): its step ends with the thread `waiting`, its update listing
-`restsOn: [{name, n}]` (`n` the entry it began resting at). It waits forever
+`restsOn: [{name, s}]` (0.8.0: `s` the step number of the update that began
+the rest). It waits forever
 by design: a resting thread is a stored record found by key, nothing scans
 it. Every fact emitted under the name after that — after the emitting step's
 update, under the entry that drove it, after the name's subscriptions —
 wakes it: a step of the same thread at the emitting entry, its input carrying
-`event: {event: <the record's CID>, box: <the name>, place: {n, seq, i,
+`event: {event: <the record's CID>, box: <the name>, place: {s, i,
 thread}}` beside its own context (its args, its tip). It rests on the name
 again: each step's update carries its tip's `restsOn` forward, so the
 woken step calls nothing to keep resting. Threads resting on one name wake
-in the order they began resting (the entry, then within one entry the
-origin's bytes). The entries live in the waits index, `awaits`: name ‖ 0 ‖
-n ‖ origin, beside the reply-keyed ones. A step that errors carries no
+in the order they began resting (0.8.0: by the step number that began it).
+The entries live in the waits index, `awaits`: name ‖ 0 ‖ s ‖ origin, beside the reply-keyed ones. A step that errors carries no
 `restsOn` (it is not woken again). Committed with the emitting entry, as a
 delivery is: a kernel stopped mid-wake commits nothing of the entry and wakes
 each once from the cursor. Replay steps the same threads.

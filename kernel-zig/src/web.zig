@@ -47,6 +47,7 @@ const dispatchm = @import("dispatch.zig");
 const host_chain = @import("host_chain.zig");
 const chainlib = @import("chainlib");
 const WebStore = @import("web_store.zig").WebStore;
+const indexm = @import("index.zig");
 const Value = cbor.Value;
 
 const gpa = std.heap.wasm_allocator;
@@ -184,8 +185,9 @@ export fn skein_open(store: u32) i32 {
     if (rt != null) return fail("already open");
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
+        const why = indexm.formatRefusal(s.ix.loaded_format);
         s.close();
-        return fail("a store written in an older format (before format 10, issue #146: the BEEF envelope beside the pointer record): refused (start a new store: re-genesis)");
+        return fail(why);
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));

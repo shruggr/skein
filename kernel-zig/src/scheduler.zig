@@ -1342,7 +1342,7 @@ pub const Runtime = struct {
 
     /// 0.5.4: a fact a step emitted, `ev` under `name`, wakes every thread resting on the name (its
     /// step called `on(name)` with no fn, on.zig): in the order they began resting (the waits index,
-    /// index.zig `awaits`, keyed name ‖ 0 ‖ the entry it began resting at ‖ origin), each stepped at
+    /// index.zig `awaits`, keyed name ‖ 0 ‖ the step number that began the rest ‖ origin), each stepped at
     /// the emitting entry with `event` {event, box: <the name>, place: {s, i, thread}} beside
     /// its own context, and resting on the name again (stepBody carries `restsOn`). A function of
     /// the update and the state: replay steps the same threads.

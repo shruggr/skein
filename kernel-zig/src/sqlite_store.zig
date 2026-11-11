@@ -68,27 +68,7 @@ pub const SqliteStore = struct {
                 const probe = try openReadOnly(alloc, path);
                 defer probe.close();
                 if (probe.predatesFuel()) {
-                    if (probe.ix.loaded_format < 1) {
-                        std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 9) {
-                        std.log.err("{s}: a store written before format 10 (issue #146: the BEEF envelope beside the pointer record, not in it; Subject BEEF): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 8) {
-                        std.log.err("{s}: a store written before format 9 (issue #143: routes without senders, filters before anything is recorded, roles and the grants head, root instead of an owner): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 7) {
-                        std.log.err("{s}: a store written before format 8 (issue #77: the kernel's four tables — one dispatch table, admin operations in the kernel, write scope by app name): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 6) {
-                        std.log.err("{s}: a store written before format 7 (issues #65, #69: broadcast out an event, wakes and ticks messages from the waker and cron providers, no genesis jobs): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 5) {
-                        std.log.err("{s}: a store written before format 6 (issues #70, #67: one outbound primitive, emit; no recorded http/libp2p calls or attestations): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 4) {
-                        std.log.err("{s}: a store written before format 5 (issue #68: every request appended and the front door stepped on it, sessions as records): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 3) {
-                        std.log.err("{s}: a store written before format 4 (issue #62: recorded calls attested by the host, its key in the genesis): refused (start a new store: re-genesis)", .{path});
-                    } else if (probe.ix.loaded_format == 2) {
-                        std.log.err("{s}: a store written before format 3 (issue #40: messages as mail records, no envelopes or emits): refused (start a new store: re-genesis)", .{path});
-                    } else {
-                        std.log.err("{s}: a store written before format 2 (issue #33: unsigned entries, keys as bytes): refused (start a new store: re-genesis)", .{path});
-                    }
+                    if (index.log_refusals) std.log.err("{s}: {s}", .{ path, index.formatRefusal(probe.ix.loaded_format) });
                     return error.PredatesFuel;
                 }
             }

@@ -495,7 +495,7 @@ other record, one per query shape (`index.zig`):
 | `chains` | origin → {tip, seq, kind} | `chainTip`, `chainAppend` |
 | `updates` | origin ‖ seq → update | `chainUpdates` (a prefix) |
 | `threads` | at ‖ origin | every thread (the witness) |
-| `resting` | at ‖ origin | threads not finished, in resume order |
+| `resting` | ord ‖ origin (0.8.0: the tip's step number) | threads not finished, in resume order |
 | `sleepers` | until ‖ origin | waiting threads by deadline |
 | `awaits` | record ‖ at ‖ origin | the threads awaiting a reply to a message they sent, or a subject (a prefix) |
 | `edges` | to ‖ from ‖ seq ‖ ord → [rel, locator] | what points at a record (a prefix) |
@@ -693,8 +693,8 @@ committed message for a `local` or `libp2p` recipient, which the host's
 providers carry out — or, transport `event`, an event: a broadcast for the
 host's broadcaster, #65; a `deadline` or `fetch` intention for its waker or
 HTTP proxy, #126; a subscription or a beacon for its libp2p node; an event
-also carries `place: {n, seq, i, thread}` beside the record, #148: the entry
-its step processed, the update's seq, its index in `emitted`, the thread —
+also carries `place: {s, i, thread}` beside the record, #148 (0.8.0): the
+instance's step number of its update, its index in `emitted`, the thread —
 the record itself is unchanged) and
 `stop`. There is no `send` and no
 `resolve` (#40): an instance delivers its mailbox messages itself, by its
