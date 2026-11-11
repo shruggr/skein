@@ -1,36 +1,20 @@
-// The browser build's replay proof (issue #35): each store's log replayed by
-// the wasm kernel (zig-out/web/skein-kernel.wasm) in headless Chrome — in a
-// Worker, programs on V8 with fuel by instrumentation, the destination an
-// IndexedDB database — against `skein-kernel replay` natively. Required
-// identical: the replay report (log lines, emits, log tip, index costs, state
-// record CID) and everything `skein-kernel dump` derives from the store
-// IndexedDB kept (read back by a fresh worker and written out as SQLite):
-// entries, chains, every update with its fuel, the state CID.
-//
-//   node --experimental-strip-types --no-warnings kernel-zig/equiv/browser.ts <store.db>…
+// The browser helpers the browser scenarios share (browser-live.ts, libp2p.ts, site.ts): Playwright
+// and Chromium, a server for the wasm kernel's files, a store as a bundle and back.
 //
 // Needs Playwright (mise: `playwright` on PATH, or SKEIN_PLAYWRIGHT=<its package
-// dir>) and Chromium (SKEIN_CHROMIUM, default /usr/bin/chromium).
-//
-// A store larger than SKEIN_BROWSER_MAX_MB (default 256) is skipped, with a
-// note: a tab holds the store's bundle, its blocks and the wasm kernel's
-// memory at once, and Chrome crashes on one of hundreds of MB. Since #83 every
-// store with the shell app installed is that large (its install messages carry
-// the shell's ~50 MB of modules, and the log records each several times over),
-// so the corpus's shell runs (gen-run, gen-chat, gen-fuel) are replayed
-// natively only.
+// dir>) and Chromium (SKEIN_CHROMIUM, default /usr/bin/chromium). (The corpus
+// replayed in Chrome against the native replay is gone: the wasm kernel is
+// compared with the native one once, by wasm-host.ts.)
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { tmpdir } from "node:os";
-import { basename, dirname, extname, join, normalize } from "node:path";
+import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kz = join(here, "..");
-const kernelBin = process.env.SKEIN_KERNEL_BIN ?? join(kz, "zig-out/bin/skein-kernel");
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".wasm": "application/wasm", ".json": "application/json", ".map": "application/json", ".css": "text/css" };
 
 // ---------------------------------------------------------------- shared with equiv/browser-live.ts
@@ -123,94 +107,3 @@ export function writeStore(bundle: Uint8Array, db: string): void {
   d.exec("COMMIT");
   d.close();
 }
-
-// ---------------------------------------------------------------- the proof
-
-function run(args: string[], env: Record<string, string> = {}): string {
-  const r = spawnSync(kernelBin, args, { maxBuffer: 1 << 30, env: { ...process.env, ...env } });
-  if (r.status !== 0) throw new Error(`skein-kernel ${args.join(" ")}: ${r.stderr}`);
-  return r.stdout.toString();
-}
-
-function firstDiff(a: string, b: string, what: string): string {
-  const x = JSON.parse(a), y = JSON.parse(b);
-  for (const k of Object.keys({ ...x, ...y })) {
-    const p = JSON.stringify(x[k]), q = JSON.stringify(y[k]);
-    if (p === q) continue;
-    if (Array.isArray(x[k]) && Array.isArray(y[k])) {
-      const at = (x[k] as unknown[]).findIndex((v, i) => JSON.stringify(v) !== JSON.stringify(y[k][i]));
-      return `${what} ${k}: first difference at ${at}\n    browser ${JSON.stringify(x[k][at])}\n    native  ${JSON.stringify(y[k][at])}`;
-    }
-    return `${what} ${k}: browser ${p.slice(0, 200)} vs native ${q.slice(0, 200)}`;
-  }
-  return `${what}: differs`;
-}
-
-const MAX_MB = Number(process.env.SKEIN_BROWSER_MAX_MB ?? 256);
-
-async function main(sources: string[]): Promise<number> {
-  const work = mkdtempSync(join(tmpdir(), "skein-kz-browser-"));
-  const results = new Map<string, Uint8Array>();
-  const bundles = new Map<string, Uint8Array>();
-  const server = await serveKernel(async (req, res, path) => {
-    if (path === "/") { res.writeHead(200, { "content-type": TYPES[".html"] }).end(readFileSync(join(here, "browser.html"))); return true; }
-    const b = /^\/bundle\/(.+)$/.exec(path);
-    if (b) { res.writeHead(200, { "content-type": "application/octet-stream" }).end(bundles.get(b[1]!)); return true; }
-    const r = /^\/result\/(.+)$/.exec(path);
-    if (r && req.method === "POST") { results.set(r[1]!, await body(req)); res.writeHead(200).end("ok"); return true; }
-    return false;
-  });
-  const port = (server.address() as { port: number }).port;
-  const pw = await playwright();
-  const browser = await pw.chromium.launch({ executablePath: chromium(), headless: true });
-  let status = 0;
-  try {
-    const page = await (await browser.newContext()).newPage();
-    page.on("console", (m) => { if (m.type() === "error") console.log(`  | ${m.text()}`); });
-    page.on("pageerror", (e) => console.log(`  | page error: ${e.message}`));
-    await page.goto(`http://127.0.0.1:${port}/`);
-    await page.waitForFunction(() => (window as unknown as { ready?: boolean }).ready === true);
-    let shown = false;
-    for (const src of sources) {
-      const name = basename(src, ".db");
-      const mb = (statSync(src).size + (existsSync(`${src}-wal`) ? statSync(`${src}-wal`).size : 0)) / 2 ** 20;
-      if (mb > MAX_MB) { console.log(`skip ${name}: ${Math.round(mb)} MB, more than the browser build replays in one tab (SKEIN_BROWSER_MAX_MB ${MAX_MB}; #83: the shell app's install)`); continue; }
-      // Copy the source (with its -wal) first; never open it in place.
-      const copy = join(work, `${name}.src.db`);
-      copyFileSync(src, copy);
-      if (existsSync(`${src}-wal`)) copyFileSync(`${src}-wal`, `${copy}-wal`);
-      // Native: `skein-kernel replay` into a fresh store, and its dump.
-      const nativeDb = join(work, `${name}.native.db`);
-      const native = run(["replay", copy, nativeDb]);
-      const nativeDump = run(["dump", nativeDb]);
-      // The browser: the same log replayed in Chrome, into IndexedDB.
-      bundles.set(name, bundleOf(copy));
-      const t = Date.now();
-      const r = await page.evaluate(async (n) => await (window as unknown as { replayOne(n: string): Promise<{ report: string; ms: number; stats: unknown; blocks: number; isolated: boolean; agent: string }> }).replayOne(n), name);
-      if (!shown) { console.log(`  (${r.agent.replace(/^.*(HeadlessChrome\/[^ ]+).*$/, "$1")}, cross-origin isolated: ${r.isolated})`); shown = true; }
-      const webDb = join(work, `${name}.web.db`);
-      writeStore(results.get(name)!, webDb);
-      const webDump = run(["dump", webDb]);
-      const problems: string[] = [];
-      if (r.report !== native) problems.push(firstDiff(r.report, native, "replay report"));
-      if (webDump !== nativeDump) problems.push(firstDiff(webDump, nativeDump, "dump"));
-      const state = JSON.parse(r.report).index.record as string;
-      const d = JSON.parse(webDump) as { fuel: { total: number }; entries: unknown[] };
-      if (problems.length) {
-        status = 1;
-        console.log(`FAIL ${name}`);
-        for (const p of problems) console.log(`  ${p}`);
-      } else {
-        console.log(`ok   ${name}: identical — ${d.entries.length} entries, fuel ${d.fuel.total}, state ${state.slice(-12)} (${r.ms} ms in the worker, ${Date.now() - t} ms in all; ${JSON.stringify(r.stats)})`);
-      }
-    }
-  } finally {
-    await browser.close();
-    server.close();
-    if (!process.env.KEEP) rmSync(work, { recursive: true, force: true });
-    else console.log(`kept ${work}`);
-  }
-  return status;
-}
-
-if (import.meta.main) process.exit(await main(process.argv.slice(2)));

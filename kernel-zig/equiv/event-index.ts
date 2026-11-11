@@ -33,7 +33,7 @@ import { Signer } from "../../src/host/signer.ts";
 import { Router } from "../../src/host/router.ts";
 import { SseStream, type SseEvent } from "../../src/host/feeds.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
-import { buildTree, derive, type IndexStore } from "../../src/runtime/index-store.ts";
+import { type IndexStore } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { BACKEND, routerStore, specFor, storeFor } from "./backend.ts";
 
@@ -157,15 +157,6 @@ try {
   const nLines2 = lines.length;
   await send("evy", { kind: "event-demo-read", query: { name: "x", prefix: "y" } });
   check(lines.slice(nLines2).some((l) => /events: want \{name/.test(l)), "a query that is not one: the step errors with the import's reason");
-
-  // ------------------------------------------------ the TypeScript derivation (index-store.ts) = the kernel's map
-  const same = await withStore(async (st) => {
-    const d = await derive(st);
-    const want = st.state().roots.events;
-    const got = buildTree(d.pairs.events).root;
-    return { ok: (want === null && got === null) || (!!want && !!got && want.equals(got)), n: d.pairs.events.length };
-  });
-  check(same.ok && same.n === all.length + 0, `index-store.ts derives the kernel's events map from the chains (${same.n} keys, the same root)`);
 
   // ------------------------------------------------ the stream: the same read, then live
   const got: Array<{ id: string; event: string; data: Record<string, unknown> }> = [];

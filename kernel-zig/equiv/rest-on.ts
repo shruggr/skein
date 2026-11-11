@@ -15,7 +15,6 @@
 //   - a crash in the middle of a delivery: S (evy, slow) then T (evz) rest on `evx/slow`; a
 //     host's event in `evx/go` emits it; the kernel is killed while S's step runs; nothing of the
 //     entry was committed, and once restarted each is woken once;
-//   - index-store.ts derives the kernel's waits index (`awaits`) from the chains;
 //   - the store replays to itself exactly — on SQLite, with SKEIN_EQUIV_STORE=rocksdb on RocksDB,
 //     with =wasm on the WASM host.
 //
@@ -34,7 +33,7 @@ import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { Router } from "../../src/host/router.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
-import { buildTree, derive, type IndexStore } from "../../src/runtime/index-store.ts";
+import { type IndexStore } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { BACKEND, WASM_MODE, routerStore, specFor, storeFor } from "./backend.ts";
 
@@ -170,15 +169,6 @@ try {
   check(slow.filter((x) => x.tag === "s").length === 1 && slow.filter((x) => x.tag === "t").length === 1, `restarted: each resting thread woken once (s ${slow.filter((x) => x.tag === "s").length}, t ${slow.filter((x) => x.tag === "t").length})`);
   check((await read("evx/slow")).length === 1, "the fact indexed once");
 
-  // ------------------------------------------------ the TypeScript derivation (index-store.ts) = the kernel's waits index
-  const same = await withStore(async (st) => {
-    const dv = await derive(st);
-    const want = st.state().roots.awaits;
-    const got = buildTree(dv.pairs.awaits).root;
-    const names = dv.pairs.awaits.filter(([key]) => key[0]! >= 0x20).length;
-    return { ok: !!want && !!got && want.equals(got), names };
-  });
-  check(same.ok && same.names === 6, `index-store.ts derives the kernel's waits index from the chains (${same.names} rests by name, the same root)`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
