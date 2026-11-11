@@ -2,8 +2,8 @@
 
 ## 0.8.1
 
-The kernel, the host and the log are 0.8.0's; the stock mail program changes (a new module CID in
-the kernel's pins and the default image: fresh homes pick it up).
+The host and the log are 0.8.0's; the kernel's door verifier (skein-sdk v0.21.3) and the stock mail
+program change (a new module CID in the kernel's pins and the default image: fresh homes pick it up).
 
 - **A message is no longer lost when the kernel dies mid-entry.** The mail program
   (programs/mail, `/sendMessage`) took "the message's record is in the store" for "already
@@ -18,6 +18,10 @@ the kernel's pins and the default image: fresh homes pick it up).
   (event-order.ts: the kill case through the front door, and the double delivery; replayed
   exactly).
 
+- **A held transaction is not script-checked again at the door.** The kernel pins skein-sdk
+  v0.21.3: `kernel.beef`'s verifier treats a transaction the instance holds (chain/state `txs`, not
+  rejected: `Headers.held`) that a BEEF carries raw as its txid-only entry; its scripts are not run
+  again. Not held, it is checked as before.
 - **The kernel builds from a clean clone.** It pins skein-sdk v0.21.2
   (placeholder modules in the first configure pass), so kernel-zig/build.zig
   needs no guard for the SDK's `chain` module; checked from a fresh clone with

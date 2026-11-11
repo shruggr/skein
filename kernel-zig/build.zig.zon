@@ -7,8 +7,8 @@
         // The SDK (shruggr/skein-sdk, #75): the codecs, and natively the `chain` module (the
         // host chain, #156; it brings bsvz). -Dwallet=false (sdkImports in build.zig).
         .skein_sdk = .{
-            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.21.2.tar.gz",
-            .hash = "skein_sdk-0.21.2-YroFBMdCHQAqF4yIwzs6dAYjEE8afJi5fGg1NQzMrbBS",
+            .url = "https://github.com/shruggr/skein-sdk/archive/a1af1c0a9c549041195af939da71dc78ad94111e.tar.gz",
+            .hash = "skein_sdk-0.21.3-YroFBBBRHQC3zT-I3_JNl2D6p0eC7iFo_3qfKOzm4EC_",
         },
     },
     .paths = .{
