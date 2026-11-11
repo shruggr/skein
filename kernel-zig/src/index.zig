@@ -27,28 +27,30 @@
 //   chains    origin                     → {tip, seq, kind?}   (every chain's tip)
 //   updates   origin ‖ seq               → update CID          (a chain's history)
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
-//   resting   at ‖ origin                → null                (threads not finished: what start resumes)
+//   resting   ord ‖ origin               → null                (threads not finished: what start resumes, 0.8.0: in
+//                                                              the order of their tips' step numbers; 0: no update yet)
 //   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
 //   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject;
-//             name ‖ 0 ‖ n ‖ origin                            0.5.4: and threads resting on an event name, `restsOn`,
-//                                                              n the entry it began resting at)
+//             name ‖ 0 ‖ s ‖ origin                            0.5.4: and threads resting on an event name, `restsOn`,
+//                                                              0.8.0: s the step number of the update that began the rest)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`;
 //                                                              and a kept bitcoin transaction's inputs, from the
 //                                                              block at seq 0 (#42, bitcoin.zig): `spends`
 //                                                              (locator = vout); headers and merkle nodes: none)
 //   heads     name                       → tree CID            (named heads)
-//   events    name ‖ 0 ‖ n ‖ seq ‖ i ‖ thread → record CID     (0.5.0: the event index — every fact a
+//   events    name ‖ 0 ‖ s ‖ i ‖ thread  → record CID          (0.5.0: the event index — every fact a
 //                                                              step emitted, {kind: "event", event:
 //                                                              <name>, app, …} with its name under its
 //                                                              app and no intention's (log.zig
 //                                                              indexedName), keyed by its name (raw
 //                                                              bytes, then a 0: a name has no NUL, so
 //                                                              a prefix of names is a prefix of keys)
-//                                                              and its place in the log: the entry
-//                                                              its step processed, the update's seq
-//                                                              in its thread, the record's index in
-//                                                              `emitted`, the thread's origin)
+//                                                              and its place (0.8.0): the step number
+//                                                              of the update listing it (its `ord`),
+//                                                              the record's index in `emitted`, the
+//                                                              thread's origin (no order: it finds
+//                                                              the update))
 //   on        name ‖ 0 ‖ seq             → update CID          (0.5.2: the subscriptions the steps made,
 //                                                              on.zig — the {kind: "on"} chain's updates
 //                                                              applied in order: an `on` puts its update
@@ -126,8 +128,12 @@ pub const STATE_KIND = "skein-state";
 /// steps' and calls' input has no `owner`. A store in format 8 is refused: no migration (re-genesis);
 /// 10 = the BEEF envelope beside the pointer record (#146): the door puts {form, beef: <record>, subject?,
 /// vout?} where a BEEF's bytes were, and the pointer record is the BEEF alone (no form, subject or vout);
-/// Subject BEEF (BRC-233) is one more form. A store in format 9 is refused: no migration (re-genesis).
-pub const FORMAT: i64 = 10;
+/// Subject BEEF (BRC-233) is one more form. A store in format 9 is refused: no migration (re-genesis);
+/// 11 = the instance's step number (0.8.0): every thread update the scheduler appends carries `ord`, the
+/// next one (the state record's `steps` the greatest so far); an event's place is {s: that ord, i, thread},
+/// the event index keyed name ‖ 0 ‖ s ‖ i ‖ thread; `resting` by the tip's ord, `restsOn` by the ord that
+/// began the rest. A store in format 10 is refused: no migration (re-genesis).
+pub const FORMAT: i64 = 11;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).
@@ -153,6 +159,8 @@ pub const State = struct {
     tip: Root = .{},
     cursor: i64 = 0,
     format: i64 = FORMAT,
+    /// 0.8.0: the greatest `ord` of any thread update recorded (the instance's step number so far).
+    steps: i64 = 0,
 };
 
 pub const Stats = struct { commits: usize, nodes: usize, node_bytes: usize, states: usize };
@@ -217,6 +225,7 @@ pub const Index = struct {
         var s = State{};
         s.tip = Root.of(Value.cidOf(v.get("log")));
         s.cursor = @intCast(Value.intOf(v.get("cursor")) orelse 0);
+        s.steps = @intCast(Value.intOf(v.get("steps")) orelse 0);
         s.format = @intCast(Value.intOf(v.get("format")) orelse 0);
         const idx = v.get("index") orelse return error.BadState;
         inline for (@typeInfo(Map).@"enum".fields) |fld| {
@@ -242,6 +251,7 @@ pub const Index = struct {
         try m.put("format", cbor.int(s.format));
         try m.put("log", link(s.tip.get()));
         try m.put("cursor", cbor.int(s.cursor));
+        try m.put("steps", cbor.int(s.steps));
         try m.put("heads", link(s.roots[@intFromEnum(Map.heads)].get()));
         try m.put("index", idx.value());
         return m.value();
@@ -280,7 +290,7 @@ pub const Index = struct {
     }
 
     fn same(x: *const State, y: *const State) bool {
-        if (x.cursor != y.cursor or x.format != y.format or !optEq(x.tip.get(), y.tip.get())) return false;
+        if (x.cursor != y.cursor or x.steps != y.steps or x.format != y.format or !optEq(x.tip.get(), y.tip.get())) return false;
         for (x.roots, y.roots) |p, q| if (!optEq(p.get(), q.get())) return false;
         return true;
     }
@@ -549,7 +559,8 @@ pub const Index = struct {
         const state: ?[]const u8 = if (t) |x| Value.str(x.get("state")) else null;
         const finished = state != null and std.mem.eql(u8, state.?, "finished");
         var keys = ThreadKeys{ .resting = null, .sleeper = null, .awaits = &.{} };
-        if (!finished) keys.resting = try cat(a, .{ at, origin });
+        // 0.8.0: by the tip's step number (what start resumes, in the order they came to rest).
+        if (!finished) keys.resting = try cat(a, .{ if (t) |x| ordOf(x) else @as(i64, 0), origin });
         if (t) |x| {
             if (state != null and std.mem.eql(u8, state.?, "waiting")) {
                 if (x.get("until")) |u| if (u == .int or u == .float) {
@@ -560,17 +571,22 @@ pub const Index = struct {
             if (x.get("awaits")) |aw| if (aw == .array) {
                 for (aw.array) |c| if (c == .cid) try list.append(try cat(a, .{ c.cid, at, origin }));
             };
-            // 0.5.4: a waiting thread resting on event names (`restsOn` [{name, n}]): name ‖ 0 ‖ the
-            // entry it began resting at ‖ origin.
+            // 0.5.4: a waiting thread resting on event names (`restsOn` [{name, s}]): name ‖ 0 ‖ (0.8.0)
+            // the step number of the update that began the rest ‖ origin.
             if (state != null and std.mem.eql(u8, state.?, "waiting")) if (x.get("restsOn")) |rs| if (rs == .array) {
                 for (rs.array) |r| {
                     const nm = Value.str(r.get("name")) orelse continue;
-                    try list.append(try cat(a, .{ nm, &[_]u8{0}, numOf(r.get("n")), origin }));
+                    try list.append(try cat(a, .{ nm, &[_]u8{0}, numOf(r.get("s")), origin }));
                 }
             };
             keys.awaits = list.items;
         }
         return keys;
+    }
+
+    /// 0.8.0: a thread update's step number (`ord`); 0: none (a chain that is no thread's run).
+    fn ordOf(u: Value) i64 {
+        return @intCast(std.math.clamp(Value.intOf(u.get("ord")) orelse 0, 0, std.math.maxInt(i64)));
     }
 
     fn optEq(x: ?[]const u8, y: ?[]const u8) bool {
@@ -637,7 +653,10 @@ pub const Index = struct {
         try ix.mapPut(.updates, try cat(a, .{ origin, seq }), .{ .cid = cid });
         try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
         try ix.writeKeptBitcoin(a, u);
-        try ix.writeEvents(a, origin, seq, u);
+        try ix.writeEvents(a, origin, u);
+        // 0.8.0: the instance's step number so far.
+        const o = ordOf(u);
+        if (o > ix.work.steps) ix.work.steps = o;
         try ix.writeOn(a, origin, seq, cid, u);
     }
 
@@ -678,28 +697,26 @@ pub const Index = struct {
     }
 
     /// 0.5.0: the facts an update lists in `emitted` (log.zig indexedName) into the event index,
-    /// each at its place: the entry the step processed (`input`'s `n`), `seq`, its index, the thread.
-    fn writeEvents(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, u: Value) !void {
+    /// each at its place (0.8.0): the update's step number (`ord`), its index, the thread. An update
+    /// with no `ord` (no thread's run) places nothing.
+    fn writeEvents(ix: *Index, a: std.mem.Allocator, origin: []const u8, u: Value) !void {
         const emitted = u.get("emitted") orelse return;
         if (emitted != .array or emitted.array.len == 0) return;
-        var n: ?i64 = null;
+        const o = ordOf(u);
+        if (o == 0) return;
         for (emitted.array, 0..) |x, i| {
             const c = Value.cidOf(x) orelse continue;
             const bytes = (try ix.backend.vt.get(ix.backend.ctx, a, c)) orelse continue;
             const rec = cbor.decode(a, bytes) catch continue;
             const name = logm.indexedName(rec) orelse continue;
-            if (n == null) {
-                const ec = Value.cidOf(u.get("input")) orelse return;
-                const e = ix.blockValue(a, ec) catch return;
-                n = @intCast(Value.intOf(e.get("n")) orelse return);
-            }
-            try ix.mapPut(.events, try eventKey(a, name, .{ .n = n.?, .seq = seq, .i = @intCast(i), .thread = origin }), .{ .cid = c });
+            try ix.mapPut(.events, try eventKey(a, name, .{ .s = o, .i = @intCast(i), .thread = origin }), .{ .cid = c });
         }
     }
 
-    /// A place as the event index orders it: n ‖ seq ‖ i ‖ thread (numbers as every map's).
+    /// A place as the event index orders it: s ‖ i ‖ thread (numbers as every map's; the thread last,
+    /// ordering nothing: (s, i) is one fact's).
     pub fn placeKey(a: std.mem.Allocator, p: storem.Place) ![]u8 {
-        return cat(a, .{ p.n, p.seq, p.i, p.thread });
+        return cat(a, .{ p.s, p.i, p.thread });
     }
 
     /// An event index key: the name, a 0, the place.
@@ -712,11 +729,11 @@ pub const Index = struct {
     fn parseEventKey(key: []const u8, v: Value) !PlacedRow {
         const z = std.mem.indexOfScalar(u8, key, 0) orelse return error.BadIndex;
         const rest = key[z + 1 ..];
-        if (rest.len <= 24) return error.BadIndex;
+        if (rest.len <= 16) return error.BadIndex;
         return .{
             .name = key[0..z],
             .place_key = rest,
-            .place = .{ .n = readBe64(rest[0..8]), .seq = readBe64(rest[8..16]), .i = readBe64(rest[16..24]), .thread = rest[24..] },
+            .place = .{ .s = readBe64(rest[0..8]), .i = readBe64(rest[8..16]), .thread = rest[16..] },
             .record = Value.cidOf(v) orelse return error.BadIndex,
         };
     }
@@ -747,7 +764,7 @@ pub const Index = struct {
         const out = try a.alloc(storem.EventRow, n);
         for (rows.items[0..n], out) |r, *o| o.* = .{
             .name = try a.dupe(u8, r.name),
-            .place = .{ .n = r.place.n, .seq = r.place.seq, .i = r.place.i, .thread = try a.dupe(u8, r.place.thread) },
+            .place = .{ .s = r.place.s, .i = r.place.i, .thread = try a.dupe(u8, r.place.thread) },
             .record = try a.dupe(u8, r.record),
         };
         return out;
@@ -823,10 +840,15 @@ pub const Index = struct {
         .events = eventsFn,
         .subscribers = subscribersFn,
         .restingOn = restingOnFn,
+        .lastStep = lastStepFn,
     };
 
+    fn lastStepFn(ctx: *anyopaque) anyerror!i64 {
+        return self(ctx).work.steps;
+    }
+
     /// 0.5.4: the threads resting on event name `name` (the waits index), in the order they began
-    /// resting (the entry, then the origin's bytes).
+    /// resting (0.8.0: the step number of the update that began it).
     fn restingOnFn(ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![][]u8 {
         const ix = self(ctx);
         const s = ix.scratch();

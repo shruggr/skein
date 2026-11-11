@@ -81,8 +81,8 @@ const r = new Router({
   log: (s: string, l: string) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 
-type Heard = { box: string; fn: string; event: CID; place: { n: number; seq: number; i: number; thread: CID }; prev: CID | null };
-const idOfPlace = (p: { n: number; seq: number; i: number; thread: CID }) => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+type Heard = { box: string; fn: string; event: CID; place: { s: number; i: number; thread: CID }; prev: CID | null };
+const idOfPlace = (p: { s: number; i: number; thread: CID }) => `${p.s}.${p.i}.${p.thread}`;
 
 try {
   await r.listen(0);

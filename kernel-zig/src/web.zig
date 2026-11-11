@@ -228,11 +228,10 @@ fn pEmit(_: *anyopaque, o: scheduler.Outgoing) void {
     m.put("body", .{ .bytes = o.body }) catch return;
     m.put("transport", cbor.string(o.transport)) catch return;
     m.put("address", cbor.string(o.address)) catch return;
-    // #148: an event's place in the log, beside the record: {n, seq, i, thread}.
+    // #148: an event's place in the log, beside the record: {s, i, thread} (0.8.0).
     if (o.place) |pl| {
         var at = cbor.MapBuilder.init(a);
-        at.put("n", cbor.int(pl.n)) catch return;
-        at.put("seq", cbor.int(pl.seq)) catch return;
+        at.put("s", cbor.int(pl.s)) catch return;
         at.put("i", cbor.int(pl.i)) catch return;
         at.put("thread", cbor.cidv(pl.thread)) catch return;
         m.put("place", at.value()) catch return;

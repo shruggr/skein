@@ -878,8 +878,7 @@ const Host = struct {
         m.put("address", cbor.string(o.address)) catch return;
         if (o.place) |pl| {
             var at = cbor.MapBuilder.init(a);
-            at.put("n", cbor.int(pl.n)) catch return;
-            at.put("seq", cbor.int(pl.seq)) catch return;
+            at.put("s", cbor.int(pl.s)) catch return;
             at.put("i", cbor.int(pl.i)) catch return;
             at.put("thread", cbor.cidv(pl.thread)) catch return;
             m.put("place", at.value()) catch return;

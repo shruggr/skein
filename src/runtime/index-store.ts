@@ -170,8 +170,8 @@ export function indexedName(rec: unknown): string | undefined {
   return name.split("/")[0] === rec.app ? name : undefined;
 }
 
-/** An event's place in the log: the entry its step processed, the update's seq, its index in `emitted`, the thread. */
-export interface EventPlace { n: number; seq: number; i: number; thread: CID }
+/** An event's place (0.8.0): the instance's step number of the update listing it (`s`, its `ord`), its index in `emitted`, the thread (ordering nothing: it finds the update). */
+export interface EventPlace { s: number; i: number; thread: CID }
 /** A read of the event index (store.zig EventsQuery). */
 export interface EventsQuery { name: string; prefix?: boolean; after?: EventPlace; limit?: number; latest?: boolean }
 /** One indexed event. */
@@ -180,8 +180,8 @@ export interface EventRow { name: string; place: EventPlace; record: CID }
 /** A subscription's key in the `on` map (0.5.2, index.zig writeOn): the name, a 0, the {kind: "on"} chain's update seq. */
 export const onKey = (name: string, seq: number): Uint8Array => cat(new TextEncoder().encode(name), Uint8Array.of(0), be64(seq));
 
-/** A place as the index orders it: n ‖ seq ‖ i ‖ thread. */
-export const placeKey = (p: EventPlace): Uint8Array => cat(be64(p.n), be64(p.seq), be64(p.i), p.thread.bytes);
+/** A place as the index orders it: s ‖ i ‖ thread. */
+export const placeKey = (p: EventPlace): Uint8Array => cat(be64(p.s), be64(p.i), p.thread.bytes);
 /** An event index key: the name, a 0, the place. */
 export const eventKey = (name: string, p: EventPlace): Uint8Array => cat(new TextEncoder().encode(name), Uint8Array.of(0), placeKey(p));
 
@@ -195,7 +195,7 @@ export function readEvents(trees: Trees, root: CID | null, q: EventsQuery): Even
     const z = k.indexOf(0);
     const rest = k.subarray(z + 1);
     if (after && compare(rest, after) <= 0) continue;
-    const r = { name: new TextDecoder().decode(k.subarray(0, z)), place: { n: readBe64(rest, 0), seq: readBe64(rest, 8), i: readBe64(rest, 16), thread: fromBytes(rest.subarray(24)) }, record: v as CID, key: rest };
+    const r = { name: new TextDecoder().decode(k.subarray(0, z)), place: { s: readBe64(rest, 0), i: readBe64(rest, 8), thread: fromBytes(rest.subarray(16)) }, record: v as CID, key: rest };
     if (q.latest && rows.length && rows[rows.length - 1]!.name === r.name) { rows[rows.length - 1] = r; continue; }
     rows.push(r);
   }
@@ -351,12 +351,12 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
       const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
       edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
-      // 0.5.0: the facts the update lists in `emitted` (index.zig writeEvents).
-      if (Array.isArray(u.emitted)) for (const [j, x] of u.emitted.entries()) {
+      // 0.5.0: the facts the update lists in `emitted` (index.zig writeEvents), 0.8.0: at the update's step number (`ord`).
+      const ord = ordOf(u);
+      if (ord > 0 && Array.isArray(u.emitted)) for (const [j, x] of u.emitted.entries()) {
         if (!isCID(x)) continue;
         const name = indexedName(await store.get(x).catch(() => undefined));
-        const n = isCID(u.input) ? nOf.get(fmt(u.input)) : undefined;
-        if (name !== undefined && n !== undefined) pairs.events.push([eventKey(name, { n, seq: i + 1, i: j, thread: origin }), x]);
+        if (name !== undefined) pairs.events.push([eventKey(name, { s: ord, i: j, thread: origin }), x]);
       }
       // A kept bitcoin transaction's inputs (#42): from the block itself at seq 0; headers and merkle nodes none.
       for (const k of keptCids) {
@@ -377,16 +377,20 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
     if (kind === "thread") {
       const at = be64(numKey(o.at));
       pairs.threads.push([cat(at, origin.bytes), null]);
-      if (t?.state !== "finished") pairs.resting.push([cat(at, origin.bytes), null]);
+      // 0.8.0: by the tip's step number (index.zig threadKeys).
+      if (t?.state !== "finished") pairs.resting.push([cat(be64(t ? ordOf(t) : 0), origin.bytes), null]);
       if (t && t.state === "waiting" && typeof t.until === "number") pairs.sleepers.push([cat(be64(numKey(t.until)), origin.bytes), null]);
       if (t && Array.isArray(t.awaits)) for (const c of t.awaits) if (isCID(c)) pairs.awaits.push([cat(c.bytes, at, origin.bytes), null]);
-      // 0.5.4: a waiting thread resting on event names (index.zig threadKeys): name ‖ 0 ‖ the entry it began resting at ‖ origin.
-      if (t && t.state === "waiting" && Array.isArray(t.restsOn)) for (const r of t.restsOn as Obj[]) if (isObj(r) && typeof r.name === "string") pairs.awaits.push([cat(new TextEncoder().encode(r.name), Uint8Array.of(0), be64(numKey(r.n)), origin.bytes), null]);
+      // 0.5.4: a waiting thread resting on event names (index.zig threadKeys): name ‖ 0 ‖ (0.8.0) the step number that began the rest ‖ origin.
+      if (t && t.state === "waiting" && Array.isArray(t.restsOn)) for (const r of t.restsOn as Obj[]) if (isObj(r) && typeof r.name === "string") pairs.awaits.push([cat(new TextEncoder().encode(r.name), Uint8Array.of(0), be64(numKey(r.s)), origin.bytes), null]);
     } else if (kind === "head" && t && typeof o.name === "string" && isCID(t.tree)) pairs.heads.push([strKey(o.name), t.tree]);
   }
   for (const [, e, u] of unique.values()) pairs.unique.push([u, e]);
   return { pairs, log: tip, cursor: await store.live.cursor.get() };
 }
+
+/** A thread update's step number (0.8.0, index.zig ordOf): its `ord`, 0 when it has none. */
+const ordOf = (u: Obj): number => (typeof u.ord === "number" && u.ord > 0 ? u.ord : typeof u.ord === "bigint" && u.ord > 0n ? Number(u.ord) : 0);
 
 /** A request's thread (#68, scheduler.zig isRequestThread): the middleware launched by the request record it names. */
 function isRequestThread(o: Obj): boolean {

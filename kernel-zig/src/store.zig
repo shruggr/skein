@@ -32,10 +32,11 @@ pub const AppendResult = union(enum) { ok: []u8, rejected: struct { reason: Reje
 /// #42) — the link's position there (`ord`), its rel and locator.
 pub const Edge = struct { from: []u8, seq: i64, ord: i64, rel: []u8, locator: ?Value };
 
-/// An event's place in the log (0.5.0, the event index): the entry its step processed (`n`), the
-/// step's update in its thread (`seq`), the record's index in the update's `emitted` (`i`), the
-/// thread's origin (binary CID) — the stream's id `<n>.<seq>.<i>.<thread>`.
-pub const Place = struct { n: i64, seq: i64, i: i64, thread: []const u8 };
+/// An event's place (0.8.0): the instance's step number of the update that lists it (`s`: every
+/// thread update the scheduler appends takes the next one, its `ord`), the record's index in that
+/// update's `emitted` (`i`) — the order, `s` then `i` — and the thread's origin (binary CID), which
+/// orders nothing: it finds the update. The stream's id `<s>.<i>.<thread>`.
+pub const Place = struct { s: i64, i: i64, thread: []const u8 };
 
 /// A read of the event index (0.5.0): the events under `name` exactly, or (`prefix`) every name
 /// that starts with it; only those strictly after `after`; with `latest`, the last per name; at
@@ -94,6 +95,8 @@ pub const VTable = struct {
     subscribers: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![]Subscriber,
     /// 0.5.4: the threads resting on event name `name` (index.zig `awaits`), in the order they began resting.
     restingOn: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror![][]u8,
+    /// 0.8.0: the greatest step number (`ord`) of any thread update so far; 0: none.
+    lastStep: *const fn (ctx: *anyopaque) anyerror!i64,
 };
 
 pub const Store = struct {
@@ -198,6 +201,9 @@ pub const Store = struct {
     }
     pub fn subscribers(s: Store, a: std.mem.Allocator, name: []const u8) ![]Subscriber {
         return s.vt.subscribers(s.ctx, a, name);
+    }
+    pub fn lastStep(s: Store) !i64 {
+        return s.vt.lastStep(s.ctx);
     }
     pub fn restingOn(s: Store, a: std.mem.Allocator, name: []const u8) ![][]u8 {
         return s.vt.restingOn(s.ctx, a, name);

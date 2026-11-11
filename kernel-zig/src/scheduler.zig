@@ -150,12 +150,12 @@ pub const Witness = struct {
 /// CID is the message's id), `body` its body's — or (#65) an event, transport
 /// `event`, `address` its name (`broadcast`, or any other, #119): `message`
 /// the event record's dag-cbor, `body` a broadcast's transaction bytes (empty
-/// for any other event). `place` (#148): an event's place in the log — the
-/// entry its step processed (`n`), the update's `seq` in its thread, the
-/// record's index in the update's `emitted` (`i`), the thread's origin —
+/// for any other event). `place` (#148; 0.8.0): an event's place — the
+/// instance's step number of the update listing it (`s`, its `ord`), the
+/// record's index in that update's `emitted` (`i`), the thread's origin —
 /// carried in the notice beside the record, never in it; null for a message.
 pub const Outgoing = struct { message: []const u8, body: []const u8, transport: []const u8, address: []const u8, place: ?Place = null };
-pub const Place = struct { n: i64, seq: i64, i: i64, thread: []const u8 };
+pub const Place = @import("store.zig").Place;
 
 /// The peers the runtime calls out to (all optional; replay has none but the witness).
 pub const Peers = struct {
@@ -359,7 +359,7 @@ pub const Runtime = struct {
             .body = try rt.gpa.dupe(u8, tx),
             .transport = try rt.gpa.dupe(u8, "event"),
             .address = try rt.gpa.dupe(u8, name),
-            .place = if (place) |p| .{ .n = p.n, .seq = p.seq, .i = p.i, .thread = try rt.gpa.dupe(u8, p.thread) } else null,
+            .place = if (place) |p| .{ .s = p.s, .i = p.i, .thread = try rt.gpa.dupe(u8, p.thread) } else null,
         });
     }
 
@@ -370,19 +370,20 @@ pub const Runtime = struct {
         return rt.placeIn(a, c, tip, thread);
     }
 
-    /// #148: where event record `c` is in the log, in update `tip` of `thread` (the update that
-    /// listed it): its input entry's `n`, its `seq`, the record's index in its `emitted`. Null when
-    /// the update does not list it.
+    /// #148: where event record `c` is, in update `tip` of `thread` (the update that listed it):
+    /// 0.8.0: the update's step number (`ord`), the record's index in its `emitted`. Null when the
+    /// update does not list it, or is no thread run's (no `ord`).
     fn placeIn(rt: *Runtime, a: std.mem.Allocator, c: []const u8, tip: Value, thread: []const u8) !?Place {
         const emitted = tip.get("emitted") orelse return null;
         if (emitted != .array) return null;
         const i = for (emitted.array, 0..) |x, k| {
             if (std.mem.eql(u8, Value.cidOf(x) orelse continue, c)) break k;
         } else return null;
-        const seq = Value.intOf(tip.get("seq")) orelse return null;
-        const entry = rt.store.getOpt(a, Value.cidOf(tip.get("input")) orelse return null) orelse return null;
-        const n = Value.intOf(entry.get("n")) orelse return null;
-        return .{ .n = @intCast(n), .seq = @intCast(seq), .i = @intCast(i), .thread = thread };
+        _ = rt;
+        _ = a;
+        const ord = Value.intOf(tip.get("ord")) orelse return null;
+        if (ord <= 0) return null;
+        return .{ .s = @intCast(ord), .i = @intCast(i), .thread = thread };
     }
 
     /// How a message to `to` goes out: its address book entry (`root`). A
@@ -1300,7 +1301,7 @@ pub const Runtime = struct {
     /// `on` a step made, on.zig), in the order they were made: each a thread launched by the event
     /// record under the entry that drove the emitting step, its program the subscribing app's
     /// role as its record names it now (`<app>/app`; none: nothing runs), its args {event, box:
-    /// <the name>, fn, place: {n, seq, i, thread}} (the place makes two like records two threads).
+    /// <the name>, fn, place: {s, i, thread}} (the place makes two like records two threads).
     /// The subscriptions as they stand after the emitting step. No gate: the app chose its own
     /// function. A function of the update and the state: replay launches the same threads; a step
     /// run again (an entry reprocessed after a crash: everything it derived is committed with the
@@ -1317,8 +1318,7 @@ pub const Runtime = struct {
                 continue;
             };
             var p = cbor.MapBuilder.init(a);
-            try p.put("n", cbor.int(place.n));
-            try p.put("seq", cbor.int(place.seq));
+            try p.put("s", cbor.int(place.s));
             try p.put("i", cbor.int(place.i));
             try p.put("thread", cbor.cidv(place.thread));
             var info = cbor.MapBuilder.init(a);
@@ -1343,7 +1343,7 @@ pub const Runtime = struct {
     /// 0.5.4: a fact a step emitted, `ev` under `name`, wakes every thread resting on the name (its
     /// step called `on(name)` with no fn, on.zig): in the order they began resting (the waits index,
     /// index.zig `awaits`, keyed name ‖ 0 ‖ the entry it began resting at ‖ origin), each stepped at
-    /// the emitting entry with `event` {event, box: <the name>, place: {n, seq, i, thread}} beside
+    /// the emitting entry with `event` {event, box: <the name>, place: {s, i, thread}} beside
     /// its own context, and resting on the name again (stepBody carries `restsOn`). A function of
     /// the update and the state: replay steps the same threads.
     fn wakeResting(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, ev: []const u8, name: []const u8, place: Place) !void {
@@ -1354,8 +1354,7 @@ pub const Runtime = struct {
             const tip = rt.tipOf(a, t) catch null orelse continue;
             if (!stateIs(tip, "waiting") or !restsOnName(tip, name)) continue;
             var p = cbor.MapBuilder.init(a);
-            try p.put("n", cbor.int(place.n));
-            try p.put("seq", cbor.int(place.seq));
+            try p.put("s", cbor.int(place.s));
             try p.put("i", cbor.int(place.i));
             try p.put("thread", cbor.cidv(place.thread));
             var info = cbor.MapBuilder.init(a);
@@ -1368,7 +1367,7 @@ pub const Runtime = struct {
         }
     }
 
-    /// 0.5.4: whether a waiting update rests on `name` (its `restsOn`: [{name, n}]).
+    /// 0.5.4: whether a waiting update rests on `name` (its `restsOn`: [{name, s}]).
     fn restsOnName(tip: Value, name: []const u8) bool {
         const l = tip.get("restsOn") orelse return false;
         if (l != .array) return false;
@@ -2203,8 +2202,8 @@ pub const Runtime = struct {
         /// step's `events` reads see beside the index (program.zig eventsRows).
         facts: std.array_list.Managed(program.PendingFact),
         fact_names: std.StringHashMap(std.ArrayListUnmanaged(u32)),
-        /// The entry's `n` (the place's first part); null: an entry without one (nothing is indexed).
-        entry_n: ?i64 = null,
+        /// 0.8.0: the instance's step number this step's update takes (its facts' place `s`).
+        ord: i64,
         /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
         subscribed: bool = false,
         /// 0.5.2: the `on` / `off` calls the step made, in order (on.zig): kept when it ends without error.
@@ -2262,6 +2261,8 @@ pub const Runtime = struct {
                 try m.put("state", cbor.string("errored"));
                 try m.put("input", cbor.cidv(ctx.cid));
                 try m.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
+                // 0.8.0: the instance's next step number, as any thread update the scheduler appends.
+                try m.put("ord", cbor.int((try rt.store.lastStep()) + 1));
                 try m.put("fuel", cbor.int(meter.used()));
                 if (calls.items.len > 0) try m.put("calls", try cbor.cidArray(a, calls.items));
                 var em = cbor.MapBuilder.init(a);
@@ -2317,13 +2318,9 @@ pub const Runtime = struct {
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
         const n: i64 = @intCast(1 + if (try rt.store.chainUpdates(a, origin)) |us| us.len else 0);
         const tip_cid = (try rt.store.chainTip(a, origin)).?;
-        // 0.8.0: the step's own facts are read at the place its update will give them, `seq` = `n`
-        // (chainAppend: the tip's seq + 1). An invariant: were it ever otherwise, the step fails here,
-        // before it runs, rather than answer a place the index will not hold.
-        {
-            const tip_seq: i128 = if (std.mem.eql(u8, tip_cid, origin)) 0 else Value.intOf((try rt.getOrNotFound(a, tip_cid)).get("seq")) orelse -1;
-            if (tip_seq + 1 != n) return rt.failf(a, "the thread's tip is at seq {d}, its step {d}: the place of this step's facts is not known", .{ tip_seq, n });
-        }
+        // 0.8.0: the instance's step number this step's update takes (`ord`): the next one. Its facts
+        // are read in the step at that place, and the index gives them the same.
+        const ord: i64 = (try rt.store.lastStep()) + 1;
         const time = logm.stampOf(ctx.e.get("time")).?;
         const at = time.ms();
         const g = rt.genesis.?;
@@ -2385,7 +2382,7 @@ pub const Runtime = struct {
             .emitted_at = .init(a),
             .facts = .init(a),
             .fact_names = .init(a),
-            .entry_n = if (Value.intOf(ctx.e.get("n"))) |x| @intCast(x) else null,
+            .ord = ord,
             .ons = .init(a),
             .rests = .init(a),
         };
@@ -2443,19 +2440,25 @@ pub const Runtime = struct {
         };
 
         if (rt.stopped) return .{ .launched = &.{}, .rested = false };
+        // 0.8.0: an invariant, checked before anything of the step is written: no thread update was
+        // appended while its program ran (in-VM calls append none), so its update takes `ord`, the
+        // place its facts were read at. Were it ever otherwise the step fails here, nothing written.
+        {
+            const now = try rt.store.lastStep();
+            if (now + 1 != ord) return rt.failf(a, "the instance's step number moved to {d} while step {d} ran: the place of its facts is not known", .{ now, ord });
+        }
         // 0.5.4: the names the thread rests on — its tip's `restsOn`, then the names this step's
-        // `on(name)` added, each with the entry it began resting at; a woken thread rests again.
+        // `on(name)` added, each with (0.8.0) the step number that began the rest; a woken thread rests again.
         var rests = std.array_list.Managed(Value).init(a);
         if (out.exit_code == 0) {
             if (!std.mem.eql(u8, tip_cid, origin)) if (try rt.store.get(a, tip_cid)) |tv| if (tv.get("restsOn")) |l| if (l == .array) for (l.array) |x| try rests.append(x);
-            const en = Value.intOf(ctx.e.get("n")) orelse 0;
             for (st.rests.items) |nm| {
                 var has = false;
                 for (rests.items) |x| has = has or std.mem.eql(u8, Value.str(x.get("name")) orelse "", nm);
                 if (has) continue;
                 var r = cbor.MapBuilder.init(a);
                 try r.put("name", cbor.string(nm));
-                try r.put("n", cbor.int(en));
+                try r.put("s", cbor.int(ord));
                 try rests.append(r.value());
             }
         }
@@ -2482,6 +2485,7 @@ pub const Runtime = struct {
         var u = cbor.MapBuilder.init(a);
         try u.put("state", cbor.string(state));
         try u.put("step", cbor.int(n));
+        try u.put("ord", cbor.int(ord));
         try u.put("input", cbor.cidv(ctx.cid));
         try u.put("at", cbor.int(at));
         try u.put("fuel", cbor.int(meter.used()));
@@ -2950,13 +2954,13 @@ pub const Runtime = struct {
         if (st.emitted_at.contains(c)) return c;
         try appendEmitted(st, c);
         // 0.8.0: a fact (as index.zig writeEvents takes it) is seen by the step's own `events` reads.
-        if (st.entry_n != null) if (logm.indexedName(rec)) |name| {
+        if (logm.indexedName(rec)) |name| {
             const k: u32 = @intCast(st.facts.items.len);
             try st.facts.append(.{ .name = name, .i = @intCast(st.emitted.items.len - 1), .record = c });
             const g = try st.fact_names.getOrPut(name);
             if (!g.found_existing) g.value_ptr.* = .empty;
             try g.value_ptr.append(st.a, k);
-        };
+        }
         return c;
     }
 
@@ -3088,7 +3092,7 @@ pub const Runtime = struct {
     /// its in-VM callees, one `emitted`) emitted so far, at the places its update will give them.
     fn hEvents(imp: *program.Imports, query: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
-        const pending: ?program.Pending = if (st.entry_n) |en| .{ .n = en, .seq = st.n, .thread = st.origin, .facts = st.facts.items, .by_name = &st.fact_names } else null;
+        const pending: ?program.Pending = .{ .s = st.ord, .thread = st.origin, .facts = st.facts.items, .by_name = &st.fact_names };
         return eventsAnswer(imp, st.a, st.rt.store, query, pending);
     }
 
@@ -3721,6 +3725,9 @@ pub const Runtime = struct {
         t.state = state;
         if (t.pos < t.history.len) {
             const existing = t.history[t.pos];
+            // 0.8.0: re-executing, the update is the recorded one, its step number with it.
+            const ev = rt.store.getOpt(a, existing) orelse return error.NotFound;
+            try m.put("ord", ev.get("ord") orelse .null);
             const prev = if (t.pos == 0) t.origin else t.history[t.pos - 1];
             var full = cbor.MapBuilder.init(a);
             for (m.list.items) |e| try full.put(e.key, e.value);
@@ -3735,6 +3742,8 @@ pub const Runtime = struct {
             t.pos += 1;
             return;
         }
+        // 0.8.0: a shell's update is a thread run's, numbered as a step's: the instance's next.
+        try m.put("ord", cbor.int((try rt.store.lastStep()) + 1));
         const c = try rt.store.chainAppend(a, t.origin, m.value());
         const hist = try a.alloc([]const u8, t.history.len + 1);
         @memcpy(hist[0..t.history.len], t.history);

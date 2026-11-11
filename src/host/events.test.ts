@@ -34,9 +34,10 @@ test("events: the path (a name, or a prefix with a trailing /) and the query (af
   assert.ok("problem" in q("/events/amm/x", "limit=0")!, "limit 0");
   assert.ok("problem" in q("/events/amm/x", "latest=yes")!, "latest");
   assert.ok("problem" in q("/events/amm/x", "after=nonsense")!, "an after that is no place");
-  const after = q("/events/amm/x", "after=1.1.1." + T, `7.2.0.${T}`) as { after: { n: number } };
-  assert.equal(after.after.n, 7, "Last-Event-ID wins over after");
-  assert.deepEqual(placeOf(`7.2.1.${T}`), { n: 7, seq: 2, i: 1, thread: CID.parse(T) });
+  const after = q("/events/amm/x", "after=1.1." + T, `7.0.${T}`) as unknown as { after: { s: number } };
+  assert.equal(after.after.s, 7, "Last-Event-ID wins over after");
+  assert.deepEqual(placeOf(`7.1.${T}`), { s: 7, i: 1, thread: CID.parse(T) });
+  assert.equal(placeOf(`7.2.1.${T}`), undefined, "0.8.0: a four-part id (n.seq.i.thread) of before is no place");
 });
 
 test("events: a live event is sent from the notice, its id from its place — no store read; an intention or another name not; one handed over again not sent again; one during the read after it", async () => {
@@ -46,17 +47,17 @@ test("events: a live event is sent from the notice, its id from its place — no
   const rec = (event: string, value: number, app = "amm") => ({ kind: "event", event, app, value });
   const got: string[] = [];
   const p = streams.subscribe("x", { name: "amm/price/", prefix: true }, (d) => got.push(`${d.id} ${d.event} ${d.data}`), () => {});
-  streams.emitted("x", rec("amm/price/a", 1), { n: 5, seq: 2, i: 0, thread }); // while the read runs
+  streams.emitted("x", rec("amm/price/a", 1), { s: 5, i: 0, thread }); // while the read runs
   await p;
-  streams.emitted("x", rec("amm/price/a", 2), { n: 6, seq: 3, i: 0, thread });
-  streams.emitted("x", rec("amm/price/a", 2), { n: 6, seq: 3, i: 0, thread }); // handed over again (a start)
-  streams.emitted("x", rec("amm/volume/a", 3), { n: 7, seq: 4, i: 0, thread });
-  streams.emitted("x", rec("subscribe", 4), { n: 7, seq: 4, i: 1, thread });
-  streams.emitted("x", rec("amm/price/b", 5, "other"), { n: 7, seq: 4, i: 2, thread }); // not under its app: no fact
+  streams.emitted("x", rec("amm/price/a", 2), { s: 6, i: 0, thread });
+  streams.emitted("x", rec("amm/price/a", 2), { s: 6, i: 0, thread }); // handed over again (a start)
+  streams.emitted("x", rec("amm/volume/a", 3), { s: 7, i: 0, thread });
+  streams.emitted("x", rec("subscribe", 4), { s: 7, i: 1, thread });
+  streams.emitted("x", rec("amm/price/b", 5, "other"), { s: 7, i: 2, thread }); // not under its app: no fact
   assert.equal(opens, 1, "the store opened once, for the read");
   assert.deepEqual(got, [
-    `5.2.0.${thread} amm/price/a {"app":"amm","event":"amm/price/a","kind":"event","value":1}`,
-    `6.3.0.${thread} amm/price/a {"app":"amm","event":"amm/price/a","kind":"event","value":2}`,
+    `5.0.${thread} amm/price/a {"app":"amm","event":"amm/price/a","kind":"event","value":1}`,
+    `6.0.${thread} amm/price/a {"app":"amm","event":"amm/price/a","kind":"event","value":2}`,
   ]);
 });
 
@@ -104,7 +105,7 @@ test("events: GET /events/<name path> — the index read from the store (name, p
   assert.deepEqual(vals(await read("eva/price/", "latest=1")), ["eva/price/tok2=2", "eva/price/tok1=3"], "latest: the last per name");
   assert.deepEqual(vals(await read("", "limit=2")), ["eva/price/tok1=1", "eva/price/tok2=2"], "every name, the first two");
   const all = await read("eva/");
-  assert.match(all[0]!.id, /^\d+\.\d+\.\d+\.b[a-z2-7]+$/, `the id is the event's place <n>.<seq>.<i>.<thread>: ${all[0]!.id}`);
+  assert.match(all[0]!.id, /^\d+\.\d+\.b[a-z2-7]+$/, `the id is the event's place <s>.<i>.<thread>: ${all[0]!.id}`);
   assert.deepEqual(all[0]!.record, { kind: "event", event: "eva/price/tok1", app: "eva", value: 1 }, "the record, as DAG-JSON");
   assert.deepEqual(vals(await read("eva/", `after=${all[0]!.id}`)), ["eva/price/tok2=2", "eva/price/tok1=3"], "after the place");
   assert.equal((await fetch(url("eva//x"))).status, 400, "a bad name: 400");

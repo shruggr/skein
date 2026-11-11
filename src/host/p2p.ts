@@ -418,12 +418,13 @@ export async function beaconsOf(store: Pick<Store, "get" | "chains" | "edges">):
 }
 
 /**
- * An emitted event's place in the log (the fold order, subscriptions.zig): the entry its step
- * processed (`n`, the update's `input`), the step's time (`at`, the update's), its thread (origin),
- * its place in the thread (`seq`), the event record's place in the update's `emitted` (`i`) and
- * the record's CID.
+ * An emitted event's place in the log: the entry its step processed (`n`, the update's `input`),
+ * the step's time (`at`, the update's), its thread (origin), its place in the thread (`seq`), the
+ * event record's place in the update's `emitted` (`i`), the record's CID, and (0.8.0) the
+ * instance's step number of the update (`s`, its `ord`): the fold order (subscriptions.zig) is
+ * `s`, then `i`.
  */
-export interface EmittedAt { n: number; at: number; thread: CID; seq: number; i: number; record: CID }
+export interface EmittedAt { n: number; at: number; thread: CID; seq: number; i: number; record: CID; s: number }
 
 /** The event records the steps' updates list in `emitted` that `read` takes, in log order (the kernel's fold order, subscriptions.zig); `read` gets each one's place too. */
 export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>, place: EmittedAt) => T | undefined): Promise<T[]> {
@@ -436,10 +437,9 @@ export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "ed
     if (n === undefined) { const e = await store.get(input).catch(() => undefined) as Obj | undefined; n = typeof e?.n === "number" ? e.n : -1; ns.set(k, n); }
     return n;
   };
-  const found: Array<{ key: number[]; thread: Uint8Array; e: T }> = [];
+  const found: Array<{ key: number[]; e: T }> = [];
   for await (const origin of store.edges.query({ kind: "thread" })) {
-    const o = await store.get(origin) as Obj;
-    const thread: CID = origin, threadBytes = origin.bytes;
+    const thread: CID = origin;
     let seq = 0;
     for await (const c of store.chains.history(origin)) {
       if (c.equals(origin)) continue;
@@ -450,20 +450,15 @@ export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "ed
         if (!isCid(x)) continue;
         const rec = await store.get(x).catch(() => undefined) as Obj | undefined;
         if (rec?.kind !== "event") continue;
-        const n = await nOf(u.input), at = Number(u.at ?? 0);
-        const e = read(rec, { n, at, thread, seq, i, record: x });
+        const n = await nOf(u.input), at = Number(u.at ?? 0), s = Number(u.ord ?? 0);
+        const e = read(rec, { n, at, thread, seq, i, record: x, s });
         if (e === undefined) continue;
-        found.push({ key: [n, at, Number(o.at ?? 0), seq, i], thread: threadBytes, e });
+        found.push({ key: [s, i], e });
       }
     }
   }
-  const cmp = (x: (typeof found)[number], y: (typeof found)[number]) => {
-    for (let i = 0; i < 3; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!;
-    const t = Buffer.compare(x.thread, y.thread);
-    if (t) return t;
-    for (let i = 3; i < x.key.length; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!;
-    return 0;
-  };
+  // 0.8.0: the order the steps ran in (their step numbers), then the place in `emitted`.
+  const cmp = (x: (typeof found)[number], y: (typeof found)[number]) => (x.key[0]! - y.key[0]!) || (x.key[1]! - y.key[1]!);
   found.sort(cmp);
   return found.map((f) => f.e);
 }

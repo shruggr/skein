@@ -38,10 +38,10 @@
 //                                  its update will add); other kept records' refs appear
 //                                  from the next step on.
 //   events(q, len, out, cap) → n   (0.5.0) the event index (index.zig `events`): dag-cbor
-//                                  {name: <a name> | prefix: <a name prefix>, after?: {n,
-//                                  seq, i, thread: <cid>}, limit?, latest?: bool} → dag-cbor
-//                                  [{name, place: {n, seq, i, thread}, cid, record}] newest
-//                                  last: the facts emitted under that name (or every name
+//                                  {name: <a name> | prefix: <a name prefix>, after?: {s,
+//                                  i, thread: <cid>}, limit?, latest?: bool} → dag-cbor
+//                                  [{name, place: {s, i, thread}, cid, record}] newest
+//                                  last (0.8.0: by the instance's step number `s`, then `i`): the facts emitted under that name (or every name
 //                                  the prefix starts), strictly after `after`, the last per
 //                                  name with `latest`, the first `limit`. A read: a pure
 //                                  function of the log up to this step, plus (0.8.0) the
@@ -128,7 +128,7 @@ fn noEvents(imp: *Imports, _: []const u8) Err![]const u8 {
     return imp.failWith("events: this host keeps no index");
 }
 
-pub const EVENTS_WANT = "events: want {name: <a name> | prefix: <a name prefix>, after?: {n, seq, i, thread: <cid>}, limit?: <n > 0>, latest?: bool}";
+pub const EVENTS_WANT = "events: want {name: <a name> | prefix: <a name prefix>, after?: {s, i, thread: <cid>}, limit?: <n > 0>, latest?: bool}";
 
 /// The read's query (0.5.0) from its dag-cbor, or why it is not one.
 pub fn eventsQueryOf(a: std.mem.Allocator, bytes: []const u8) !union(enum) { ok: storem.EventsQuery, bad: []const u8 } {
@@ -140,11 +140,10 @@ pub fn eventsQueryOf(a: std.mem.Allocator, bytes: []const u8) !union(enum) { ok:
     var out = storem.EventsQuery{ .name = name orelse prefix.?, .prefix = prefix != null };
     if (q.get("after")) |x| if (x != .null) {
         if (x != .map) return .{ .bad = EVENTS_WANT };
-        const n = Value.intOf(x.get("n")) orelse return .{ .bad = EVENTS_WANT };
-        const seq = Value.intOf(x.get("seq")) orelse return .{ .bad = EVENTS_WANT };
+        const sn = Value.intOf(x.get("s")) orelse return .{ .bad = EVENTS_WANT };
         const i = Value.intOf(x.get("i")) orelse return .{ .bad = EVENTS_WANT };
         const t = Value.cidOf(x.get("thread")) orelse return .{ .bad = EVENTS_WANT };
-        out.after = .{ .n = @intCast(std.math.clamp(n, std.math.minInt(i64), std.math.maxInt(i64))), .seq = @intCast(std.math.clamp(seq, std.math.minInt(i64), std.math.maxInt(i64))), .i = @intCast(std.math.clamp(i, std.math.minInt(i64), std.math.maxInt(i64))), .thread = t };
+        out.after = .{ .s = @intCast(std.math.clamp(sn, std.math.minInt(i64), std.math.maxInt(i64))), .i = @intCast(std.math.clamp(i, std.math.minInt(i64), std.math.maxInt(i64))), .thread = t };
     };
     if (q.get("limit")) |x| if (x != .null) {
         const l = Value.intOf(x) orelse return .{ .bad = EVENTS_WANT };
@@ -164,20 +163,19 @@ pub fn eventsQueryOf(a: std.mem.Allocator, bytes: []const u8) !union(enum) { ok:
 pub const PendingFact = struct { name: []const u8, i: i64, record: []const u8 };
 
 /// 0.8.0: the facts the running step emitted so far, at the place its update will give them —
-/// the entry's `n`, the update's `seq` (the step's number), their `i`, the thread — each listed
-/// once (one per CID, in `i` order); `by_name`: name → indices into `facts`, in `i` order.
+/// the step's number `s` (its update's `ord`), their `i`, the thread — each listed once (one per
+/// CID, in `i` order); `by_name`: name → indices into `facts`, in `i` order.
 pub const Pending = struct {
-    n: i64,
-    seq: i64,
+    s: i64,
     thread: []const u8,
     facts: []const PendingFact,
     by_name: ?*const std.StringHashMap(std.ArrayListUnmanaged(u32)) = null,
 };
 
-/// The order of the event index (index.zig placeKey: n ‖ seq ‖ i ‖ thread).
+/// The order of the event index (index.zig placeKey: s ‖ i ‖ thread; the thread breaks no tie a
+/// real place has — (s, i) is one fact's).
 pub fn placeOrder(x: storem.Place, y: storem.Place) std.math.Order {
-    if (x.n != y.n) return std.math.order(x.n, y.n);
-    if (x.seq != y.seq) return std.math.order(x.seq, y.seq);
+    if (x.s != y.s) return std.math.order(x.s, y.s);
     if (x.i != y.i) return std.math.order(x.i, y.i);
     return std.mem.order(u8, x.thread, y.thread);
 }
@@ -188,11 +186,11 @@ pub fn placeOrder(x: storem.Place, y: storem.Place) std.math.Order {
 /// No pending fact matching: exactly the index's answer.
 pub fn eventsRows(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery, pending: ?Pending) ![]storem.EventRow {
     const pd = pending orelse return s.events(a, q);
-    // The step's own facts the query takes, in `i` order (so in place order: n, seq, thread are one).
+    // The step's own facts the query takes, in `i` order (so in place order: `s` is one).
     var mine = std.array_list.Managed(storem.EventRow).init(a);
     const take = struct {
         fn f(out: *std.array_list.Managed(storem.EventRow), p: Pending, qq: storem.EventsQuery, x: PendingFact) !void {
-            const place = storem.Place{ .n = p.n, .seq = p.seq, .i = x.i, .thread = p.thread };
+            const place = storem.Place{ .s = p.s, .i = x.i, .thread = p.thread };
             if (qq.after) |af| if (placeOrder(place, af) != .gt) return;
             try out.append(.{ .name = @constCast(x.name), .place = place, .record = @constCast(x.record) });
         }
@@ -269,7 +267,7 @@ pub fn eventsRows(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery, 
 }
 
 /// The answer of `events` (0.5.0): the index's rows for the query, each with its record, as
-/// dag-cbor [{name, place: {n, seq, i, thread}, cid, record}]; 0.8.0: in a step, with the step's
+/// dag-cbor [{name, place: {s, i, thread}, cid, record}]; 0.8.0: in a step, with the step's
 /// own facts so far (`pending`, eventsRows).
 pub fn eventsRead(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQuery) ![]u8 {
     return eventsReadWith(a, s, q, null);
@@ -280,8 +278,7 @@ pub fn eventsReadWith(a: std.mem.Allocator, s: storem.Store, q: storem.EventsQue
     const out = try a.alloc(Value, rows.len);
     for (rows, out) |r, *o| {
         var p = cbor.MapBuilder.init(a);
-        try p.put("n", cbor.int(r.place.n));
-        try p.put("seq", cbor.int(r.place.seq));
+        try p.put("s", cbor.int(r.place.s));
         try p.put("i", cbor.int(r.place.i));
         try p.put("thread", .{ .cid = r.place.thread });
         var m = cbor.MapBuilder.init(a);

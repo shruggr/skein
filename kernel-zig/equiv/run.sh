@@ -142,10 +142,15 @@ echo "== subscriptions (#119) and beacons (#126): two apps (programs/test/app-de
 echo "== the event index (skein 0.5.0): one router, two apps (programs/test/event-demo's module): a name not under the emitting app's own refused as emitted; evx's facts under three names; GET /@ix/events/<name path> (a name, a prefix, latest, after, limit) and evy's in-step read (the events import) the same rows; the stream the same read then live; replayed"
 "${node[@]}" "$kz/equiv/event-index.ts" || status=1
 
-echo "== a step reads its own facts (skein 0.8.0): one router, one app (programs/test/event-demo's module); emit then read in one step (a name, a prefix, latest), two records under one name, the same record twice, an in-VM callee's emits seen by its caller and the caller's by a callee, after and limit across the committed / pending boundary, latest + limit, an errored step leaves nothing, 2,500 and 5,000 emits with a read after each (linear) — each in-step answer the host's read once committed; replayed — on SQLite, on RocksDB and on the WASM host"
+echo "== a step reads its own facts (skein 0.8.0): one router, one app (programs/test/event-demo's module); emit then read in one step (a name, a prefix, latest), two records under one name, the same record twice, an in-VM callee's emits seen by its caller and the caller's by a callee, after and limit across the committed / pending boundary, latest + limit, an errored step leaves nothing, fact names of 300 and 9,000 bytes, 2,500 and 5,000 emits with a read after each (linear, the step's line bounded) — each in-step answer the host's read once committed; replayed — on SQLite, on RocksDB and on the WASM host"
 "${node[@]}" "$kz/equiv/events-own-step.ts" || status=1
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/events-own-step.ts" || status=1
 SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/events-own-step.ts" || status=1
+
+echo "== facts placed by the instance's step number (skein 0.8.0): one router, one app (programs/test/order-probe's module); in one entry an old resting thread raises a fact and a fresh subscription thread raises the same name after it — latest is the later (and the reverse); the step numbers follow the log; SSE resumed after the first gets the second; after a kernel restart a step is numbered after every one before; index-store.ts derives the events, resting and awaits maps; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/event-order.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/event-order.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/event-order.ts" || status=1
 
 echo "== subscriptions (skein 0.5.2): one router, three apps (programs/test/event-demo's module); on/off in a step, refused for a name that is no fact's or a role the app has not; two apps on one name stepped in the order made, another name not stepped, an on after a fact does not hear it, off stops delivery; a kernel killed in the middle of a delivery commits nothing of the entry and, restarted, steps each subscription once; index-store.ts derives the on map; replayed — on SQLite, on RocksDB and on the WASM host"
 "${node[@]}" "$kz/equiv/on-off.ts" || status=1

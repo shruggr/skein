@@ -43,7 +43,7 @@
 //                                         read from the store with no step and no fuel — the events under that
 //                                         name (a trailing `/`: every name the prefix starts), strictly after the
 //                                         place, the first n, or the last per name; newest last. JSON [{id: the
-//                                         event's place in the log (<n>.<seq>.<i>.<thread>), event: its name,
+//                                         event's place (<s>.<i>.<thread>: 0.8.0, the step number), event: its name,
 //                                         record: the record as DAG-JSON}]. With Accept: text/event-stream the same
 //                                         read as a Server-Sent Events stream (`id`, `event`, `data`), then each
 //                                         as handed over (its place in the kernel's notice: no store read);

@@ -1225,20 +1225,26 @@ key order is name, then (n, seq, i, thread). Programs read it with the
 ```
 events(q, len, out, cap) → n   preview1: skein.events(q, len, out, cap)
                                WIT:      events: func(query: list<u8>) -> result<list<u8>, string>
-q        dag-cbor {name: <a name> | prefix: <a prefix of names>, after?: {n, seq, i, thread: <cid>},
+q        dag-cbor {name: <a name> | prefix: <a prefix of names>, after?: {s, i, thread: <cid>},
                    limit?: <n ≥ 1>, latest?: bool}
-answer   dag-cbor [{name, place: {n, seq, i, thread: <cid>}, cid: <the record's CID>, record: <the record>}]
+answer   dag-cbor [{name, place: {s, i, thread: <cid>}, cid: <the record's CID>, record: <the record>}]
 ```
 
-Newest last: the facts under that name (or every name the prefix starts),
-strictly after `after`, with `latest` the last per name, the first `limit`.
+A fact's place (0.8.0) is `{s, i, thread}`: `s` the instance's step number
+of the update that lists it — every thread update the scheduler appends (a
+step's, an errored step's, a shell's) carries the next one as `ord`, so `s`
+is the order the steps ran in, whichever thread and whichever entry drove
+them — `i` its index in that update's `emitted`, and `thread` the thread's
+origin, which orders nothing (it finds the update). Newest last: the facts
+under that name (or every name the prefix starts), by `s` then `i`, strictly
+after `after`, with `latest` the last per name, the first `limit`.
 A read, a pure function of the log as it stands before this step's update,
 plus (0.8.0) the facts this step emitted so far — its in-VM callees' too, one
-step — at the places its update will give them (`n` the entry's, `seq` the
-step's number, `i` the index in `emitted`, the thread): the answer is exactly
-what the index gives once the update is written, merged by place, `after`,
-`latest` and `limit` applied alike. In a kernel `call` the committed index. Errors: `events: want {name: <a name> | prefix:
-<a name prefix>, after?: {n, seq, i, thread: <cid>}, limit?: <n > 0>,
+step — at the places its update will give them (`s` the step's own number,
+known before it runs): the answer is exactly what the index gives once the
+update is written, merged by place, `after`, `latest` and `limit` applied
+alike. In a kernel `call` the committed index. Errors: `events: want {name: <a name> | prefix:
+<a name prefix>, after?: {s, i, thread: <cid>}, limit?: <n > 0>,
 latest?: bool}` · `events: the query is not dag-cbor`. The host reads the same
 map from the store, no step (docs/MESSAGES.md "The event index (0.5.0)":
 `GET /events/<name path>`).

@@ -24,9 +24,10 @@
 //   goes or the instance stops. Last-Event-ID (the browser's EventSource sends
 //   it on reconnect) is `after`. One message per event:
 //
-//   id: <n>.<seq>.<i>.<thread>   the event's place in the log: the entry its step processed (`n`), the
-//                                step's update in its thread (`seq`), the record's index in the update's
-//                                `emitted` (`i`), the thread (its origin's CID)
+//   id: <s>.<i>.<thread>         the event's place (0.8.0): the instance's step number of the update
+//                                listing it (`s`), the record's index in that update's `emitted` (`i`)
+//                                — the order, `s` then `i` — and the thread (its origin's CID), which
+//                                orders nothing
 //   event: <name>                the event's name
 //   data: <the record>           the record as DAG-JSON, one line
 //
@@ -44,22 +45,22 @@ export type EventStore = Pick<Store, "bytes"> & { events?(q: EventsQuery): Event
 
 /** One event as the read and the stream send it. */
 export interface Delivered {
-  /** Its place: `<n>.<seq>.<i>.<thread>`. */
+  /** Its place: `<s>.<i>.<thread>`. */
   id: string;
   event: string;
   /** The record as DAG-JSON. */
   data: string;
 }
 
-/** The place of id `<n>.<seq>.<i>.<thread>`, or undefined. */
+/** The place of id `<s>.<i>.<thread>`, or undefined (0.8.0: a four-part id of before is none). */
 export function placeOf(id: string): EventPlace | undefined {
-  const m = /^(\d+)\.(\d+)\.(\d+)\.([a-z0-9]+)$/.exec(id);
+  const m = /^(\d+)\.(\d+)\.([a-z0-9]+)$/.exec(id);
   if (!m) return undefined;
-  try { return { n: Number(m[1]), seq: Number(m[2]), i: Number(m[3]), thread: CID.parse(m[4]!) }; } catch { return undefined; }
+  try { return { s: Number(m[1]), i: Number(m[2]), thread: CID.parse(m[3]!) }; } catch { return undefined; }
 }
 
-/** The id of the event at `p`: `<n>.<seq>.<i>.<thread>`. */
-export const idOf = (p: { n: number; seq: number; i: number; thread: CID }): string => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+/** The id of the event at `p`: `<s>.<i>.<thread>`. */
+export const idOf = (p: { s: number; i: number; thread: CID }): string => `${p.s}.${p.i}.${p.thread}`;
 
 /** GET /events/<path>: the route's path → the name (or prefix) read, or undefined when the route is not one. */
 export function eventsPath(route: string): { name: string; prefix: boolean } | { problem: string } | undefined {
@@ -82,7 +83,7 @@ export function eventsQuery(route: string, params: URLSearchParams, lastEventId?
   const after = lastEventId?.trim() || params.get("after") || undefined;
   if (after !== undefined) {
     const at = placeOf(after);
-    if (!at) return { problem: `after: ${JSON.stringify(after)} is not an event's place (<n>.<seq>.<i>.<thread>)` };
+    if (!at) return { problem: `after: ${JSON.stringify(after)} is not an event's place (<s>.<i>.<thread>)` };
     q.after = at;
   }
   const limit = params.get("limit");
@@ -177,7 +178,7 @@ export class EventStreams {
    * intention is not one); one handed over again (a start re-offers what a waiting thread awaits)
    * is not sent again.
    */
-  emitted(handle: string, rec: Record<string, unknown>, place: { n: number; seq: number; i: number; thread: CID }): void {
+  emitted(handle: string, rec: Record<string, unknown>, place: { s: number; i: number; thread: CID }): void {
     const subs = this.subs.get(handle);
     if (!subs?.size) return;
     const name = indexedName(rec);

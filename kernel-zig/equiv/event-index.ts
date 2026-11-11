@@ -83,7 +83,7 @@ const r = new Router({
 });
 
 type Row = { id: string; event: string; record: Record<string, unknown> };
-const idOfPlace = (p: { n: number; seq: number; i: number; thread: CID }) => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+const idOfPlace = (p: { s: number; i: number; thread: CID }) => `${p.s}.${p.i}.${p.thread}`;
 
 try {
   await r.listen(0);
@@ -131,7 +131,7 @@ try {
 
   const all = await read("");
   check(all.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/a=1,evx/pool/b=1,evx/output/o=2,evx/pool/a=3,evy/own=4", `GET /events/: every fact, newest last: ${all.map((x) => `${x.event}=${x.record.value}`).join(",")}`);
-  check(all.every((x) => /^\d+\.\d+\.\d+\.b[a-z2-7]+$/.test(x.id)), "each id is a place <n>.<seq>.<i>.<thread>");
+  check(all.every((x) => /^\d+\.\d+\.b[a-z2-7]+$/.test(x.id)), "each id is a place <s>.<i>.<thread> (0.8.0: the step number, the index in emitted, the thread)");
   const pool = await read("evx/pool/");
   check(pool.map((x) => `${x.event}=${x.record.value}`).join(",") === "evx/pool/a=1,evx/pool/b=1,evx/pool/a=3", "a prefix: the names it starts");
   const a = await read("evx/pool/a");
@@ -145,7 +145,7 @@ try {
   const stepRead = async (query: Record<string, unknown>) => {
     await send("evy", { kind: "event-demo-read", query });
     const h = await headRecord("evy/read");
-    const rows = dagCbor.decode(h!.answer as Uint8Array) as Array<{ name: string; place: { n: number; seq: number; i: number; thread: CID }; cid: CID; record: Record<string, unknown> }>;
+    const rows = dagCbor.decode(h!.answer as Uint8Array) as Array<{ name: string; place: { s: number; i: number; thread: CID }; cid: CID; record: Record<string, unknown> }>;
     return rows.map((x) => `${idOfPlace(x.place)} ${x.name} ${JSON.stringify(x.record.value)}`);
   };
   const hostRows = (rows: Row[]) => rows.map((x) => `${x.id} ${x.event} ${JSON.stringify(x.record.value)}`);
@@ -190,9 +190,9 @@ try {
   check(rp.status === 0 && /identical .*the source store reproduced exactly/.test(rp.stdout), `the store replays to itself exactly, the event index in the state CID (${BACKEND})`);
 }
 
-function placeOfId(id: string): { n: number; seq: number; i: number; thread: CID } {
-  const [n, seq, i, t] = id.split(".");
-  return { n: Number(n), seq: Number(seq), i: Number(i), thread: CID.parse(t!) };
+function placeOfId(id: string): { s: number; i: number; thread: CID } {
+  const [s, i, t] = id.split(".");
+  return { s: Number(s), i: Number(i), thread: CID.parse(t!) };
 }
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });

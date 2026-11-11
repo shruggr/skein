@@ -131,8 +131,8 @@ try {
     const ix = (await indexed("")).filter((e) => e.event.includes(`/${k}/`));
     const what = rest ? "the caller rests on its own first fact (delivered: the same thread stepped again before the rest are handed over)" : "caller and in-VM callee both emit";
     check(JSON.stringify(ix.map((e) => e.event)) === JSON.stringify(want), `${k}: the index holds the step's ${want.length} facts in emit order (${ix.map((e) => e.event).join(", ")})`);
-    check(new Set(ix.map((e) => e.id)).size === ix.length, `${k}: each at a place of its own in the index (${ix.map((e) => e.id.split(".").slice(0, 3).join(".")).join(" ")})`);
-    check(JSON.stringify(mine.map((e) => `${e.event} ${e.id}`)) === JSON.stringify(ix.map((e) => `${e.event} ${e.id}`)), `${k}: ${what}: the live stream delivers every fact, at the index's places (live: ${mine.map((e) => `${e.event}@${e.id.split(".").slice(0, 3).join(".")}`).join(", ")})`);
+    check(new Set(ix.map((e) => e.id)).size === ix.length, `${k}: each at a place of its own in the index (${ix.map((e) => e.id.split(".").slice(0, 2).join(".")).join(" ")})`);
+    check(JSON.stringify(mine.map((e) => `${e.event} ${e.id}`)) === JSON.stringify(ix.map((e) => `${e.event} ${e.id}`)), `${k}: ${what}: the live stream delivers every fact, at the index's places (live: ${mine.map((e) => `${e.event}@${e.id.split(".").slice(0, 2).join(".")}`).join(", ")})`);
     // Resume right after the second fact.
     const resumed = await stream(base, "", ix[1]!.id);
     await sleep(500);

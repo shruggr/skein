@@ -15,6 +15,8 @@
 //     boundary; `latest` with `limit` where a pending fact displaces the index's
 //     row for its name;
 //   - an errored step leaves nothing (no fact, no head);
+//   - fact names of 300 and 9,000 bytes: subscribed, emitted, read in the step and
+//     from the host, delivered; no host aborts (skein-sdk 0.21.1's prefix scan);
 //   - 2,500 then 5,000 emits in one step, a latest read after each: the time
 //     grows about linearly (the dedupe and the in-step read are O(1) per call);
 //     the step's log line is bounded (its first ids and the count) and no host
@@ -78,9 +80,9 @@ const r = new Router({
   log: (s: string, l: string) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 
-type Place = { n: number; seq: number; i: number; thread: CID };
+type Place = { s: number; i: number; thread: CID };
 type Row = { id: string; event: string; record: Record<string, unknown> };
-const idOfPlace = (p: Place) => `${p.n}.${p.seq}.${p.i}.${p.thread}`;
+const idOfPlace = (p: Place) => `${p.s}.${p.i}.${p.thread}`;
 
 try {
   await r.listen(0);
@@ -170,6 +172,16 @@ try {
     check((await hostRead("evy/h/x")).length === 0 && before!.cid === after!.cid, "an errored step: no fact indexed, no head moved");
   }
 
+  // ------------------------------------------------ long fact names (skein-sdk 0.21.1: any prefix length)
+  for (const len of [300, 9000]) {
+    const long = `evy/long${len}/${"x".repeat(len - `evy/long${len}/`.length)}`;
+    await send({ kind: "event-demo-on", name: long, fn: "heard" });
+    const r1 = await emitRead({ names: [long], value: len, query: { name: long } });
+    const heard = await headRecord("evy/heard");
+    check(r1.rows.length === 1 && vals(r1.rows) === `${long}=${len}` && (await hostRead(long)).length === 1, `a ${len}-byte fact name: read in its step and from the host`);
+    check(heard?.rec.box === long && !lines.some((l) => /SIGABRT|panic|exited/.test(l)), `a ${len}-byte fact name: delivered to its subscription; no host aborted`);
+  }
+
   // ------------------------------------------------ many emits in one step, a read after each
   {
     const time = async (count: number, name: string) => {
@@ -201,8 +213,8 @@ try {
 }
 
 function placeOfId(id: string): Place {
-  const [n, seq, i, t] = id.split(".");
-  return { n: Number(n), seq: Number(seq), i: Number(i), thread: CID.parse(t!) };
+  const [s, i, t] = id.split(".");
+  return { s: Number(s), i: Number(i), thread: CID.parse(t!) };
 }
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });

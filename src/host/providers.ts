@@ -137,8 +137,8 @@ export interface MailRecord {
 /** What the kernel hands over (the serve frame `emit`). */
 export interface Outgoing {
   message: MailRecord; body: Uint8Array; transport: string; address: string;
-  /** #148: an event's place in the log, beside the record (the kernel's notice): the entry its step processed, the update's seq, the index in `emitted`, the thread. */
-  place?: { n: number | bigint; seq: number | bigint; i: number | bigint; thread: CID };
+  /** #148 (0.8.0): an event's place, beside the record (the kernel's notice): the instance's step number of its update, the index in `emitted`, the thread. */
+  place?: { s: number | bigint; i: number | bigint; thread: CID };
 }
 
 /** The stock providers' names (each one's address on this host: `local`, <name>). */
@@ -180,7 +180,7 @@ export interface ProvidersOptions {
   /** The libp2p node's subscriptions (#119), beacons (#126) and liveness (#138): a `subscribe` / `unsubscribe` / `beacon` / `unbeacon` / `liveness` / `unliveness` record {kind: "event", event, app, topic, …} from `handle`. Absent: no libp2p node (dropped). */
   topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** #148: every event record {kind: "event", event, …} from `handle`, whatever its name, as it is handed over (after its step's commit), with its place in the log — sent on to the event streams (events.ts). Besides what its name is wired to. */
-  emitted?(handle: string, record: Record<string, unknown>, place: { n: number; seq: number; i: number; thread: CID }): void;
+  emitted?(handle: string, record: Record<string, unknown>, place: { s: number; i: number; thread: CID }): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
   /**
@@ -307,7 +307,7 @@ export class Providers {
   private event(handle: string, out: Outgoing): void {
     const m = out.message as unknown as Record<string, unknown>;
     const p = out.place;
-    if (p && m.kind === "event" && typeof m.event === "string") this.o.emitted?.(handle, m, { n: Number(p.n), seq: Number(p.seq), i: Number(p.i), thread: p.thread }); // #148
+    if (p && m.kind === "event" && typeof m.event === "string") this.o.emitted?.(handle, m, { s: Number(p.s), i: Number(p.i), thread: p.thread }); // #148
     if (out.address === "broadcast" && m.kind === "broadcast") {
       if (!this.o.broadcast) { this.say(handle, "broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"); return; }
       this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);

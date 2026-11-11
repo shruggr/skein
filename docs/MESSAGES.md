@@ -1560,13 +1560,13 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   - **A thread resting on a name** (0.5.4): a step's `on(name)` with no fn
     (docs/VM.md "A thread resting on an event name"): the thread rests on
     the name; each fact under it wakes the thread (in the order the threads
-    began resting) with `event` `{event, box: <the name>, place}`, and it
+    began resting: 0.8.0, the step number that began it) with `event` `{event, box: <the name>, place}`, and it
     rests on the name again.
   - The host, from the store by CID, no step and no fuel (src/host/events.ts),
     on the instance's origin beside the liveness read, no program:
 
         GET /events/<name path>?after=<place>&limit=<n>&latest=1   (http://<handle>.localhost:<port>/… or /@<handle>/…)
-        200 application/json [{id: "<n>.<seq>.<i>.<thread>", event: <name>, record: <the record as DAG-JSON>}]
+        200 application/json [{id: "<s>.<i>.<thread>", event: <name>, record: <the record as DAG-JSON>}]
         400 a bad name (an empty segment, a space), `after` that is no place, `limit` not 1 or more, `latest` not 1/0
 
     The path after `/events/` is a name (its segments URI-decoded), or with a
@@ -1576,7 +1576,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
     (as the explorer renders it: a link {"/": cid}, bytes {"/": {"bytes":
     b64}}); Last-Event-ID (an EventSource's reconnect) is `after`. Live: the
     kernel hands every event over after the commit with its place beside the
-    record (the `emit` notice's `place: {n, seq, i, thread}`), and the host
+    record (the `emit` notice's `place: {s, i, thread}`), and the host
     sends a fact at once, its id from that, no store read; one handed over
     again (a start) is not sent again. Unsigned, no entry; each answer or
     message metered as a read. The open streams are one registry per

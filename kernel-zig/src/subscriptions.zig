@@ -26,9 +26,9 @@
 // subscribed or unsubscribed; the host reads the same fold from the log to
 // know which topics to subscribe (src/host/p2p.ts subscriptionsOf).
 //
-// Log order is the one the host folds by too: the processed entry's `n`, the
-// update's `at`, the thread's `at`, the thread's CID, the step's place in its
-// thread, the event's place in `emitted`.
+// Log order is the one the host folds by too (0.8.0): the instance's step number
+// of the update listing it (`ord`, the order the steps ran in), then the event's
+// place in `emitted` — an event's place.
 const std = @import("std");
 const cbor = @import("cbor");
 const heads = @import("heads.zig");
@@ -354,6 +354,7 @@ test "liveness (#138): the fold — keyed by (app, topic), a liveness replaces t
             try m.put("input", cbor.cidv(input));
             try m.put("at", cbor.int(at));
             try m.put("emitted", (try cbor.cidArray(al, cs)).?);
+            try m.put("ord", cbor.int(at)); // 0.8.0: the step number, here the step's time (they run in time order)
             _ = try st.chainAppend(al, t, m.value());
         }
     }.f;
@@ -396,19 +397,11 @@ pub fn rowValue(a: std.mem.Allocator, s: Store, sub: Sub) !?Value {
     return m.value();
 }
 
-/// Where an event record stands in the log (the fold's order, above).
-const Key = struct { n: i128, at: i128, tat: i128, thread: []const u8, seq: usize, i: usize };
+/// Where an event record stands (the fold's order, above): its update's step number, its index.
+const Key = struct { ord: i128, i: usize };
 
 fn keyBefore(x: Key, y: Key) bool {
-    if (x.n != y.n) return x.n < y.n;
-    if (x.at != y.at) return x.at < y.at;
-    if (x.tat != y.tat) return x.tat < y.tat;
-    switch (std.mem.order(u8, x.thread, y.thread)) {
-        .lt => return true,
-        .gt => return false,
-        .eq => {},
-    }
-    if (x.seq != y.seq) return x.seq < y.seq;
+    if (x.ord != y.ord) return x.ord < y.ord;
     return x.i < y.i;
 }
 
@@ -416,12 +409,9 @@ fn keyBefore(x: Key, y: Key) bool {
 fn collect(comptime E: type, a: std.mem.Allocator, s: Store, comptime read: fn (Value) ?E) ![]E {
     const Found = struct { k: Key, e: E };
     var found = std.array_list.Managed(Found).init(a);
-    var ns = std.StringHashMap(i128).init(a);
     for (try s.threads(a)) |t| {
-        const o = s.getOpt(a, t) orelse continue;
-        const tat = Value.intOf(o.get("at")) orelse 0;
         const ups = (try s.chainUpdates(a, t)) orelse continue;
-        for (ups, 1..) |uc, seq| {
+        for (ups) |uc| {
             const u = s.getOpt(a, uc) orelse continue;
             const em = u.get("emitted") orelse continue;
             if (em != .array) continue;
@@ -429,14 +419,7 @@ fn collect(comptime E: type, a: std.mem.Allocator, s: Store, comptime read: fn (
                 const c = Value.cidOf(x) orelse continue;
                 const rec = s.getOpt(a, c) orelse continue;
                 const e = read(rec) orelse continue;
-                var n: i128 = -1;
-                if (Value.cidOf(u.get("input"))) |ic| {
-                    if (ns.get(ic)) |v| n = v else {
-                        if (s.getOpt(a, ic)) |ev| n = Value.intOf(ev.get("n")) orelse -1;
-                        try ns.put(ic, n);
-                    }
-                }
-                try found.append(.{ .k = .{ .n = n, .at = Value.intOf(u.get("at")) orelse 0, .tat = tat, .thread = t, .seq = seq, .i = i }, .e = e });
+                try found.append(.{ .k = .{ .ord = Value.intOf(u.get("ord")) orelse 0, .i = i }, .e = e });
             }
         }
     }
@@ -596,6 +579,7 @@ test "subscriptions: the fold reads the steps' emitted events in log order; the 
             try m.put("input", cbor.cidv(input));
             try m.put("at", cbor.int(at));
             try m.put("emitted", (try cbor.cidArray(al, cs)).?);
+            try m.put("ord", cbor.int(at)); // 0.8.0: the step number, here the step's time (they run in time order)
             _ = try st.chainAppend(al, t, m.value());
         }
     }.f;
