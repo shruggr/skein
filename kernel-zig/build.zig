@@ -109,13 +109,11 @@ fn sdkImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTar
 
 /// The SDK's chain module, as `chainlib`: the door's BEEF verifier (door.zig, #121) in both builds,
 /// and natively the host chain's tracker (host_chain.zig, #156). It brings bsvz (the SDK's lazy
-/// dependency). On a first build bsvz is not fetched yet: the SDK's `lazyDependency` asks for it and
-/// registers no `chain` module, the build runner fetches it and runs this build again — so its absence
-/// here is that first pass, not an error (`sdk.module` would panic on it).
+/// dependency); skein-sdk 0.21.2 registers a placeholder `chain` module in the first configure pass,
+/// before bsvz is fetched, so a clean clone builds without a guard here.
 fn chainImport(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const sdk = b.dependency("skein_sdk", .{ .target = target, .optimize = optimize, .wallet = false });
-    const chain = sdk.builder.modules.get("chain") orelse return;
-    m.addImport("chainlib", chain);
+    m.addImport("chainlib", sdk.module("chain"));
 }
 
 fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {
