@@ -2291,6 +2291,24 @@ pub const Runtime = struct {
         if (after_rested) try rt.rested(a, origin);
     }
 
+    /// 0.8.0: a step's log line is a summary, bounded by construction: each list (emitted, launched,
+    /// moved, awaits) shows its first LINE_LIST_MAX and its count, the program's stderr its first
+    /// LINE_TEXT_MAX bytes — the update record holds them all.
+    const LINE_LIST_MAX = 8;
+    const LINE_TEXT_MAX = 2048;
+
+    fn shortList(w: *std.array_list.Managed(u8), a: std.mem.Allocator, items: []const []const u8) !void {
+        for (items[0..@min(items.len, LINE_LIST_MAX)], 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
+        if (items.len > LINE_LIST_MAX) try w.print(",… ({d} in all)", .{items.len});
+    }
+
+    /// The longest prefix of `s` at most `max` bytes that does not cut a UTF-8 sequence.
+    fn utf8Floor(s: []const u8, max: usize) usize {
+        var k = @min(s.len, max);
+        while (k > 0 and k < s.len and (s[k] & 0xC0) == 0x80) k -= 1;
+        return k;
+    }
+
     const After = struct { launched: []const []const u8, emitted: []const []const u8 = &.{}, update: []const u8 = "", rested: bool, stdout: []const u8 = "" };
 
     fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
@@ -2500,24 +2518,27 @@ pub const Runtime = struct {
         if (st.calls.items.len > 0) try w.print(" · {d} signer", .{st.calls.items.len});
         if (!errored and st.emitted.items.len > 0) {
             try w.appendSlice(" · emitted ");
-            for (st.emitted.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
+            try shortList(w, a, st.emitted.items);
         }
         if (st.kept.items.len > 0) try w.print(" · {d} kept", .{st.kept.items.len});
         if (st.launched.items.len > 0) {
             try w.appendSlice(" · launched ");
-            for (st.launched.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
+            try shortList(w, a, st.launched.items);
         }
         if (head_updates.items.len > 0) {
             try w.appendSlice(" · moved ");
-            for (st.moves.items, 0..) |m, i| try w.print("{s}{s}→{s}", .{ if (i > 0) "," else "", m[0], short(a, m[1]) });
+            for (st.moves.items[0..@min(st.moves.items.len, LINE_LIST_MAX)], 0..) |m, i| try w.print("{s}{s}→{s}", .{ if (i > 0) "," else "", m[0], short(a, m[1]) });
+            if (st.moves.items.len > LINE_LIST_MAX) try w.print(",… ({d} in all)", .{st.moves.items.len});
         }
         if (st.awaits.items.len > 0) {
             try w.appendSlice(" · awaits ");
-            for (st.awaits.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
+            try shortList(w, a, st.awaits.items);
         }
         // What the program wrote on stderr: the error, or a note of a step that
         // went on (e.g. the loop's undeliverable answer, #40) — once, here.
-        if (errored) try w.print(" · {s}", .{stderr_text}) else if (stderr_text.len > 0) try w.print(" · stderr: {s}", .{stderr_text});
+        // 0.8.0: bounded (the line is a summary; the program's whole stderr is in the update's result).
+        const err_text = if (stderr_text.len > LINE_TEXT_MAX) try std.fmt.allocPrint(a, "{s}… ({d} bytes in all)", .{ stderr_text[0..utf8Floor(stderr_text, LINE_TEXT_MAX)], stderr_text.len }) else stderr_text;
+        if (errored) try w.print(" · {s}", .{err_text}) else if (err_text.len > 0) try w.print(" · stderr: {s}", .{err_text});
         rt.say("{s}", .{line.items});
 
         return .{ .launched = st.launched.items, .emitted = if (errored) &.{} else st.emitted.items, .update = uc, .rested = !waiting, .stdout = if (errored) "" else out.stdout };

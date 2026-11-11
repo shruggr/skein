@@ -75,15 +75,17 @@ var g_io: Io = undefined;
 
 var say_mu: Io.Mutex = .init;
 
-/// A whole line on stderr: workers write at once, and a line is never split between them.
+/// A whole line on stderr, of any length: workers write at once, and a line is never split between
+/// them (the line, then its newline, under the lock). Nothing is copied, nothing cut: a line's length is
+/// bounded where it is made (scheduler.zig's step line). Before 0.8.0 a line was copied into 8 KiB, and
+/// `@min(line.len, 8191)` was a u13, so a line of 8191 bytes or more overflowed `n + 1` and aborted the
+/// host.
 fn sayRaw(line: []const u8) void {
-    var buf: [8192]u8 = undefined;
-    const n = @min(line.len, buf.len - 1);
-    @memcpy(buf[0..n], line[0..n]);
-    buf[n] = '\n';
     say_mu.lockUncancelable(g_io);
     defer say_mu.unlock(g_io);
-    Io.File.stderr().writeStreamingAll(g_io, buf[0 .. n + 1]) catch {};
+    const f = Io.File.stderr();
+    f.writeStreamingAll(g_io, line) catch return;
+    f.writeStreamingAll(g_io, "\n") catch {};
 }
 
 fn nowMs() i64 {
@@ -1282,4 +1284,15 @@ test "requests: a worker waits on its own answer, delivered from another thread 
     const late = try r.register();
     r.failAll();
     try testing.expectError(error.PeerGone, r.wait(late));
+}
+
+test "sayRaw: a line of any length is written whole, never aborts (0.8.0: 8191 bytes or more overflowed a u13)" {
+    g_io = std.testing.io;
+    const a = std.testing.allocator;
+    for ([_]usize{ 0, 1, 8190, 8191, 8192, 8193, 70_000 }) |len| {
+        const line = try a.alloc(u8, len);
+        defer a.free(line);
+        @memset(line, 'x');
+        sayRaw(line);
+    }
 }
