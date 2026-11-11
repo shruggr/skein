@@ -169,8 +169,18 @@ SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/rest-on.ts" || status=1
 echo "== liveness (#138): two routers; an app on the second emits liveness for a topic an app on the first beacons on; the second's node subscribes it without admitting; GET /<app>/.live/<topic> (served by the host) shows the first's beat within a beat and the second's own; a bad signature never shows; the window drops a silent sender; unliveness and uninstall end it; replayed"
 "${node[@]}" "$kz/equiv/liveness.ts" || status=1
 
-echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by the owner's messages (#124), on a router with an Arcade; the feed's headers through the host chain (#156: \`headers\` frames, the \`chain\` event); ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; a reorg: unproven again, nothing broadcast, the new proof by the status feed answered to the same watchers; replayed"
+echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by the owner's messages (#124), on a router with an Arcade; the feed's headers through the host chain (#156: \`headers\` frames, the \`chain\` event); ingest proven → answered at once; ingest unproven → broadcast → pending, seen (status), mined (proof) as facts (skein-chain 0.11.0); refused as invalid → rejected; status/proof reads; the same app at boot from a system tree; a reorg: unproven again, nothing broadcast, the new proof by the status feed answered to the same watchers; replayed"
 "${node[@]}" "$kz/equiv/chain.ts" || status=1
+
+echo "== chain proof events (skein-chain 0.11.0, skein-sdk 0.21.0): a saved merkle path links every transaction it covers (chain/proof/<txid> once, held or not); one taken in after its link mined at intake and never broadcast, its unproven child posted once in Extended Format; linked later, mined by its subscription; the rejection cascade by subscription and its revival; blocks leaving and rejoining the best chain (chain/block/<hash>); one BUMP for two proven entries; the in-VM ingest of programs/test/ingester; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/chain-proof-events.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/chain-proof-events.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/chain-proof-events.ts" || status=1
+
+echo "== a large bundle (skein-chain 0.11.0, as in the live case): N bare transactions over a proven funding, the last one's BEEF ingested by one in-VM call (programs/test/ingester): every one has its intake status; replayed — on SQLite, on RocksDB and on the WASM host"
+"${node[@]}" "$kz/equiv/chain-bundle.ts" || status=1
+SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/chain-bundle.ts" || status=1
+SKEIN_EQUIV_STORE=wasm "${node[@]}" "$kz/equiv/chain-bundle.ts" || status=1
 
 echo "== the image carries the header chain (#132, #156): a fake chaintracks' history (N regtest headers) and tip stream (M more), all before any skein exists; the host builds the default image's chain part from genesis at start and grows it per header; a skein created from the image holds chain/headers and chain/tip; the empty host chain imports them at her first start (chain-import; skein-host chain shows the image's tip); her owner installs the chain app (shruggr/skein-chain at image-chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR): the install's chain event and her chain state holds all N + M + 1 from genesis, no header fed, its maps the host chain's; the next header moves it on; add --image default boots from the same image; replayed"
 "${node[@]}" "$kz/equiv/image-chain.ts" || status=1

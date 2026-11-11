@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS status_seen (
 -- held until Arcade answers it taken or refused, tried again with backoff while it does not.
 CREATE TABLE IF NOT EXISTS broadcast_queue (
   txid              TEXT PRIMARY KEY,
-  body              BLOB NOT NULL,                    -- what goes to Arcade: Extended Format, or the raw transaction
+  body              BLOB NOT NULL,                    -- what goes to Arcade: Extended Format (arc.ts arcadeBody)
   instances         TEXT NOT NULL,                    -- JSON array: the instances that broadcast it
   attempts          INTEGER NOT NULL DEFAULT 0,
   next_at           INTEGER NOT NULL,                 -- ms: when it is posted (again)

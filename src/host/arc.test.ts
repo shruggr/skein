@@ -1,9 +1,10 @@
 // The host's broadcaster (#58, #65, arc.ts) against a fake Arcade
 // (fake-arcade.ts), without a kernel: the durable queue (a broadcast event's
-// Atomic BEEF posted as Extended Format under the host's token; Arcade's
-// answer a status — RECEIVED, a duplicate's, a 400's REJECTED; a 503 or no
-// answer tried again with backoff, the queue taken up by a new process;
-// given up a day on), the routing table (the broadcasters, a sweep of every
+// Atomic BEEF posted as Extended Format under the host's token, never anything
+// else; Arcade's answers by one table — RECEIVED, a duplicate's, an invalid
+// transaction's REJECTED, our payload at fault an error and no status, not
+// final yet or a 503 or no answer tried again with backoff, the queue taken up
+// by a new process; given up a day on), the routing table (the broadcasters, a sweep of every
 // instance at a txid's first status, then the running ones only; every
 // holder gets each — a proof as an event in box `chain`, any other status as
 // the status provider's message; a redelivery, stream or webhook, writes
@@ -17,9 +18,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
+import { Beef, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
-import { arcadeBody, Broadcaster, hostArcConfig, type ArcConfig } from "./arc.ts";
+import { answerOf, arcadeBody, ARC_CODES, Broadcaster, hostArcConfig, type ArcConfig } from "./arc.ts";
 import { FakeArcade } from "./fake-arcade.ts";
 import { txCid } from "./feeds.ts";
 import { resolveSystem } from "./genesis.ts";
@@ -68,10 +69,46 @@ test("arc: the host config (SKEIN_ARC_*, from the environment or host.env); a BE
 
   const { tx, beef } = await spend(1);
   const b = arcadeBody(beef);
+  assert.ok("bytes" in b);
   assert.equal(b.txid, tx.id("hex"));
   assert.deepEqual([...b.bytes], tx.toEF(), "the Atomic BEEF's subject, in Extended Format");
-  const raw = Uint8Array.from(tx.toBinary());
-  assert.deepEqual(arcadeBody(raw), { txid: tx.id("hex"), bytes: raw }, "a raw transaction goes as it came");
+});
+
+test("arc: no Extended Format, nothing to post — a raw transaction, an input with no source, a bundle that proves its subject", async () => {
+  const { tx } = await spend(11);
+  const X = tx.id("hex");
+  assert.deepEqual(arcadeBody(Uint8Array.from(tx.toBinary())), { why: "the body is not a BEEF or an Atomic BEEF" }, "a raw transaction is never posted");
+  // The subject alone in the bundle: its input's source is missing.
+  const bare = new Beef();
+  bare.mergeRawTx(tx.toBinary());
+  const noSource = arcadeBody(Uint8Array.from(bare.toBinaryAtomic(X)));
+  assert.equal(noSource.txid, X);
+  assert.match((noSource as { why: string }).why, new RegExp(`^input 0 \\(${tx.inputs[0]!.sourceTXID ?? tx.inputs[0]!.sourceTransaction!.id("hex")}\\.0\\) has no source transaction in the bundle$`));
+  // The subject proven in its own bundle: mined, not broadcastable.
+  const mined = Transaction.fromAtomicBEEF(tx.toAtomicBEEF());
+  mined.merklePath = new MerklePath(120, [[{ offset: 0, hash: X, txid: true }, { offset: 1, hash: "ab".repeat(32) }]]);
+  const m = arcadeBody(Uint8Array.from(mined.toAtomicBEEF()));
+  assert.deepEqual(m, { txid: X, mined: true, why: "the bundle proves this transaction (a merkle path at 120): it is mined, not broadcastable" });
+});
+
+test("arc: Arcade's answers by the one table — invalid, ours (467 differs by source), not final, retried; 2xx as given", () => {
+  const cls = (http: number, v: Record<string, unknown> = {}) => answerOf(http, v).class;
+  for (const c of [461, 462, 463, 464, 465, 466, 471, 472, 473, 474]) {
+    const a = answerOf(400, { status: c, reason: "r" });
+    assert.equal(a.class, "invalid", `${c}`);
+    assert.deepEqual(a.status, { txStatus: "REJECTED", extraInfo: "r" });
+  }
+  for (const c of [460, 467, 468, 469, 475]) assert.equal(cls(400, { status: c }), "ours", `${c} at intake`);
+  assert.equal(cls(400, { error: "failed to parse transaction" }), "ours", "400 with no ARC code: our request");
+  assert.equal(cls(400, { status: 400 }), "ours", "400 whose status is the HTTP code: no ARC code");
+  for (const h of [401, 403, 404]) assert.equal(cls(h), "ours", `${h}`);
+  assert.equal(cls(400, { status: 476 }), "not-final");
+  for (const h of [0, 408, 425, 429, 500, 503]) assert.equal(cls(h), "retry", `${h}`);
+  assert.deepEqual(answerOf(202, { txStatus: "SEEN_ON_NETWORK", status: 202 }).status, { txStatus: "SEEN_ON_NETWORK", status: 202 }, "a 2xx: as given");
+  assert.equal(answerOf(202, {}).status!.txStatus, "RECEIVED");
+  assert.equal(cls(202, { txStatus: "REJECTED", status: 460 }), "ours", "a duplicate's REJECTED with our code: no verdict");
+  assert.equal(cls(202, { txStatus: "REJECTED", status: 465 }), "status", "a duplicate's REJECTED for an invalid transaction: as given");
+  assert.equal(ARC_CODES[467]!.stream, "invalid", "467 on the stream: the network's TX_INVALID, a verdict");
 });
 
 test("arc: unset, the network's Arcade (DEFAULT_ARC); its token made once into host.env (made if absent) and read after", (t) => {
@@ -104,8 +141,9 @@ function broadcaster(arc: ArcConfig, db: HostDb, holding: Map<string, Set<string
   /** What reached each instance: [handle, how ("proof" event in box chain | "status" message), txid, txStatus]. */
   const admitted: Array<[string, string, string, string]> = [];
   const asked: Array<[string, string]> = [];
+  const lines: string[] = [];
   const b = new Broadcaster({
-    arc, db, backoff: { min: 20, max: 100 }, retry: { min: 20, max: 100 }, ...(o.now ? { now: o.now } : {}), ...(o.giveUpMs ? { giveUpMs: o.giveUpMs } : {}),
+    arc, db, log: (s, l) => lines.push(`[${s}] ${l}`), backoff: { min: 20, max: 100 }, retry: { min: 20, max: 100 }, ...(o.now ? { now: o.now } : {}), ...(o.giveUpMs ? { giveUpMs: o.giveUpMs } : {}),
     admit: async (h, box, ev) => {
       assert.equal(box, "chain");
       assert.equal(ev.kind, "proof");
@@ -121,10 +159,10 @@ function broadcaster(arc: ArcConfig, db: HostDb, holding: Map<string, Set<string
     instances: () => ({ all: ["a", "b", "c", "d"], running: [...running] }),
     holds: async (h, txid) => { asked.push([h, txid]); running.add(h); return holding.get(h)?.has(txid) ?? false; },
   });
-  return { b, admitted, asked };
+  return { b, admitted, asked, lines };
 }
 
-test("arc: the queue — a broadcast event posted under the host's token, Arcade's answer a status; refused, REJECTED; not taken, tried again; a new process takes up the queue; given up", async (t) => {
+test("arc: the queue — a broadcast event posted under the host's token, Arcade's answer a status; no BEEF, nothing posted; invalid, REJECTED; not taken, tried again; a new process takes up the queue; given up", async (t) => {
   const arcade = await FakeArcade.start();
   t.after(() => arcade.close());
   const db = new HostDb(join(home(t), "host.db"));
@@ -150,13 +188,20 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
   one.b.enqueue("a", raw, beef);
   await until("the duplicate's status", () => one.admitted.some(([, , , st]) => st === "SEEN_ON_NETWORK") || undefined);
-  // A raw transaction (no BEEF in the event) goes as it came.
+  // No BEEF in the event: nothing is posted, nothing queued, the instance told nothing; a host error on its log.
   const two = await spend(3);
+  const before = arcade.posts.length;
+  assert.equal(one.b.enqueue("a", Uint8Array.from(two.tx.toBinary())), undefined);
+  assert.equal(arcade.posts.length, before, "no raw post");
+  assert.deepEqual(one.b.queued(), []);
+  assert.ok(one.lines.includes(`[a] ERROR broadcast ${two.tx.id("hex")}: not posted: the event carries no BEEF (a host defect: the chain app sends one)`));
+  // An invalid transaction (ARC 465 in Arcade's 400): a REJECTED status, off the queue.
   arcade.mode = "reject";
-  one.b.enqueue("a", Uint8Array.from(two.tx.toBinary()));
+  one.b.enqueue("a", Uint8Array.from(two.tx.toBinary()), two.beef);
   await until("the refusal", () => one.admitted.some(([, , x]) => x === two.tx.id("hex")) || undefined);
-  assert.deepEqual([...arcade.posts.at(-1)!], two.tx.toBinary());
-  assert.deepEqual(one.admitted.find(([, , x]) => x === two.tx.id("hex")), ["a", "status", two.tx.id("hex"), "REJECTED"], "Arcade's 400 is a REJECTED status");
+  assert.deepEqual([...arcade.posts.at(-1)!], two.tx.toEF());
+  assert.deepEqual(one.admitted.find(([, , x]) => x === two.tx.id("hex")), ["a", "status", two.tx.id("hex"), "REJECTED"], "an invalid transaction is a REJECTED status");
+  assert.deepEqual(one.b.queued(), []);
   arcade.mode = "ok";
 
   // Backpressure: not taken — kept, tried again (backoff), taken.
@@ -190,11 +235,11 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   const gone = broadcaster({ ...arc, url: "http://127.0.0.1:9" }, db, new Map(), new Set(["a"]), { now: () => clock, giveUpMs: 5_000 });
   t.after(() => gone.b.stop());
   const five = await spend(6);
-  gone.b.enqueue("a", Uint8Array.from(five.tx.toBinary()));
+  gone.b.enqueue("a", Uint8Array.from(five.tx.toBinary()), five.beef);
   await until("tried", () => (gone.b.queued()[0]?.attempts ?? 0) >= 1 || undefined);
   clock += 5_000;
   db.retryBroadcast(five.tx.id("hex"), 0, "now");
-  gone.b.enqueue("a", Uint8Array.from(five.tx.toBinary()));
+  gone.b.enqueue("a", Uint8Array.from(five.tx.toBinary()), five.beef);
   await until("given up", () => gone.b.queued().length === 0 || undefined);
 });
 
@@ -321,4 +366,64 @@ test("arc: a restart resumes the stream after the last event id taken (host.db):
   assert.equal(db.cursor(arcade.eventsUrl), id3);
   assert.ok(two.asked.some(([h, x]) => h === "a" && x === X), "a new process knows nothing: the holders are read again");
   assert.ok(txCid(X).toString().startsWith("bag"), "the read is of the transaction's CID");
+});
+
+test("arc: our payload or request at fault — an error on the instance's log, off the queue, no status; not final (476) kept and tried again", async (t) => {
+  const arcade = await FakeArcade.start();
+  t.after(() => arcade.close());
+  const db = new HostDb(join(home(t), "host.db"));
+  t.after(() => db.close());
+  const one = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, new Map(), new Set(["a"]));
+  t.after(() => one.b.stop());
+  let n = 20;
+  for (const [status, body] of [[400, { error: "failed to parse transaction" }], [400, { status: 460, reason: "missing input source data: input 0" }], [400, { status: 467, reason: "SCRIPT_ERR_CGO_EXCEPTION" }], [400, { status: 468 }], [404, { title: "Not Found" }], [403, {}]] as const) {
+    const { tx, beef } = await spend(n++);
+    const X = tx.id("hex");
+    arcade.answer = { status, body };
+    const posts = arcade.posts.length;
+    one.b.enqueue("a", Uint8Array.from(tx.toBinary()), beef);
+    await until(`answered ${status} ${JSON.stringify(body)}`, () => (arcade.posts.length > posts && !one.b.busy() && one.b.queued().length === 0) || undefined);
+    assert.ok(FakeArcade.isEF(arcade.posts.at(-1)!), "Extended Format posted");
+    assert.equal(arcade.posts.length, posts + 1, `${status} ${JSON.stringify(body)}: posted once, not tried again`);
+    assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [], `${status} ${JSON.stringify(body)}: the instance is told nothing`);
+    assert.ok(one.lines.some((l) => l.startsWith(`[a] ERROR broadcast ${X}: Arcade refused our request (`) && l.endsWith("a host defect, not a verdict on the transaction — dropped from the queue, its status unchanged")), `${status}: the error on the instance's log`);
+  }
+  // 476 (not final yet): no verdict, kept, tried again; once Arcade takes it, a status.
+  const { tx, beef } = await spend(40);
+  const X = tx.id("hex");
+  arcade.answer = { status: 400, body: { status: 476, reason: "non-final" } };
+  const posts = arcade.posts.length;
+  one.b.enqueue("a", Uint8Array.from(tx.toBinary()), beef);
+  await until("tried again", () => arcade.posts.length >= posts + 2 || undefined);
+  assert.equal(one.b.queued()[0]?.txid, X, "still queued");
+  assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [], "no status while not final");
+  arcade.answer = undefined;
+  await until("taken", () => one.admitted.some(([, , x]) => x === X) || undefined);
+  assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [["a", "status", X, "RECEIVED"]]);
+});
+
+test("arc: the stream's REJECTED — with our code (460) or 476 not routed; 467 (the network's TX_INVALID) and no code routed as given", async (t) => {
+  const arcade = await FakeArcade.start();
+  t.after(() => arcade.close());
+  const db = new HostDb(join(home(t), "host.db"));
+  t.after(() => db.close());
+  const txs = await Promise.all([50, 51, 52, 53].map(spend));
+  const ids = txs.map((x) => x.tx.id("hex"));
+  const holding = new Map([["a", new Set(ids)]]);
+  const one = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, holding, new Set(["a"]));
+  t.after(() => one.b.stop());
+  for (const x of txs) one.b.enqueue("a", Uint8Array.from(x.tx.toBinary()), x.beef);
+  await until("posted", () => one.admitted.length === 4 || undefined);
+  one.admitted.length = 0;
+  one.b.start();
+  await until("subscribed", () => arcade.streams || undefined);
+  arcade.emit(ids[0]!, { txStatus: "REJECTED", status: 460, extraInfo: "missing input source data: input 0" });
+  arcade.emit(ids[1]!, { txStatus: "REJECTED", status: 476, extraInfo: "non-final" });
+  arcade.emit(ids[2]!, { txStatus: "REJECTED", status: 467, extraInfo: "TX_INVALID" });
+  arcade.emit(ids[3]!, { txStatus: "REJECTED", extraInfo: "PROCESSING" });
+  await until("two routed", () => one.admitted.length === 2 || undefined);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(one.admitted.map(([h, how, x, s]) => [h, how, ids.indexOf(x), s]).sort(), [["a", "status", 2, "REJECTED"], ["a", "status", 3, "REJECTED"]], "467 and no code: REJECTED as given");
+  assert.ok(one.lines.some((l) => l.startsWith(`[a] ERROR arcade stream: ${ids[0]!.slice(0, 8)} REJECTED with ARC 460 (not extended format)`) && l.endsWith("not routed")), "460: our payload, an error, not routed");
+  assert.ok(one.lines.some((l) => l === `[a] arcade stream: ${ids[1]!.slice(0, 8)} REJECTED with ARC 476 (not final): non-final: not final yet, no verdict — not routed`), "476: logged, not routed");
 });

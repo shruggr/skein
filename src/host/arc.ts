@@ -9,16 +9,26 @@
 // Out — the durable queue (#58's): each transaction is queued in host.db
 // (`broadcast_queue`, by txid: the bytes for Arcade, who broadcast it) and
 // posted to Arcade's POST /tx in Extended Format (the Atomic BEEF's subject
-// with its inputs' sources; the raw transaction when the event carried no
-// BEEF) under the host's one callback token (X-CallbackToken,
-// X-FullStatusUpdates: true, X-CallbackUrl when the host has a public
-// webhook URL). Arcade's answer settles the row: a 2xx (RECEIVED, or a
-// duplicate's current status) or a 4xx (a rejection) is taken as a status
-// (below) and the row goes; a 5xx or no answer (backpressure, Arcade down)
-// keeps it, tried again with backoff (`retry`: 1 s doubling to 5 min) until
-// `giveUpMs` (a day) after it was queued. A restart picks the queue up where
-// it was; a transaction queued again while queued is one row (its
-// broadcasters added).
+// with its inputs' sources) under the host's one callback token
+// (X-CallbackToken, X-FullStatusUpdates: true, X-CallbackUrl when the host has
+// a public webhook URL). Nothing else is ever posted: an event with no BEEF, a
+// BEEF that is not of its transaction, one that proves it (it is mined: a
+// chain-app defect) or lacks an input's source is not queued — a host error,
+// on the instance's log, and the instance is told nothing. A restart picks the
+// queue up where it was; a transaction queued again while queued is one row
+// (its broadcasters added).
+//
+// Arcade's answers, one table (`ARC_CODES`, `answerOf`): a 2xx is the status it
+// gives (RECEIVED, a duplicate's current one) and the row goes; a 400 whose ARC
+// code (the body's numeric `status`) says the transaction is invalid is a
+// REJECTED status and the row goes; a 400 with our payload or request at
+// fault (no ARC code, 460, 467 at intake, 468, 469, 475; 401, 403, 404, any
+// other 4xx) is a host error — the row goes (the same bytes cannot succeed),
+// the instance is told nothing; 476 (not final yet) and 408, 425, 429, a 5xx or
+// no answer keep the row, tried again with backoff (`retry`: 1 s doubling to
+// 5 min) until `giveUpMs` (a day) after it was queued. A status on the stream
+// or a webhook is taken as given, except a REJECTED whose code is one of ours
+// or 476: logged, not routed.
 //
 // In — one SSE session per host: Arcade's `/events?callbackToken=<the host
 // token>` carries every transaction submitted under the token, resumed with
@@ -152,18 +162,82 @@ export interface BroadcasterOptions {
 const enc = (v: unknown) => new TextEncoder().encode(JSON.stringify(v));
 const json = (status: number, v: unknown, headers: Record<string, string> = {}): ArcAnswer => ({ status, headers: { "content-type": "application/json", ...headers }, body: enc(v) });
 
-/** The transaction a broadcast body carries (Atomic BEEF, BEEF, raw), and the bytes to post to Arcade: Extended Format when its inputs' sources are there. */
-export function arcadeBody(body: Uint8Array): { txid?: string; bytes: Uint8Array } {
+/**
+ * The Extended Format bytes to post to Arcade for a broadcast event's BEEF (Atomic BEEF, or BEEF: its
+ * last transaction), or why there are none: not a BEEF; the bundle proves its subject (it is mined, not
+ * broadcastable — `mined`: a chain-app defect, which broadcasts only an unlinked transaction); an input's
+ * source is not in it. Never anything else: no raw transaction is posted.
+ */
+export function arcadeBody(body: Uint8Array): { txid: string; bytes: Uint8Array } | { txid?: string; why: string; mined?: true } {
   const bytes = [...body];
   let tx: Transaction | undefined;
   for (const parse of [() => Transaction.fromAtomicBEEF(bytes), () => Transaction.fromBEEF(bytes)]) {
-    try { tx = parse(); break; } catch { /* not this form: the next, then a raw transaction below */ }
+    try { tx = parse(); break; } catch { /* not this form: the next */ }
   }
-  if (!tx) {
-    try { return { txid: Transaction.fromBinary(bytes).id("hex"), bytes: body }; } catch { return { bytes: body }; } // no txid: enqueue says so and posts the raw transaction
+  if (!tx) return { why: "the body is not a BEEF or an Atomic BEEF" };
+  const txid = tx.id("hex");
+  if (tx.merklePath) return { txid, mined: true, why: `the bundle proves this transaction (a merkle path at ${tx.merklePath.blockHeight}): it is mined, not broadcastable` };
+  const i = tx.inputs.findIndex((x) => !x.sourceTransaction);
+  if (i >= 0) {
+    const x = tx.inputs[i]!;
+    return { txid, why: `input ${i} (${x.sourceTXID ?? "?"}.${x.sourceOutputIndex}) has no source transaction in the bundle` };
   }
-  // toEF throws when an input's source transaction is not in the BEEF: then the raw transaction, which Arcade takes too.
-  try { return { txid: tx.id("hex"), bytes: Uint8Array.from(tx.toEF()) }; } catch { return { txid: tx.id("hex"), bytes: Uint8Array.from(tx.toBinary()) }; }
+  try { return { txid, bytes: Uint8Array.from(tx.toEF()) }; } catch (e) { return { txid, why: `no Extended Format: ${(e as Error).message}` }; }
+}
+
+/** What an Arcade answer is to the host: a status to route, our payload or request at fault, or not taken yet. */
+export type ArcClass = "invalid" | "ours" | "not-final" | "retry";
+
+/**
+ * Arcade's ARC codes (bsv-blockchain/arcade errors/errors.go) by what they say. At intake a failure is
+ * HTTP 400 with the code as the body's numeric `status`; on the stream and webhooks a status's `status`.
+ * David to review.
+ */
+export const ARC_CODES: Record<number, { intake: ArcClass; stream: ArcClass; what: string }> = {
+  460: { intake: "ours", stream: "ours", what: "not extended format" },
+  461: { intake: "invalid", stream: "invalid", what: "unlocking scripts" },
+  462: { intake: "invalid", stream: "invalid", what: "inputs" },
+  463: { intake: "invalid", stream: "invalid", what: "malformed" },
+  464: { intake: "invalid", stream: "invalid", what: "outputs" },
+  465: { intake: "invalid", stream: "invalid", what: "fees" },
+  466: { intake: "invalid", stream: "invalid", what: "conflict (double spend)" },
+  // 467 differs by source: on the stream it is the network's TX_INVALID (a verdict); at intake it is
+  // either an unmatched validation message or ERR_PROCESSING (Arcade's own engine failing), which only
+  // the reason's text tells apart — so not a verdict there.
+  467: { intake: "ours", stream: "invalid", what: "generic validation" },
+  468: { intake: "ours", stream: "ours", what: "BEEF invalid" },
+  469: { intake: "ours", stream: "ours", what: "merkle roots" },
+  471: { intake: "invalid", stream: "invalid", what: "frozen input (policy)" },
+  472: { intake: "invalid", stream: "invalid", what: "frozen input (consensus)" },
+  473: { intake: "invalid", stream: "invalid", what: "cumulative fees" },
+  474: { intake: "invalid", stream: "invalid", what: "size" },
+  475: { intake: "ours", stream: "ours", what: "mined ancestors not in BUMP" },
+  476: { intake: "not-final", stream: "not-final", what: "not final" },
+};
+
+/** An ARC code in `v.status` (460-499), or undefined. */
+const arcCodeOf = (v: Record<string, unknown>): number | undefined => typeof v.status === "number" && v.status >= 460 && v.status < 500 ? v.status : undefined;
+
+/**
+ * Arcade's answer to a post, classified (the one table, ARC_CODES): `status` the status to route for
+ * "invalid" and a 2xx, `why` for the log.
+ */
+export function answerOf(http: number, v: Record<string, unknown>): { class: ArcClass | "status"; status?: Record<string, unknown>; why: string } {
+  const code = arcCodeOf(v);
+  const reason = [v.reason, v.extraInfo, v.detail, v.title, v.error].find((x) => typeof x === "string" && x) as string | undefined;
+  if (http === 0 || http === 408 || http === 425 || http === 429 || http >= 500) return { class: "retry", why: http ? `HTTP ${http}` : "no answer" };
+  if (http >= 200 && http < 300) {
+    const txStatus = typeof v.txStatus === "string" && v.txStatus ? v.txStatus : "RECEIVED";
+    if (txStatus === "REJECTED" && code !== undefined && ARC_CODES[code] && ARC_CODES[code]!.intake !== "invalid") return { class: ARC_CODES[code]!.intake, why: `REJECTED with ${code} (${ARC_CODES[code]!.what})${reason ? `: ${reason}` : ""}` };
+    return { class: "status", status: { ...v, txStatus }, why: txStatus };
+  }
+  const known = code !== undefined ? ARC_CODES[code] : undefined;
+  if (http === 400 && known) {
+    const why = `ARC ${code} (${known.what})${reason ? `: ${reason}` : ""}`;
+    return known.intake === "invalid" ? { class: "invalid", status: { txStatus: "REJECTED", ...(reason ? { extraInfo: reason } : {}) }, why } : { class: known.intake, why };
+  }
+  // 400 with no ARC code (a request Arcade could not read), 401, 403, 404, any other 4xx, an unknown code: ours.
+  return { class: "ours", why: `HTTP ${http}${code !== undefined ? ` ARC ${code}` : ""}${reason ? `: ${reason}` : ""}` };
 }
 
 /** A status with a merkle path as the proof event an instance records (#65), or undefined. */
@@ -271,6 +345,17 @@ export class Broadcaster {
     const ev = statusOf(v);
     if (typeof ev === "string") { this.say("router", `arcade ${via}: not a status (${ev}): ignored`); return 0; }
     const txid = ev.txid as string;
+    // A REJECTED the stream or a webhook carries with one of our codes or 476 is no verdict: logged, not routed.
+    const known = via !== "post" && ev.txStatus === "REJECTED" && typeof ev.code === "number" ? ARC_CODES[ev.code] : undefined;
+    if (known && known.stream !== "invalid") {
+      const why = `REJECTED with ARC ${String(ev.code)} (${known.what})${typeof ev.extraInfo === "string" ? `: ${ev.extraInfo}` : ""}`;
+      const hs = [...(this.known.get(txid)?.handles ?? [])];
+      const line = known.stream === "not-final"
+        ? `arcade ${via}: ${txid.slice(0, 8)} ${why}: not final yet, no verdict — not routed`
+        : `ERROR arcade ${via}: ${txid.slice(0, 8)} ${why}: our payload or request at fault (a host defect), no verdict on the transaction — not routed`;
+      for (const h of hs.length ? hs : ["router"]) this.say(h, line);
+      return 0;
+    }
     const key = `${String(ev.txStatus)} ${String(ev.blockHash ?? "")}`;
     const proof = proofOf(ev);
     const send = async (hs: string[]): Promise<number> => {
@@ -312,17 +397,21 @@ export class Broadcaster {
   /**
    * A broadcast event from `handle` (#65): the transaction's bytes and, if
    * the event carried it, its Atomic BEEF. Queued durably and posted; the
-   * txid, or undefined when the bytes are not a transaction.
+   * txid, or undefined when nothing is queued (the bytes are not a
+   * transaction, or there is no Extended Format to post: arcadeBody).
    */
   enqueue(handle: string, tx: Uint8Array, beef?: Uint8Array): string | undefined {
     let raw: string;
     try { raw = Transaction.fromBinary([...tx]).id("hex"); } catch { this.say(handle, "broadcast: the event's transaction does not parse: dropped"); return undefined; }
-    // The BEEF's subject must be the transaction: else the raw transaction goes (Arcade then needs its parents).
-    const fromBeef = beef ? arcadeBody(beef) : undefined;
-    const bytes = fromBeef?.txid === raw ? fromBeef.bytes : tx;
-    if (beef && fromBeef?.txid !== raw) this.say(handle, `broadcast ${raw.slice(0, 8)}: the event's BEEF is not of its transaction: the raw transaction goes`);
+    // Only the BEEF's subject in Extended Format is posted. Anything else is a host error: nothing is
+    // queued (no row: the same event cannot do better), and the instance is told nothing.
+    const fail = (why: string) => { this.say(handle, `ERROR broadcast ${raw}: not posted: ${why}`); return undefined; };
+    if (!beef) return fail("the event carries no BEEF (a host defect: the chain app sends one)");
+    const b = arcadeBody(beef);
+    if (b.txid !== undefined && b.txid !== raw) return fail(`the event's BEEF is of ${b.txid}, not of its transaction (a chain-app defect)`);
+    if ("why" in b) return fail(b.mined ? `${b.why} (a chain-app defect: a linked transaction is never broadcast)` : b.why);
     this.note(raw, handle);
-    this.o.db.queueBroadcast(raw, bytes, handle, this.now());
+    this.o.db.queueBroadcast(raw, b.bytes, handle, this.now());
     this.kick();
     return raw;
   }
@@ -362,19 +451,22 @@ export class Broadcaster {
     this.stats.posted++;
     const what = summary(r.body);
     this.say(from, `broadcast ${row.txid.slice(0, 8)} → Arcade: ${r.status ? `HTTP ${r.status}` : "no answer"}${what ? ` ${what}` : ""}`);
-    if (r.status >= 200 && r.status < 500 && r.status !== 408 && r.status !== 425 && r.status !== 429) {
-      // Taken (or a duplicate's current status) or refused: the row goes, and the answer is a status.
+    let v: Record<string, unknown> = {};
+    try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: classified by the HTTP code alone */ }
+    const ans = answerOf(r.status, v);
+    if (ans.class === "status" || ans.class === "invalid") {
+      // Taken (or a duplicate's current status), or the transaction is invalid: the row goes, and the answer is a status.
       this.o.db.unqueueBroadcast(row.txid);
-      let v: Record<string, unknown> = {};
-      try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: the status is the HTTP code's (below), and the line above logged the answer */ }
-      const reason = [v.reason, v.extraInfo, v.detail, v.title].find((x) => typeof x === "string" && x) as string | undefined;
-      const status = r.status < 300
-        ? { ...v, txid: row.txid, txStatus: typeof v.txStatus === "string" && v.txStatus ? v.txStatus : "RECEIVED" }
-        : { txid: row.txid, txStatus: typeof v.txStatus === "string" && v.txStatus ? v.txStatus : "REJECTED", ...(reason ? { extraInfo: reason } : {}) };
-      await this.deliver(status, "post", row.instances);
+      await this.deliver({ ...ans.status, txid: row.txid }, "post", row.instances);
       return;
     }
-    // Not taken (backpressure, unreachable): tried again later, until given up.
+    if (ans.class === "ours") {
+      // Our payload or request at fault: the same bytes cannot succeed, so the row goes; no verdict, the instance is told nothing.
+      this.o.db.unqueueBroadcast(row.txid);
+      for (const h of row.instances.length ? row.instances : ["router"]) this.say(h, `ERROR broadcast ${row.txid}: Arcade refused our request (${ans.why}): a host defect, not a verdict on the transaction — dropped from the queue, its status unchanged`);
+      return;
+    }
+    // Not taken (backpressure, unreachable, or not final yet: 476): tried again later, until given up.
     const at = this.now();
     if (at - row.since >= (this.o.giveUpMs ?? 86_400_000)) {
       this.o.db.unqueueBroadcast(row.txid);

@@ -13,22 +13,24 @@
 //   - ingest proven ({fn: "ingest", args: {beef}} in box chain): recorded,
 //     answered at once (state proven, the block's CID);
 //   - ingest unproven: recorded, broadcast (the host's Arcade gets it — from
-//     the chain app, the only thing that emits it here); skein-chain 0.8.0: no
-//     watchers — every status is the fact chain/tx/<txid> (read at the host's
-//     event route): accepted (the status provider's RECEIVED), mined (the
-//     proof Arcade reports once mined; the header first); a second ingest of
-//     it while pending is answered accepted at once;
-//   - ingest unproven that Arcade refuses: the fact rejected; 0.9.0 (skein-sdk
-//     0.18.0): its proof later is the latest fact — mined, status proven;
+//     the chain app, the only thing that emits it here); every status is the
+//     fact chain/tx/<txid> (read at the host's event route; skein-chain 0.11.0's
+//     words): pending at intake, seen (the status provider's RECEIVED), mined
+//     (the proof Arcade reports once mined; the header first); a second ingest
+//     of it while pending is answered accepted at once (and its status, seen,
+//     raised again);
+//   - ingest unproven that Arcade refuses as invalid: pending, then the fact
+//     rejected; its proof later is the latest fact — mined, status proven;
 //   - the reads `status` and `proof` answer CIDs; a bad BEEF is an error;
 //   - nothing unproven is at rest without a registered broadcast;
-//   - the same reads as a kernel call; ingest is refused there (a message only);
+//   - the same reads as a kernel call; ingest is refused there (it writes: a step's);
 //   - D8 (skein 0.6.0): the stock scopes name no `chain` — the chain app is
 //     never a genesis-wired system program;
 //   - a reorg (0.7.1, the settled overlay sync design): a heavier branch
 //     without the proven child turns it back to unproven and broadcasts
-//     nothing; the child mined in the new branch, Arcade's status for the new
-//     block is the proof event — the fact mined again, with the new height.
+//     nothing (the fact seen, reason reorged); the child mined in the new
+//     branch, Arcade's status for the new block is the proof event — the fact
+//     mined again, with the new height.
 //
 // Both stores then replay to themselves exactly.
 //
@@ -57,7 +59,7 @@ import { txCid } from "../../src/host/feeds.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.9.0"; // skein-chain 0.9.0: every status a fact; a proof after a rejection is mined
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "v0.11.0"; // skein-chain 0.11.0: a saved merkle path links every transaction it covers; status by subscription
 const here = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -136,7 +138,7 @@ try {
   check(routeLines.some((l) => l.startsWith("route event chain ")) && routeLines.some((l) => l.startsWith("route mailbox chain [kernel.beef] ")) && routeLines.some((l) => l.startsWith("route mailbox chain/status ")) && routeLines.length === 3,
     `the prompt shows its routes (#143: no sender; the BEEF decoded at the door): ${routeLines.join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.9.0", `the head chain/app is the app record (0.9.0: ${String(app?.version)})`);
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.11.0", `the head chain/app is the app record (0.11.0: ${String(app?.version)})`);
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   check(rows.length === 3 && rows.every((r) => !("sender" in r) && !("optional" in r)) && rows.map((r) => `${r.transport} ${r.address}`).join(",") === "event chain,mailbox chain,mailbox chain/status"
     && JSON.stringify(rows[1]!.filters) === '["kernel.beef"]',
@@ -173,7 +175,7 @@ try {
     if (res.status !== 200) throw new Error(`GET /events/chain/tx/${txid}: ${res.status}`);
     return (await res.json() as Array<{ record: Record<string, unknown> }>).map((x) => x.record);
   };
-  const statuses = async (txid: string) => (await facts(txid)).map((r) => `${String(r.status)}${r.height !== undefined ? `@${String(r.height)}` : ""}`).join(",");
+  const statuses = async (txid: string) => (await facts(txid)).map((r) => `${String(r.status)}${r.height !== undefined ? `@${String(r.height)}` : ""}${r.status === "seen" && r.reason !== undefined ? `(${String(r.reason)})` : ""}`).join(",");
   const factsAre = async (txid: string, want: string, what: string) => await until(what, async () => { await h.router.settled(); return (await statuses(txid)) === want || undefined; }, 30_000).then(() => true, () => false);
 
   // A stranger's call is admitted (#143: a route has no sender; chain's functions are ungated — no `roles`).
@@ -198,7 +200,7 @@ try {
   const posted = await until("the broadcast reaches the Arcade", () => arcade.posts.find((b) => FakeArcade.txOf(b).id("hex") === childTxid), 20_000).catch(() => undefined);
   check(!!posted, "ingest unproven: broadcast (the host's Arcade got it, from the chain app)");
   // 0.8.0: no watchers — an ingest is answered once, at the ingest, when there is a status (here none: only broadcast).
-  check(await factsAre(childTxid, "accepted", "accepted"), `accepted on the status provider's first status: the fact chain/tx/<child> accepted (${await statuses(childTxid)})`);
+  check(await factsAre(childTxid, "pending,seen", "seen"), `pending at intake, seen on the status provider's first status: the facts chain/tx/<child> (${await statuses(childTxid)})`);
   check((await answersTo(r2)).length === 0, "the unproven ingest answered nothing (0.8.0: no watchers; the fact carries its status)");
   // While it is pending, another ingest of it: answered accepted at once (its status at the ingest).
   const r3 = await send({ fn: "chain.ingest", args: { beef: new Uint8Array(child.toBEEF()) } });
@@ -212,9 +214,9 @@ try {
   await h.router.settled();
   const path = new MerklePath(2, [[{ offset: 0, hash: childTxid, txid: true }]]);
   arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h2)), blockHeight: 2, merklePath: path.toHex() });
-  check(await factsAre(childTxid, "accepted,accepted,mined@2", "mined"), `then mined on Arcade's proof: the fact mined {height: 2} (${await statuses(childTxid)})`);
+  check(await factsAre(childTxid, "pending,seen,seen,mined@2", "mined"), `then mined on Arcade's proof: the fact mined {height: 2} (${await statuses(childTxid)})`);
 
-  // Unproven that Arcade refuses: rejected (the fact).
+  // Unproven that Arcade refuses as invalid (its 400 with ARC 465): rejected (the fact).
   const child2 = new Transaction();
   child2.addInput({ sourceTransaction: fund, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
   child2.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 8_000 });
@@ -222,7 +224,7 @@ try {
   const c2 = child2.id("hex");
   arcade.mode = "reject";
   await send({ fn: "ingest", args: { beef: new Uint8Array(child2.toBEEF()) } });
-  check(await factsAre(c2, "rejected", "rejected"), `ingest unproven, refused by Arcade: the fact rejected (${await statuses(c2)})`);
+  check(await factsAre(c2, "pending,rejected", "rejected"), `ingest unproven, refused by Arcade as invalid: pending, then the fact rejected (${await statuses(c2)})`);
   arcade.mode = "ok";
   const r4s = await send({ fn: "status", args: { txid: c2 } });
   const a4 = (await answers(r4s, 1, "status of the rejected"))[0]!;
@@ -243,13 +245,13 @@ try {
   const r9 = await send({ fn: "nope", args: {} });
   check((await answers(r9, 1, "unknown fn"))[0]?.error?.code === "unknown-fn", "an unknown function: unknown-fn");
 
-  // The same reads as a kernel call (no entry, no writes): dag-cbor in and out; ingest is a message only.
+  // The same reads as a kernel call (no entry, no writes): dag-cbor in and out; ingest writes, so a step's only.
   const prog = (app!.programs as Record<string, CID>).chain!;
   const kc = await (await k()).invoke(prog, "status", dagCbor.encode({ txid: childTxid }));
   const kv = kc.ok ? dagCbor.decode(kc.result) as Record<string, unknown> : undefined;
   check(kv?.state === "proven" && kv.height === 2, `a kernel call of status: ${kc.ok ? JSON.stringify({ state: kv?.state, height: kv?.height }) : kc.error}`);
   const ki = await (await k()).invoke(prog, "ingest", dagCbor.encode({ beef: new Uint8Array(child.toBEEF()) }));
-  check(!ki.ok && /IngestIsAMessage/.test(ki.error), `a kernel call of ingest is refused (its answers come later, by message): ${ki.ok ? "ok?" : ki.error}`);
+  check(!ki.ok && /ingest writes: call it from a step/.test(ki.error), `a kernel call of ingest is refused (it writes: a message, or an in-VM call from a step): ${ki.ok ? "ok?" : ki.error}`);
 
   // At rest: nothing unproven, no broadcast registered.
   const fin = await (await k()).store.get((await (await k()).call("head", "chain/state")) as CID) as { maps: Record<string, CID | null> };
@@ -268,7 +270,7 @@ try {
   await h.router.chainHeaders("ch", "chain", [h3]);
   await h.router.settled();
   await h.router.admitEvent("ch", "chain", { kind: "proof", subject: txCid(c2), txid: c2, path: Uint8Array.from(new MerklePath(3, [[{ offset: 0, hash: c2, txid: true }]]).toBinary()) });
-  check(await factsAre(c2, "rejected,mined@3", "mined after rejected"), `rejected, then its proof: the fact mined {height: 3} (${await statuses(c2)})`);
+  check(await factsAre(c2, "pending,rejected,mined@3", "mined after rejected"), `rejected, then its proof: the fact mined {height: 3} (${await statuses(c2)})`);
   const r4b = await send({ fn: "status", args: { txid: c2 } });
   const a4b = (await answers(r4b, 1, "status after the proof"))[0]!;
   check(a4b.result?.state === "proven" && a4b.result.height === 3, `its status now proven at 3 (${JSON.stringify(a4b.result && { state: a4b.result.state, height: a4b.result.height })})`);
@@ -295,7 +297,7 @@ try {
   await h.router.chainHeaders("ch", "chain", [h5x]);
   await h.router.settled();
   arcade.emit(childTxid, { txStatus: "MINED", blockHash: display(sha256d(h5x)), blockHeight: 5, merklePath: new MerklePath(5, [[{ offset: 0, hash: childTxid, txid: true }]]).toHex() });
-  check(await factsAre(childTxid, "accepted,accepted,mined@2,reorged,mined@5", "mined again after the reorg"), `reorged, then the new proof by the status feed (a new blockHash, the same token's stream): the fact mined at 5 (${await statuses(childTxid)})`);
+  check(await factsAre(childTxid, "pending,seen,seen,mined@2,seen(reorged),mined@5", "mined again after the reorg"), `reorged, then the new proof by the status feed (a new blockHash, the same token's stream): the fact mined at 5 (${await statuses(childTxid)})`);
   check((await chainResults()).length === broadcastsBefore && postsOf(childTxid) === childPosts, "still no broadcast of it: the proof came without a resubmit");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
