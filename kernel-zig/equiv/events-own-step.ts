@@ -17,7 +17,7 @@
 //   - an errored step leaves nothing (no fact, no head);
 //   - fact names of 300 and 9,000 bytes: subscribed, emitted, read in the step and
 //     from the host, delivered; no host aborts (skein-sdk 0.21.1's prefix scan);
-//   - 2,500 then 5,000 emits in one step, a latest read after each: the time
+//   - 1,000 then 5,000 emits in one step, a latest read after each: the time
 //     grows about linearly (the dedupe and the in-step read are O(1) per call);
 //     the step's log line is bounded (its first ids and the count) and no host
 //     aborts on it (before 0.8.0 a line of 8191 bytes or more aborted the
@@ -190,15 +190,16 @@ try {
       return { ms: performance.now() - t0, x };
     };
     const n0 = lines.length;
-    const small = await time(2500, "evy/m/small");
+    const small = await time(1000, "evy/m/small");
     const big = await time(5000, "evy/m/big");
     check(big.x.reads === 5000 && vals(big.x.rows) === "evy/m/big=4999", `5,000 emits, a latest read after each: the last read saw the step's last fact (${vals(big.x.rows)}, ${big.x.reads} reads)`);
     check((await hostRead("evy/m/big")).length === 5000, "5,000 facts indexed");
     const stepLines = lines.slice(n0).filter((l) => /event-demo step \d+ → finished · emitted /.test(l));
     check(stepLines.length === 2 && stepLines.every((l) => l.length < 1024) && /\(5000 in all\)/.test(stepLines[1]!), `the steps' lines are bounded: ${stepLines.map((l) => l.length).join(", ")} bytes, "${stepLines[1]?.replace(/^.*· emitted /, "emitted ")}"`);
     check(!lines.some((l) => /SIGABRT|panic/.test(l)), "no host aborted");
+    // Five times the emits (and reads): linear is about ×5, quadratic ×25 — far apart, so wall-clock noise does not decide it.
     const ratio = big.ms / small.ms;
-    check(ratio < 3.5, `linear: 2,500 in ${small.ms.toFixed(0)} ms, 5,000 in ${big.ms.toFixed(0)} ms (×${ratio.toFixed(2)}; quadratic would be ×4)`);
+    check(ratio < 12, `linear: 1,000 in ${small.ms.toFixed(0)} ms, 5,000 in ${big.ms.toFixed(0)} ms (×${ratio.toFixed(2)}; linear ≈ ×5, quadratic ≈ ×25)`);
   }
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
