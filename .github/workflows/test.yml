@@ -1,12 +1,15 @@
-# The kernel built, then the host's tests and the kernel's equivalence suite
-# (README.md, "Build and test"), on Ubuntu.
+# The kernel built from a clean checkout, then its unit tests, the host's tests
+# and the kernel's scenarios (README.md, "Build and test"), on Ubuntu.
 #
-# Runs without secrets. The network it uses is GitHub and npm: the SDK
-# (a Zig package by URL+hash), the wasmtime C API release, and the public
-# app repos the equiv drivers clone at their pinned commits (src/testapps.ts
-# and the drivers). Skipped here, each with a line in the suite's output:
-#   - the browser parts (SKEIN_EQUIV_BROWSER=0): they need Playwright and a
-#     Chromium;
+# Runs without secrets. The network it uses is GitHub and npm: the SDK and bsvz
+# (Zig packages by URL+hash, fetched by the build into kernel-zig/zig-pkg), the
+# wasmtime C API release (scripts/wasmtime-c-api.sh), and the public app repos
+# the scenarios clone at their pinned commits (src/testapps.ts and the drivers).
+#
+# Not run here, each with a line in the suite's output:
+#   - the browser parts of equiv/run.sh (SKEIN_EQUIV_BROWSER=0: browser-live.ts,
+#     libp2p.ts's live step, site.ts): they need Playwright and a Chromium,
+#     which this job does not install;
 #   - the component cases (shell tools, the wallet as a component): they need
 #     wasm-tools and the preview1 adapter, which are not installed here.
 name: test
@@ -20,8 +23,6 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    env:
-      WASMTIME_VERSION: v49.0.1
     steps:
       - uses: actions/checkout@v4
 
@@ -33,16 +34,11 @@ jobs:
           node-version: 26
           cache: npm
 
-      - name: System libraries (SQLite for the kernel)
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: System libraries (SQLite and RocksDB, linked by the kernel)
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev librocksdb-dev
 
       - name: The wasmtime C API (kernel-zig/README.md, "Build")
-        run: |
-          dir="$HOME/.local/wasmtime-c-api"
-          mkdir -p "$dir"
-          name="wasmtime-${WASMTIME_VERSION}-x86_64-linux-c-api"
-          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${name}.tar.xz" | tar -xJ -C "$dir"
-          echo "WASMTIME_C_API=$dir/$name" >> "$GITHUB_ENV"
+        run: scripts/wasmtime-c-api.sh
 
       - run: npm ci
 
@@ -64,7 +60,7 @@ jobs:
       - name: npm test
         run: npm test
 
-      - name: The equivalence suite (browser and component parts skipped, see above)
+      - name: The scenarios (browser parts not run, see above)
         env:
           SKEIN_EQUIV_BROWSER: "0"
         run: kernel-zig/equiv/run.sh

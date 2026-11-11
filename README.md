@@ -467,12 +467,19 @@ docs/OVERLAY.md there have the walkthrough.
 
 ## Build and test
 
+Needs Node 26, mise (it pins Zig 0.16.0), the system SQLite and RocksDB
+libraries (`libsqlite3-dev librocksdb-dev` on Debian/Ubuntu, `sqlite rocksdb`
+on Arch) and the wasmtime C API (`scripts/wasmtime-c-api.sh`). From a clean
+clone, as `.github/workflows/test.yml` runs it:
+
 ```
-cd kernel-zig && mise exec -- zig build          # first: the host tests run kernel-zig/zig-out/bin/skein-kernel
-cd kernel-zig && mise exec -- zig build test     # the kernel's unit tests
+scripts/wasmtime-c-api.sh                        # once: the wasmtime C API where build.zig looks
+npm ci
+cd kernel-zig && mise exec -- zig build --release # first: the host tests run kernel-zig/zig-out/bin/skein-kernel
+cd kernel-zig && mise exec -- zig build test     # the kernel's unit tests (the storage interface among them)
+npm run typecheck && npm run web:typecheck
 npm test                                         # the host, client, formats (node --test src/**/*.test.ts)
-TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: git, replay exactness, apps, browser, the wasm host
-SKEIN_TEST_STORE=sqlite npm test                 # the host suite with every test host on the wasm kernel
+TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # the scenarios, once each, replayed; the browser parts need Playwright
 ```
 
 - Gotcha: after a kernel change, a stale `zig-out/bin/skein-kernel` makes

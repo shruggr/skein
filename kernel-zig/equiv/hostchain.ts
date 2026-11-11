@@ -11,14 +11,12 @@
 //      Arcade gets it again) and leaves B pointing at the new record; the gate:
 //      a host chain block readable through every set, A's own record not
 //      through B's.
-//   2. serve (SQLite): the same runs on one serve instance (its host chain in
-//      its own store) yield the same chain/state CID as a third instance on the
-//      RocksDB host that took the same runs.
-//   3. The stores replay to themselves exactly after the processes stopped.
-//   4. Timings: per block, a `headers` frame and the event to 8 instances on
+//   2. The stores replay to themselves exactly after the process stopped.
+//   3. Timings: per block, a `headers` frame and the event to 8 instances on
 //      the RocksDB host; a `chain-import` of an image of HOSTCHAIN_IMPORT
-//      headers (default 20 160; the rack-shaped 970 000 by hand) on RocksDB
-//      and on SQLite.
+//      headers (default 20 160; the rack-shaped 970 000 by hand).
+// (The host chain is the one-process host's: RocksDB only. The backends are compared once, by the
+// storage interface test, kernel-zig/src/store_iface_test.zig.)
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/hostchain.ts
 
@@ -80,21 +78,17 @@ async function tipOf(k: KernelSurface, root: CID | null | undefined): Promise<nu
 }
 
 const afters: Array<() => unknown> = [];
-const rmR: Array<() => unknown> = [], rmS: Array<() => unknown> = [];
+const rmR: Array<() => unknown> = [];
 const arcade = await FakeArcade.start();
 const ownerKey = PrivateKey.fromRandom();
 const net = { genesis: { defaults: { walletNetwork: "regtest" } } };
 const rh = await testHost({ after: (f) => (rmR.length ? afters : rmR).push(f) }, { ownerKey, ...net, rocks: true, arc: { url: arcade.url, token: "hc", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 } });
-const sh = await testHost({ after: (f) => (rmS.length ? afters : rmS).push(f) }, { ownerKey, ...net });
 const stores: string[] = [];
 const timings: string[] = [];
 try {
   for (const x of ["a", "b", "c"]) rh.instance(x);
-  sh.instance("s");
   await rh.router.start();
-  await sh.router.start();
   for (const x of ["a", "b", "c"]) await rh.install(x, [CHAIN_APP]);
-  await sh.install("s", [CHAIN_APP]);
   const k = async (h: typeof rh, x: string) => (await h.router.hydrate(x)).kernel;
   const stateOf = async (h: typeof rh, x: string) => {
     const kk = await k(h, x);
@@ -122,7 +116,7 @@ try {
     for (const [h, x] of to) await h.router.chainHeaders(x, "chain", raws);
     for (const [h] of to) await h.router.settled();
   };
-  const all: Array<[typeof rh, string]> = [[rh, "a"], [rh, "b"], [rh, "c"], [sh, "s"]];
+  const all: Array<[typeof rh, string]> = [[rh, "a"], [rh, "b"], [rh, "c"]];
   for (const r of runs) await send(r, all);
   const tip1 = (await host.chainTip())!;
   const rec1 = await host.get(tip1.root) as Uint8Array;
@@ -172,12 +166,6 @@ try {
   check((await host.has(hdr6, "a")) && (await host.has(hdr6, "b")) && (await host.has(tip2.root, "c")), "a block of the host chain is readable through every instance's set");
   check((await host.has(sa.cid, "a")) && !(await host.has(sa.cid, "b")), "A's own chain/state record is invisible through B's set");
 
-  // ------------------------------------------------ serve (SQLite): the same runs, the same chain/state
-  const sc = (await stateOf(rh, "c"))!, ss = (await stateOf(sh, "s"))!;
-  check(String(sc.cid) === String(ss.cid), `serve's chain/state (its host chain in its own store) is the RocksDB host's for the same runs: ${String(ss.cid).slice(-12)} = ${String(sc.cid).slice(-12)}`);
-  const sTip = await (await k(sh, "s")).chainTip();
-  check(String(sTip?.root) === String(tip2.root), "and its host chain record is the same CID");
-
   // ------------------------------------------------ timing: a block, its frame and the event to 8 instances
   const eight = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"];
   for (const x of eight) rh.instance(x);
@@ -199,7 +187,6 @@ try {
   const med = [...per].sort((x, y) => x - y)[2]!;
   timings.push(`per block, one headers frame and the chain event stepped on 8 instances (RocksDB host): median ${med.toFixed(1)} ms (${per.map((x) => x.toFixed(1)).join(", ")})`);
   for (const x of ["a", "b", "c"]) stores.push(storeSpec(rh.db.get(x)!));
-  stores.push(storeSpec(sh.db.get("s")!));
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 }
@@ -226,7 +213,7 @@ try {
   const root = git("tree", entry("40000", "chain", chainTree.cid)); objs.push(root);
   timings.push(`an image of ${N} regtest headers mined and written: ${(performance.now() - t0).toFixed(0)} ms`);
 
-  for (const backend of ["rocksdb", "sqlite"] as const) {
+  for (const backend of ["rocksdb"] as const) {
     const home = mkdtempSync(join(tmpdir(), "hc-import-"));
     try {
       let kk: KernelSurface, kh: KernelHost | undefined;
@@ -262,7 +249,7 @@ for (const s of stores) {
   if (rp.status !== 0) process.stdout.write(rp.stderr);
   check(rp.status === 0 && /identical .*the source store reproduced exactly/.test(rp.stdout), `${s.replace(/^.*[#/]/, "")}: replays to itself exactly after the process stopped`);
 }
-if (!process.env.KEEP) for (const f of [...rmR, ...rmS]) await f();
+if (!process.env.KEEP) for (const f of rmR) await f();
 for (const t of timings) process.stdout.write(`  timing: ${t}\n`);
 process.stdout.write(failures ? `hostchain: ${failures} FAILED\n` : "hostchain: all ok\n");
 process.exit(failures ? 1 : 0);

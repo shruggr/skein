@@ -29,6 +29,7 @@ test {
     _ = @import("authfetch.zig");
     _ = @import("grants.zig");
     _ = @import("rocksdb_store.zig");
+    _ = @import("store_iface_test.zig");
     _ = @import("host.zig");
     _ = @import("host_chain.zig");
 }

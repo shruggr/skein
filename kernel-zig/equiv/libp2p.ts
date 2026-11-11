@@ -2,12 +2,7 @@
 // (src/host/p2p-router.test.ts: publish → validate → admit, reject writes
 // nothing, a stream round trip whose frame arrives as an entry; replayed
 // natively with no network) keeps its two stores here, and then the browser
-// build:
-//
-//   - replays both in headless Chrome (equiv/browser.ts): the libp2p
-//     provider's answers are entries in the log, so the wasm kernel replays
-//     them as natively — same report, same dump, fuel included;
-//   - runs a live step that publishes (#70: an emit to the libp2p provider):
+// build runs a live step that publishes (#70: an emit to the libp2p provider):
 //     alpha's store with one more message for its p2p-demo handler (the
 //     owner's signed message appended natively as a `local` request, K2, not
 //     processed), then loaded into a Worker and drained. This
@@ -54,11 +49,6 @@ try {
     console.log("== libp2p in the browser: skipped (SKEIN_EQUIV_BROWSER=0, or no playwright / Chromium)");
   } else {
     execFileSync("mise", ["exec", "--", "zig", "build", "web"], { cwd: join(here, ".."), stdio: "inherit" });
-    // ---------------------------------------------------------------- recorded answers, served in the browser
-    const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "browser.ts"), join(work, "alpha.db"), join(work, "beta.db")], { encoding: "utf8" });
-    process.stdout.write(r.stdout.split("\n").map((l) => (l ? `  ${l}\n` : "")).join(""));
-    check(r.status === 0, "the browser build replays both stores (the libp2p provider's answers are entries) exactly as natively");
-
     // ---------------------------------------------------------------- a live step in a tab with no signer
     // One more message for alpha's p2p-demo box, admitted natively but not processed (no `start`).
     const live = join(work, "live.db");

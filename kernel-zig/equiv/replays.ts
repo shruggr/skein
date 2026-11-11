@@ -18,13 +18,11 @@
 // and a source the Zig kernel wrote itself (equiv/serve.ts; format 1) is
 // reproduced exactly by its replay.
 //
-// The backends, proven equal here (#158): the same log is also replayed into
-// a set of a fresh RocksDB database (the same report and dump as z1), and a
-// SQLite source the Zig kernel wrote is migrated into one (`skein-kernel
-// migrate --into rocksdb:<dir>`: the same dump; its replay z1's state). A
-// source may be a RocksDB set, `rocksdb:<db dir>#<set>`, read in place once
-// the host process that wrote it is stopped (one process per database), or a
-// set of a wasm host's SQLite database, `sqlite:<db>#<set>` (exported first).
+// The backends are not compared here: that is the storage interface test's
+// (kernel-zig/src/store_iface_test.zig), once. A source may be a RocksDB set,
+// `rocksdb:<db dir>#<set>`, read in place once the host process that wrote it
+// is stopped (one process per database), or a set of a wasm host's SQLite
+// database, `sqlite:<db>#<set>` (exported first).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db | rocksdb:<dir>#<set> | sqlite:<db>#<set>>…
 //
@@ -224,32 +222,6 @@ for (const source of sources) {
     diffs.push(...sd);
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
   }
-  let migrated = "";
-  // #158: RocksDB — the same log replayed into a set of a fresh database; a Zig source (a file) migrated into one.
-  t0 = Date.now();
-  const zr = `rocksdb:${join(work, "rdb")}#replay`;
-  const rr = run(["replay", src, zr]);
-  const msr = Date.now() - t0;
-  if (rr.status !== 0) diffs.push(`replay into RocksDB failed (exit ${rr.status}): ${rr.stderr.slice(0, 300)}`);
-  else {
-    const jr = JSON.parse(rr.stdout);
-    for (const k of ["lines", "state"] as const) if (JSON.stringify(jr[k]) !== JSON.stringify(j1[k])) diffs.push(`RocksDB replay ${k} differ from SQLite's`);
-    if (jr.index.record !== j1.index.record) diffs.push(`state record: RocksDB ${jr.index.record} vs SQLite ${j1.index.record}`);
-    diffs.push(...dumpDiff(dump(zr), d1, "RocksDB replay vs SQLite replay"));
-  }
-  if (!rocksSource && zigSource) {
-    const zm = `rocksdb:${join(work, "mrdb")}#migrated`;
-    const m = run(["migrate", "--from", src, "--into", `rocksdb:${join(work, "mrdb")}`, "--set", "migrated"]);
-    if (m.status !== 0) diffs.push(`migrate into RocksDB failed (exit ${m.status}): ${m.stderr.slice(0, 300)}`);
-    else {
-      const md = dumpDiff(dump(src), dump(zm), "source vs migrated (RocksDB)");
-      diffs.push(...md);
-      const rm = run(["replay", zm, join(work, "zrm.db")]);
-      if (rm.status !== 0) diffs.push(`replay of the RocksDB-migrated set failed (exit ${rm.status})`);
-      else if (JSON.parse(rm.stdout).index.record !== j1.index.record) diffs.push(`the RocksDB-migrated set's replay ends at ${JSON.parse(rm.stdout).index.record}, the source's at ${j1.index.record}`);
-      if (!md.length) migrated = " · migrated to RocksDB: the same dump and replay";
-    }
-  }
   const n = d1.entries.length;
   const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
   // A store with no thread ran no step: only its genesis (a mailbox nothing was delivered to: a handshake writes
@@ -259,7 +231,7 @@ for (const source of sources) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);
   } else {
-    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms; into RocksDB ${msr} ms, the same)${fromSource}${migrated}\n`);
+    process.stdout.write(`${name}: identical (${counts}; ${ms1} ms, ${ms2} ms)${fromSource}\n`);
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
