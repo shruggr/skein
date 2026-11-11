@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS stream_cursor (
   last_id           TEXT NOT NULL,
   updated_at        TEXT NOT NULL
 ) WITHOUT ROWID;
--- The statuses already routed (#58): txid + txStatus + blockHash, so a redelivered one writes nothing.
+-- The statuses already seen (#58): txid + txStatus + blockHash, so a redelivered one writes nothing; the
+-- host-level ones (skein 0.9.0: not delivered into an instance) are recorded here too.
 CREATE TABLE IF NOT EXISTS status_seen (
   txid              TEXT NOT NULL,
   status            TEXT NOT NULL,                    -- txStatus, a space, the block hash ('' if none)
@@ -326,6 +327,11 @@ export class HostDb {
 
   hasStatus(txid: string, status: string): boolean {
     return this.db.prepare("SELECT 1 FROM status_seen WHERE txid = ? AND status = ?").get(txid, status) !== undefined;
+  }
+
+  /** The statuses seen for `txid` (each `txStatus blockHash`), in no order. */
+  statusesOf(txid: string): string[] {
+    return (this.db.prepare("SELECT status FROM status_seen WHERE txid = ?").all(txid) as Array<{ status: string }>).map((r) => r.status);
   }
 
   /** Queue a broadcast (#65, arc.ts), due now; one already queued keeps its schedule and gains `instance`. */

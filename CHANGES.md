@@ -1,5 +1,33 @@
 # Changes
 
+## 0.9.0
+
+The host only (src/host); the kernel, the programs and the pins are 0.8.1's. David's settled rules
+8-10 of the one-step swap (2026-11-11).
+
+- **An instance hears of a transaction it broadcast only when it is rejected or mined.** The
+  broadcaster (arc.ts) sends into the instances holding a transaction a proof (MINED / IMMUTABLE
+  with its merkle path, a reorg's re-proof: the proof event, as before) and a REJECTED for an
+  invalid transaction (Arcade's 400 with an invalid-class ARC code, a REJECTED it gives, a stream
+  or webhook REJECTED that is not of our payload or 476: the status message, as before). Every
+  other status — Arcade's 2xx answer to a post (RECEIVED, a duplicate's current status), the
+  stream's and webhooks' RECEIVED, SENT_TO_NETWORK, ACCEPTED_BY_NETWORK, SEEN_ON_NETWORK,
+  SEEN_MULTIPLE_NODES, MINED / IMMUTABLE with no path — is the host's: logged, recorded in
+  host.db `status_seen`, sent to no instance (and no instance is read or hydrated for it).
+  `DOUBLE_SPEND_ATTEMPTED` (the broadcaster never produces it; a double spend arrives as a
+  REJECTED) is no longer named: it is one of the host's. The queue, its retries and its one-day
+  give-up are unchanged.
+- **The requester is answered off this host's broadcast.** `Broadcaster.taken(txid, signal?)`
+  resolves when this host's broadcast of the transaction is taken by Arcade (its 2xx, or any
+  status of it but a rejection; one already in `status_seen` at once) or refused as invalid
+  (`{taken: false, reason}`); held in memory by txid, gone on a restart, ended otherwise only by
+  `signal`. `Router.p2pInbound` holds a stream frame's answer that carries a signed transaction
+  (dag-cbor `{…, tx, …}`: `signedTxOf`) on it (`heldAnswer`): taken, the answer is written as the
+  instance gave it; refused, it is `{ok: false, reason: "rejected", detail: <Arcade's reason>}`.
+  An answer with no transaction (a refusal: nothing broadcast) is written at once.
+  `Router.broadcastTaken` is the same hold for an application host (open-exchange's swap relay).
+  A host with no Arcade never releases such a hold (David to review).
+
 ## 0.8.1
 
 The host and the log are 0.8.0's; the kernel's door verifier (skein-sdk v0.21.3) and the stock mail

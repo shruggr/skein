@@ -4,11 +4,12 @@
 // else; Arcade's answers by one table — RECEIVED, a duplicate's, an invalid
 // transaction's REJECTED, our payload at fault an error and no status, not
 // final yet or a 503 or no answer tried again with backoff, the queue taken up
-// by a new process; given up a day on), the routing table (the broadcasters, a sweep of every
-// instance at a txid's first status, then the running ones only; every
-// holder gets each — a proof as an event in box `chain`, any other status as
-// the status provider's message; a redelivery, stream or webhook, writes
-// nothing), and the subscription's resume across a restart with
+// by a new process; given up a day on), the routing table (skein 0.9.0: only a
+// proof — an event in box `chain` — and a REJECTED — the status provider's
+// message — go in, to the broadcasters, a sweep of every instance at a txid's
+// first routed status, then the running ones only; every other status is the
+// host's; a redelivery, stream or webhook, writes nothing), the answers held
+// on this host's broadcast (rule 10), and the subscription's resume across a restart with
 // Last-Event-ID from host.db. With a router: no broadcast route any more, a
 // host with no Arcade drops a broadcast event and names no status provider
 // (kernel-zig/equiv/overlay.ts runs it all with a kernel).
@@ -175,19 +176,20 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   t.after(() => one.b.stop());
 
   assert.equal(one.b.enqueue("a", raw, beef), X);
-  await until("posted and answered", () => one.admitted.length === 1 || undefined);
+  await until("posted and answered", () => db.hasStatus(X, "RECEIVED ") || undefined);
   assert.deepEqual([...arcade.posts.at(-1)!], tx.toEF(), "Arcade received the transaction in Extended Format (the BEEF's ancestry)");
   const h = arcade.postHeaders.at(-1)!;
   assert.equal(h["x-callbacktoken"], TOKEN);
   assert.equal(h["x-fullstatusupdates"], "true");
   assert.equal(h["x-callbackurl"], undefined, "no webhook without a callback URL");
-  assert.deepEqual(one.admitted, [["a", "status", X, "RECEIVED"]], "Arcade's 202 is a status for the broadcaster (it holds the transaction)");
+  assert.equal(one.admitted.length, 0, "Arcade's 202 (RECEIVED) is the host's: recorded, into no instance (skein 0.9.0, rule 8)");
   assert.deepEqual(one.b.queued(), [], "answered: off the queue");
 
   // The same again (a kernel's start hands over what a thread still awaits): a duplicate, its current status.
   arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
   one.b.enqueue("a", raw, beef);
-  await until("the duplicate's status", () => one.admitted.some(([, , , st]) => st === "SEEN_ON_NETWORK") || undefined);
+  await until("the duplicate's status", () => db.hasStatus(X, "SEEN_ON_NETWORK ") || undefined);
+  assert.equal(one.admitted.length, 0, "a duplicate's current status (SEEN_ON_NETWORK): the host's");
   // No BEEF in the event: nothing is posted, nothing queued, the instance told nothing; a host error on its log.
   const two = await spend(3);
   const before = arcade.posts.length;
@@ -213,7 +215,7 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   assert.equal(one.b.queued()[0]?.txid, three.tx.id("hex"), "still queued");
   assert.ok(one.b.queued()[0]!.attempts >= 1);
   arcade.mode = "ok";
-  await until("taken", () => one.admitted.some(([, , x]) => x === three.tx.id("hex")) || undefined);
+  await until("taken", () => db.hasStatus(three.tx.id("hex"), "RECEIVED ") || undefined);
   assert.deepEqual(one.b.queued(), []);
   await one.b.stop();
 
@@ -227,8 +229,8 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   const back = broadcaster(arc, db, new Map(), new Set(["a"]));
   t.after(() => back.b.stop());
   back.b.start();
-  await until("the queue taken up", () => back.admitted.some(([, , x]) => x === four.tx.id("hex")) || undefined);
-  assert.deepEqual(back.admitted.find(([, , x]) => x === four.tx.id("hex")), ["a", "status", four.tx.id("hex"), "RECEIVED"], "its broadcaster known from the queue row");
+  await until("the queue taken up", () => db.hasStatus(four.tx.id("hex"), "RECEIVED ") || undefined);
+  assert.deepEqual(back.b.queued(), [], "taken: off the queue");
 
   // Given up a day after it was queued.
   let clock = 1_000;
@@ -276,7 +278,7 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   assert.throws(() => resolveSystem({ identity: me, root: [owner], handle: "w", domain: "localhost" }, programs, { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
 });
 
-test("arc: every instance holding the transaction gets each status — a proof as an event, the rest as the status provider's messages; the broadcaster, a sweep, then only the running; a redelivery writes nothing", async (t) => {
+test("arc: into the instances holding the transaction go only proofs (events) and REJECTED (the status provider's messages); every other status is the host's; the broadcaster, a sweep, then only the running; a redelivery writes nothing", async (t) => {
   const arcade = await FakeArcade.start();
   t.after(() => arcade.close());
   const db = new HostDb(join(home(t), "host.db"));
@@ -288,45 +290,104 @@ test("arc: every instance holding the transaction gets each status — a proof a
   const { b, admitted, asked } = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, holding, running);
   t.after(() => b.stop());
 
-  // `a` broadcasts it (the queue notes the broadcaster): Arcade's RECEIVED; the stream brings SEEN_ON_NETWORK.
+  // `a` broadcasts it (the queue notes the broadcaster): Arcade's RECEIVED; the stream's intermediate statuses. All the host's.
   b.enqueue("a", Uint8Array.from(tx.toBinary()), beef);
-  await until("posted", () => b.stats.routed === 1 || undefined);
-  assert.deepEqual(asked.map(([h]) => h).sort(), ["b", "c", "d"], "the first status of a txid: every other enabled instance is read (c hydrated for it)");
-  assert.deepEqual(admitted.map(([h, how, , s]) => [h, how, s]).sort(), [["a", "status", "RECEIVED"], ["b", "status", "RECEIVED"], ["c", "status", "RECEIVED"]]);
-  admitted.length = 0;
+  await until("posted", () => db.hasStatus(X, "RECEIVED ") || undefined);
   b.start();
   await until("subscribed", () => arcade.streams || undefined);
-  arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
-  await until("routed", () => b.stats.routed === 2 || undefined);
-  assert.deepEqual(admitted.map(([h, how, , s]) => [h, how, s]).sort(), [["a", "status", "SEEN_ON_NETWORK"], ["b", "status", "SEEN_ON_NETWORK"], ["c", "status", "SEEN_ON_NETWORK"]]);
+  for (const st of ["SENT_TO_NETWORK", "ACCEPTED_BY_NETWORK", "SEEN_ON_NETWORK", "SEEN_MULTIPLE_NODES", "DOUBLE_SPEND_ATTEMPTED"]) arcade.emit(X, { txStatus: st });
+  await until("seen", () => db.hasStatus(X, "DOUBLE_SPEND_ATTEMPTED ") || undefined);
+  assert.equal(admitted.length, 0, "RECEIVED, SENT/ACCEPTED/SEEN…, DOUBLE_SPEND_ATTEMPTED: into no instance (rule 8, 9)");
+  assert.equal(asked.length, 0, "and no instance is read for them");
+  assert.equal(b.stats.routed, 0);
 
-  // A later holder (d, running now) is found at the next status; the others are not asked again.
-  holding.set("d", new Set([X]));
-  asked.length = 0;
+  // The proof: every holder — the broadcaster, then a sweep of every other enabled instance (c hydrated for it).
   const bump = new MerklePath(103, [[{ offset: 0, hash: X, txid: true }]]).toHex();
   arcade.emit(X, { txStatus: "MINED", blockHash: "11".repeat(32), blockHeight: 103, merklePath: bump });
-  await until("the MINED status", () => b.stats.routed === 3 || undefined);
-  assert.deepEqual(asked.map(([h]) => h), ["d"], "only the running instance not yet known");
-  assert.deepEqual(admitted.filter(([, , , s]) => s === "MINED").map(([h, how]) => [h, how]).sort(), [["a", "proof"], ["b", "proof"], ["c", "proof"], ["d", "proof"]], "MINED with its path: a proof event, unsigned");
+  await until("the MINED status", () => b.stats.routed === 1 || undefined);
+  assert.deepEqual(asked.map(([h]) => h).sort(), ["b", "c", "d"], "the first routed status of a txid: every other enabled instance is read");
+  assert.deepEqual(admitted.map(([h, how]) => [h, how]).sort(), [["a", "proof"], ["b", "proof"], ["c", "proof"]], "MINED with its path: a proof event, unsigned");
 
-  // Arcade's webhook: the host token only; the same MINED again writes nothing; a new status goes the same path.
+  // Arcade's webhook: the host token only; the same MINED again writes nothing; IMMUTABLE with no path is the host's.
   const hook = (auth: string, body: unknown) => b.callback({ authorization: auth }, new TextEncoder().encode(JSON.stringify(body)));
   assert.equal((await hook("Bearer wrong", arcade.webhookBody(X))).status, 401);
   assert.equal((await hook(`Bearer ${TOKEN}`, { txid: X })).status, 400);
   const n = admitted.length;
   assert.equal((await hook(`Bearer ${TOKEN}`, arcade.webhookBody(X))).status, 200);
   assert.equal(admitted.length, n, "a redelivered MINED: nothing admitted");
-  assert.equal(b.stats.duplicates, 1);
   assert.equal((await hook(`Bearer ${TOKEN}`, { timestamp: "t", txid: X, txStatus: "IMMUTABLE", blockHash: "11".repeat(32), blockHeight: 103 })).status, 200);
-  assert.deepEqual(admitted.slice(n).map(([h, how, , s]) => [h, how, s]).sort(), [["a", "status", "IMMUTABLE"], ["b", "status", "IMMUTABLE"], ["c", "status", "IMMUTABLE"], ["d", "status", "IMMUTABLE"]], "IMMUTABLE with no path: a status message");
+  assert.equal(admitted.length, n, "IMMUTABLE with no path: the host's");
+  assert.ok(db.hasStatus(X, `IMMUTABLE ${"11".repeat(32)}`));
 
-  // A reorg: MINED in another block is a new status (its block hash differs).
+  // A reorg: MINED in another block is a new proof; a later holder (d, running now) is found, the others not asked again.
+  holding.set("d", new Set([X]));
+  asked.length = 0;
   arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
   await new Promise((r) => setTimeout(r, 100));
   arcade.emit(X, { txStatus: "MINED", blockHash: "22".repeat(32), blockHeight: 104, merklePath: bump });
-  await until("the re-proof", () => admitted.filter(([, , , s]) => s === "MINED").length === 8 || undefined);
-  assert.equal(admitted.filter(([, , , s]) => s === "SEEN_ON_NETWORK").length, 3, "SEEN_ON_NETWORK again after the reorg: a redelivery, dropped");
-  assert.equal(b.stats.proofs, 8);
+  await until("the re-proof", () => admitted.filter(([, how]) => how === "proof").length === 7 || undefined);
+  assert.deepEqual(asked.map(([h]) => h), ["d"], "only the running instance not yet known");
+  assert.equal(admitted.filter(([, how]) => how === "status").length, 0, "no status message for any of it");
+  assert.equal(b.stats.proofs, 7);
+});
+
+test("arc: the answers held on this host's broadcast (rule 10) — released at Arcade's 2xx; at a REJECTED with its reason; at once for a status seen; dropped with the signal", async (t) => {
+  const arcade = await FakeArcade.start();
+  t.after(() => arcade.close());
+  const db = new HostDb(join(home(t), "host.db"));
+  t.after(() => db.close());
+  const one = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, new Map(), new Set(["a"]));
+  t.after(() => one.b.stop());
+
+  // Held before the broadcast is queued (the step's answer is read before its broadcast event is posted): released at the 2xx.
+  const { tx, beef } = await spend(60);
+  const X = tx.id("hex");
+  let got: unknown;
+  const held = one.b.taken(X).then((v) => { got = v; return v; });
+  assert.equal(one.b.held(X), 1);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(got, undefined, "nothing posted: still held");
+  one.b.enqueue("a", Uint8Array.from(tx.toBinary()), beef);
+  assert.deepEqual(await held, { taken: true }, "Arcade took it (RECEIVED): released");
+  assert.equal(one.b.held(X), 0);
+  assert.equal(one.admitted.length, 0, "and the instance heard nothing");
+  assert.deepEqual(await one.b.taken(X), { taken: true }, "a status already seen: at once");
+
+  // Not taken yet (busy): held across the retries; released when it is taken.
+  const busy = await spend(61);
+  arcade.mode = "busy";
+  const posts = arcade.posts.length;
+  const h2 = one.b.taken(busy.tx.id("hex"));
+  one.b.enqueue("a", Uint8Array.from(busy.tx.toBinary()), busy.beef);
+  await until("tried again", () => arcade.posts.length >= posts + 2 || undefined);
+  assert.equal(one.b.held(busy.tx.id("hex")), 1, "still held while Arcade does not take it");
+  arcade.mode = "ok";
+  assert.deepEqual(await h2, { taken: true });
+
+  // Refused as invalid (ARC 465): released as a refusal with Arcade's reason; the instance hears REJECTED.
+  const bad = await spend(62);
+  arcade.mode = "reject";
+  const h3 = one.b.taken(bad.tx.id("hex"));
+  one.b.enqueue("a", Uint8Array.from(bad.tx.toBinary()), bad.beef);
+  const r3 = await h3;
+  assert.equal(r3?.taken, false);
+  assert.ok(r3 && !r3.taken && r3.reason.length > 0, "Arcade's reason");
+  assert.deepEqual(one.admitted.filter(([, , x]) => x === bad.tx.id("hex")), [["a", "status", bad.tx.id("hex"), "REJECTED"]]);
+  assert.deepEqual(await one.b.taken(bad.tx.id("hex")), { taken: false, reason: "REJECTED" }, "a REJECTED already seen: at once");
+  arcade.mode = "ok";
+
+  // Our payload at fault (no verdict): not released; the requester's connection closing drops the hold.
+  const ours = await spend(63);
+  arcade.answer = { status: 400, body: { status: 460 } };
+  const ac = new AbortController();
+  const h4 = one.b.taken(ours.tx.id("hex"), ac.signal);
+  one.b.enqueue("a", Uint8Array.from(ours.tx.toBinary()), ours.beef);
+  await until("dropped from the queue", () => (one.b.queued().length === 0 && !one.b.busy()) || undefined);
+  assert.equal(one.b.held(ours.tx.id("hex")), 1, "an \"ours\" refusal is no verdict: still held");
+  ac.abort();
+  assert.equal(await h4, undefined, "the signal: dropped");
+  assert.equal(one.b.held(ours.tx.id("hex")), 0);
+  arcade.answer = undefined;
 });
 
 test("arc: a restart resumes the stream after the last event id taken (host.db): nothing missed, nothing twice", async (t) => {
@@ -346,7 +407,8 @@ test("arc: a restart resumes the stream after the last event id taken (host.db):
   assert.deepEqual(arcade.connects, [undefined], "the first connection: no id");
   arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
   const id2 = arcade.emit(X, { txStatus: "SEEN_ON_MULTIPLE_NODES" });
-  await until("three routed (RECEIVED, and two from the stream)", () => one.b.stats.routed === 3 || undefined);
+  await until("three seen (RECEIVED, and two from the stream)", () => (db.hasStatus(X, "RECEIVED ") && db.hasStatus(X, "SEEN_ON_MULTIPLE_NODES ") && db.cursor(arcade.eventsUrl) === id2) || undefined);
+  assert.equal(one.admitted.length, 0, "none of them goes into the instance");
   assert.equal(db.cursor(arcade.eventsUrl), id2, "the last id taken, in host.db");
 
   // A network blip: the same process reconnects with the id it holds.
@@ -398,8 +460,8 @@ test("arc: our payload or request at fault — an error on the instance's log, o
   assert.equal(one.b.queued()[0]?.txid, X, "still queued");
   assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [], "no status while not final");
   arcade.answer = undefined;
-  await until("taken", () => one.admitted.some(([, , x]) => x === X) || undefined);
-  assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [["a", "status", X, "RECEIVED"]]);
+  await until("taken", () => db.hasStatus(X, "RECEIVED ") || undefined);
+  assert.deepEqual(one.admitted.filter(([, , x]) => x === X), [], "taken: RECEIVED, the host's");
 });
 
 test("arc: the stream's REJECTED — with our code (460) or 476 not routed; 467 (the network's TX_INVALID) and no code routed as given", async (t) => {
@@ -413,8 +475,8 @@ test("arc: the stream's REJECTED — with our code (460) or 476 not routed; 467 
   const one = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, holding, new Set(["a"]));
   t.after(() => one.b.stop());
   for (const x of txs) one.b.enqueue("a", Uint8Array.from(x.tx.toBinary()), x.beef);
-  await until("posted", () => one.admitted.length === 4 || undefined);
-  one.admitted.length = 0;
+  await until("posted", () => ids.every((x) => db.hasStatus(x, "RECEIVED ")) || undefined);
+  assert.equal(one.admitted.length, 0);
   one.b.start();
   await until("subscribed", () => arcade.streams || undefined);
   arcade.emit(ids[0]!, { txStatus: "REJECTED", status: 460, extraInfo: "missing input source data: input 0" });
@@ -426,4 +488,40 @@ test("arc: the stream's REJECTED — with our code (460) or 476 not routed; 467 
   assert.deepEqual(one.admitted.map(([h, how, x, s]) => [h, how, ids.indexOf(x), s]).sort(), [["a", "status", 2, "REJECTED"], ["a", "status", 3, "REJECTED"]], "467 and no code: REJECTED as given");
   assert.ok(one.lines.some((l) => l.startsWith(`[a] ERROR arcade stream: ${ids[0]!.slice(0, 8)} REJECTED with ARC 460 (not extended format)`) && l.endsWith("not routed")), "460: our payload, an error, not routed");
   assert.ok(one.lines.some((l) => l === `[a] arcade stream: ${ids[1]!.slice(0, 8)} REJECTED with ARC 476 (not final): non-final: not final yet, no verdict — not routed`), "476: logged, not routed");
+});
+
+test("arc: a stream frame's answer (Router.heldAnswer, rule 10) — one carrying a signed transaction held until this host's broadcast is taken; a refusal when Arcade answers invalid; one carrying none at once", async (t) => {
+  const db = new HostDb(join(home(t), "host.db"));
+  t.after(() => db.close());
+  const arcade = await FakeArcade.start();
+  t.after(() => arcade.close());
+  const owner = PrivateKey.fromRandom().toPublicKey().toString();
+  const router = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: () => {} });
+  t.after(() => router.stop());
+  const { encode, decode } = await import("@ipld/dag-cbor");
+
+  // The instance's one-step answer (a stub): {ok, tx, txid, beef}; its broadcast event reaches the broadcaster after.
+  const { tx, beef } = await spend(70);
+  const raw = Uint8Array.from(tx.toBinary());
+  const reply = encode({ ok: true, tx: raw, txid: tx.id("hex"), beef });
+  let out: Uint8Array | undefined;
+  const p = router.heldAnswer("x", reply).then((b) => { out = b; });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(out, undefined, "held: this host has not broadcast it yet");
+  router.arc!.enqueue("x", raw, beef);
+  await p;
+  assert.deepEqual(out, reply, "taken by Arcade: the answer as the instance gave it");
+
+  // Arcade refuses it as invalid: the requester's answer is the refusal, Arcade's reason as its detail.
+  const bad = await spend(71);
+  arcade.mode = "reject";
+  const q = router.heldAnswer("x", encode({ ok: true, tx: Uint8Array.from(bad.tx.toBinary()), txid: bad.tx.id("hex"), beef: bad.beef }));
+  router.arc!.enqueue("x", Uint8Array.from(bad.tx.toBinary()), bad.beef);
+  assert.deepEqual(decode(await q), { ok: false, reason: "rejected", detail: "fee is too low" });
+  arcade.mode = "ok";
+
+  // A refusal (no signed transaction: nothing broadcast): at once.
+  const refusal = encode({ ok: false, reason: "pool_spent", beef: bad.beef });
+  assert.deepEqual(await router.heldAnswer("x", refusal), refusal);
+  assert.deepEqual(await router.heldAnswer("x", encode({ kind: "error", message: "m" })), encode({ kind: "error", message: "m" }), "an answer that is not a map with tx: at once");
 });

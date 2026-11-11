@@ -1003,16 +1003,19 @@ event (box "chain")  {kind: "proof", subject: <tx CID>, txid (hex), path: bytes 
   admitted as this same event with `via: "libp2p:<topic>-proof"` (so it is
   not re-published); anything it cannot check is `ignore`.
 
-**The status provider is optional.** Intermediate and terminal statuses
-reach an instance only as signed messages from a status provider it
-subscribes to:
+**The status provider is optional.** A rejection reaches an instance only
+as a signed message from a status provider it subscribes to:
 
 ```
 message  box "chain/status", subject: <tx CID>, from the status provider's key (no replyTo)
-body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraInfo?}
-         txStatus: RECEIVED, SENT_TO_NETWORK, ACCEPTED_BY_NETWORK, SEEN_ON_NETWORK, SEEN_MULTIPLE_NODES,
-                   MINED / IMMUTABLE (with no path), REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED
+body     {kind: "status", txid (hex), txStatus: "REJECTED", extraInfo?}
 ```
+
+skein 0.9.0: after it broadcasts a transaction, an instance hears of it again
+only when it is rejected (this message) or mined (the proof event). The
+broadcaster's other statuses (RECEIVED, SENT_TO_NETWORK, ACCEPTED_BY_NETWORK,
+SEEN_ON_NETWORK, SEEN_MULTIPLE_NODES, MINED / IMMUTABLE with no path) are the
+host's own: logged and recorded, sent to no instance.
 
 - **Taking statuses** is a row `{transport: "mailbox", address: "chain/status",
   sender: <the provider's key>, program}` (the chain app's manifest writes
@@ -1024,12 +1027,21 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
   row's program (args `{message, body, box: "chain/status", sender}`). An
   instance with no such row records the message and runs nothing.
 - The reference host's status provider is its broadcaster's identity (key ID
-  `status`): every status Arcade reports but a proof — its answer to the
-  post (RECEIVED; a 400 as REJECTED with `extraInfo` its reason) and its SSE
-  and webhook statuses — goes to every instance holding the transaction,
-  once (a redelivery writes nothing; the answer to a later broadcaster's
-  post reaches it even if routed before). Arcade does not sign its statuses:
-  the provider's signature is the attestation.
+  `status`): a REJECTED for an invalid transaction (Arcade's 400 with an
+  invalid-class ARC code, `extraInfo` its reason; a REJECTED it gives; a
+  stream or webhook REJECTED that is not of our payload or 476) goes to
+  every instance holding the transaction, once (a redelivery writes nothing;
+  the answer to a later broadcaster's post reaches it even if routed
+  before). Arcade does not sign its statuses: the provider's signature is
+  the attestation.
+- **The requester's answer** is the host's (rule 10, skein 0.9.0): a stream
+  frame's answer carrying a signed transaction (`{…, tx, …}`, the
+  amm-validator's swap) is held until this host's broadcast of it is taken
+  by Arcade (its 2xx, or a status of it already seen), then written as it is;
+  refused by Arcade as invalid, it is written `{ok: false, reason:
+  "rejected", detail: <Arcade's reason>}`. An answer with no transaction (a
+  refusal) is written at once. The hold is in memory, by txid; nothing
+  times it out.
 - **Without a status provider** an instance still works: it learns
   acceptance by the proof arriving, and rejection by a competing proof
   (`double-spent`) or abandonment at `walletAbandonMs`.
@@ -1041,8 +1053,8 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
 there is no setting, and the overlay holds no chain state. A submission is
 handed to the chain app (`ingest`) and admitted on the chain app's
 **first** admitting answer — `accepted` (a status provider's first status
-that is not a rejection) or `proven` (a validated proof) — and never on
-`rejected`. With no status provider subscribed (a `status` row), no status
+that is not a rejection; skein 0.9.0's host sends none, see above) or
+`proven` (a validated proof) — and never on `rejected`. With no status provider subscribed (a `status` row), no status
 ever arrives, so the chain app answers only at the proof and the overlay
 admits there. Admission on validation alone is not a mode. A submission
 admitted on `accepted` keeps listening (the overlay's watch of the same

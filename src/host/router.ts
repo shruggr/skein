@@ -324,6 +324,19 @@ const json = (status: number, v: unknown): RouterResponse => ({ status, headers:
 const KEY = /^0[23][0-9a-f]{64}$/;
 /** #148: an app's event stream, at an instance's origin. */
 /** The apps a dispatch table names (an app with no row left is uninstalled). */
+/**
+ * The txid of the signed transaction a frame's answer carries (skein 0.9.0, rule 10): the answer dag-cbor, a map
+ * whose `tx` is the bytes of a transaction (the amm-validator's accepted swap, `{ok, tx, txid, beef}`); else
+ * undefined (a refusal carries none).
+ */
+export function signedTxOf(body: Uint8Array): string | undefined {
+  let v: unknown;
+  try { v = dagCbor.decode(body); } catch { return undefined; }
+  const tx = (v && typeof v === "object" && !Array.isArray(v)) ? (v as { tx?: unknown }).tx : undefined;
+  if (!(tx instanceof Uint8Array) || !tx.length) return undefined;
+  try { return Transaction.fromBinary([...tx]).id("hex"); } catch { return undefined; }
+}
+
 const appsOf = (rows: DispatchRow[]): Set<string> => new Set(rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
 export { HANDLE };
 /** Handles no instance may take on this host (H3), besides the router origin's own first label (Router.reserved): `id` (the router's own in production) and `host` (the host skein's). */
@@ -925,6 +938,10 @@ export class Router {
    * however long (the stream stays open; nothing late is dropped). A frame a
    * route's filter answers at the door (a read, #143: nothing written) is
    * answered with the filter's body (#154: the overlay's sync protocol).
+   * skein 0.9.0: a frame's answer carrying a signed transaction (`signedTxOf`)
+   * is held until this host's broadcast of it is taken by Arcade; refused by
+   * Arcade as invalid, the answer is `{ok: false, reason: "rejected", detail:
+   * <Arcade's reason>}` instead (`broadcastTaken`).
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
     const l = await this.hydrate(handle);
@@ -973,7 +990,40 @@ export class Router {
     const r = dagCbor.decode(a.answer) as { verdict?: string; reason?: string; body?: Uint8Array; close?: boolean };
     const verdict = r.verdict === "accept" || r.verdict === "reject" ? r.verdict : "ignore";
     if (verdict !== "accept" || process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `${source} from ${from}: ${verdict}${r.reason ? ` (${r.reason})` : ""}`);
-    return { verdict, ...(r.body instanceof Uint8Array ? { body: r.body } : {}), ...(r.close ? { close: true } : {}), ...(r.reason ? { reason: r.reason } : {}) };
+    let body = r.body instanceof Uint8Array ? r.body : undefined;
+    if (call.topic === undefined && body) body = await this.heldAnswer(handle, body);
+    return { verdict, ...(body ? { body } : {}), ...(r.close ? { close: true } : {}), ...(r.reason ? { reason: r.reason } : {}) };
+  }
+
+  /**
+   * skein 0.9.0 (rule 10): a stream frame's answer, as the requester gets it. One carrying a signed
+   * transaction (`signedTxOf`) is held until THIS host's broadcast of it is taken by Arcade, then answered as
+   * it is; refused by Arcade as invalid, it is answered `{ok: false, reason: "rejected", detail: <Arcade's
+   * reason>}`. One carrying none (a refusal: nothing broadcast) goes at once.
+   */
+  async heldAnswer(handle: string, body: Uint8Array): Promise<Uint8Array> {
+    const txid = signedTxOf(body);
+    if (!txid) return body;
+    const t = await this.broadcastTaken(handle, txid);
+    if ("gone" in t || t.taken) return body;
+    this.say(handle, `${txid.slice(0, 8)}: refused by Arcade (${t.reason}): the held answer is a refusal`);
+    return dagCbor.encode({ ok: false, reason: "rejected", detail: t.reason });
+  }
+
+  /**
+   * skein 0.9.0 (rule 10, David 2026-11-11: "The requester should be queued off of the actual broadcast
+   * state"): until this host's broadcast of `txid` is taken by Arcade (`{taken: true}`) or refused as invalid
+   * (`{taken: false, reason}`) — the hold of an answer to a requester (Broadcaster.taken: in memory, gone on a
+   * restart). `signal` (the requester's connection) fired: `{gone: true}`. A host with no Arcade never
+   * broadcasts: the hold is never released (David to review).
+   */
+  async broadcastTaken(handle: string, txid: string, signal?: AbortSignal): Promise<{ taken: true } | { taken: false; reason: string } | { gone: true }> {
+    if (!this.arc) {
+      this.say(handle, `${txid.slice(0, 8)}: an answer held on this host's broadcast, and this host has no Arcade: never released`);
+      return await new Promise((resolve) => { signal?.addEventListener("abort", () => resolve({ gone: true }), { once: true }); });
+    }
+    const t = await this.arc.taken(txid, signal);
+    return t ?? { gone: true };
   }
 
   /** Until nothing is queued and every loaded kernel has processed what it was given (tests, corpus). */

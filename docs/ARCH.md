@@ -277,10 +277,14 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   (`{kind: "broadcast", tx, beef?}`), queued durably in host.db and posted
   under the host's callback token, retried with backoff. One SSE
   subscription to Arcade (resumed with `Last-Event-ID`) and its webhooks
-  (`POST /arc/callback`) bring statuses back. What Arcade says of a
-  transaction goes to every instance whose store holds it: a merkle path as
-  a proof event in box `chain`, anything else as a signed message from the
-  status provider, which an instance takes only through a `$status` row.
+  (`POST /arc/callback`) bring statuses back. Only two go to the instances
+  whose store holds the transaction (skein 0.9.0): a merkle path as a proof
+  event in box `chain`, and a REJECTED (invalid) as a signed message from
+  the status provider, which an instance takes only through a `$status`
+  row. Every other status is the host's: logged and recorded, never sent.
+  A stream frame's answer carrying a signed transaction (a swap) is held
+  until this host's broadcast of it is taken by Arcade, or answered
+  `rejected` if Arcade refuses it as invalid.
 - **Feeds** (`src/host/feeds.ts`): SSE header streams an instance declares
   in its config, one connection per URL, each event's headers handed to the
   host chain (a `headers` frame; below) and, on a changed record, the

@@ -19,7 +19,7 @@
 // (its broadcasters added).
 //
 // Arcade's answers, one table (`ARC_CODES`, `answerOf`): a 2xx is the status it
-// gives (RECEIVED, a duplicate's current one) and the row goes; a 400 whose ARC
+// gives (RECEIVED, a duplicate's current one: Arcade TOOK it) and the row goes; a 400 whose ARC
 // code (the body's numeric `status`) says the transaction is invalid is a
 // REJECTED status and the row goes; a 400 with our payload or request at
 // fault (no ARC code, 460, 467 at intake, 468, 469, 475; 401, 403, 404, any
@@ -35,23 +35,37 @@
 // `Last-Event-ID` (the last event id taken, host.db `stream_cursor`, written
 // once the event is routed), reconnecting with backoff (feeds.ts SseStream);
 // Arcade's webhooks, when it has a callback URL, take the same path (POST
-// /arc/callback, the host token as bearer). Each status goes to **every
-// instance whose state holds the transaction** (#58), two ways (#65):
+// /arc/callback, the host token as bearer). skein 0.9.0 (David 2026-11-11: "The only statuses which are
+// fed back into open exchange instances should be rejected or mined"): an instance hears of a
+// transaction it broadcast only when it is REJECTED (invalid) or proven. Those go to **every instance
+// whose state holds the transaction** (#58), two ways (#65):
 //
-//   a merkle path (MINED, IMMUTABLE with its BUMP)   a **proof event** in box `chain`, unsigned:
+//   a merkle path (MINED, IMMUTABLE with its BUMP; a reorg's re-proof)   a **proof event** in box `chain`, unsigned:
 //       {kind: "proof", subject: <tx CID>, txid, path: bytes (BRC-74), blockHash?, blockHeight?}
 //       — self-validating, recorded by the VM only when the path's root is its header's at that
 //       height; specific wiring (this session), never an open box
-//   anything else (RECEIVED, SEEN_ON_NETWORK, REJECTED, DOUBLE_SPEND_ATTEMPTED, …)
+//   REJECTED (the transaction invalid: Arcade's 400 with an "invalid" code, a REJECTED it gives, a
+//   stream REJECTED that is not ours or 476)
 //       a **status message** from the host's status provider (providers.ts `status`): a signed
 //       message, box `chain/status` (the chain app's, #128), `subject` the transaction's CID, body
-//       {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?} — admitted by an
+//       {kind: "status", txid, txStatus: "REJECTED", extraInfo?} — admitted by an
 //       instance only if it has a row from that provider ({sender: <its key>, box: "chain/status"}). Optional: an instance
-//       without the subscription learns acceptance from the proof, rejection from a competing
-//       proof or abandonment (docs/CHAIN.md, "Settlement").
+//       without the subscription learns rejection from a competing proof or abandonment
+//       (docs/CHAIN.md, "Settlement").
+//
+// Every other status — the 2xx answer to a post (RECEIVED, a duplicate's current one), RECEIVED,
+// SENT_TO_NETWORK, ACCEPTED_BY_NETWORK, SEEN_ON_NETWORK, SEEN_MULTIPLE_NODES, MINED / IMMUTABLE with no
+// path, … — is the HOST's: logged and recorded in `status_seen`, sent to no instance.
+//
+// The requester's answer (skein 0.9.0, rule 10: "The requester should be queued off of the actual
+// broadcast state"): `taken(txid)` is a promise on THIS host's broadcast of the transaction — resolved
+// `{taken: true}` at Arcade's 2xx to its post or any status of it that is not a rejection, `{taken:
+// false, reason}` at a REJECTED (the transaction invalid). A status already seen answers it at once. The
+// holds are in memory only, keyed by txid, gone with the process (the connection they answer is too);
+// nothing times them out: a hold is released by the broadcast, or dropped when its `signal` fires.
 //
 // A status already routed (txid + txStatus + blockHash, host.db
-// `status_seen`) is not routed again — but Arcade's answer to a post always
+// `status_seen`) is not routed again — but Arcade's REJECTED or proof in answer to a post always
 // reaches the instances that broadcast it (a later broadcaster's news). Who holds a transaction is read, never
 // written: the kernel's `has` of the transaction's CID (bitcoin-tx: its
 // txid), cached per txid — filled by the broadcasts (who sent it) and by a
@@ -258,8 +272,23 @@ export function statusBodyOf(ev: Record<string, unknown>): Record<string, unknow
   };
 }
 
+/** This host's broadcast of a transaction, for a held answer: Arcade took it, or refused it as invalid. */
+export type Taken = { taken: true } | { taken: false; reason: string };
+
+/** What a status says of this host's broadcast: taken, refused as invalid, or (a REJECTED that is no verdict) nothing. */
+function outcomeOf(ev: Record<string, unknown>): Taken {
+  if (ev.txStatus !== "REJECTED") return { taken: true };
+  const why = typeof ev.extraInfo === "string" && ev.extraInfo ? ev.extraInfo : typeof ev.code === "number" ? `ARC ${ev.code}` : "REJECTED";
+  return { taken: false, reason: why };
+}
+
+/** Whether a status goes into the instances holding the transaction (rule 8): a proof, or a REJECTED. */
+const intoInstances = (ev: Record<string, unknown>, proof: unknown): boolean => proof !== undefined || ev.txStatus === "REJECTED";
+
 export class Broadcaster {
   readonly o: BroadcasterOptions;
+  /** Held answers (rule 10), in memory: txid → the waiters on this host's broadcast of it. */
+  private holds = new Map<string, Set<(t: Taken) => void>>();
   /** txid → the instances known to hold it, and whether every enabled instance was asked. */
   private known = new Map<string, { handles: Set<string>; swept: boolean }>();
   /** Statuses being routed now (txid + key): a webhook and the stream delivering the same one route it once. */
@@ -334,11 +363,55 @@ export class Broadcaster {
   }
 
   /**
+   * Until this host's broadcast of `txid` is taken by Arcade (its 2xx to the post, or any status of it but a
+   * rejection) or refused as invalid (a REJECTED): the hold of an answer to a requester (rule 10). A status
+   * already seen (host.db `status_seen`) answers at once: a proof, else any taken one, else a REJECTED. The
+   * hold is registered before this returns (no status between the read and the hold is missed). `signal`
+   * fired: resolved `undefined` and the hold dropped. Nothing else ends it.
+   */
+  taken(txid: string, signal?: AbortSignal): Promise<Taken | undefined> {
+    const t = txid.toLowerCase();
+    const seen = this.o.db.statusesOf(t).map((k) => k.split(" ")[0]!);
+    if (seen.length) {
+      if (seen.some((s) => s !== "REJECTED")) return Promise.resolve({ taken: true });
+      return Promise.resolve({ taken: false, reason: "REJECTED" });
+    }
+    if (signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const done = (v: Taken | undefined) => {
+        const s = this.holds.get(t);
+        s?.delete(done);
+        if (s && !s.size) this.holds.delete(t);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(v);
+      };
+      const onAbort = () => done(undefined);
+      signal?.addEventListener("abort", onAbort);
+      let s = this.holds.get(t);
+      if (!s) this.holds.set(t, (s = new Set()));
+      s.add(done);
+    });
+  }
+
+  /** The answers held on `txid` (tests, the log). */
+  held(txid: string): number { return this.holds.get(txid.toLowerCase())?.size ?? 0; }
+
+  /** A status of `txid` from Arcade: the holds on it released with what it says of the broadcast. */
+  private release(txid: string, ev: Record<string, unknown>): void {
+    const s = this.holds.get(txid);
+    if (!s) return;
+    const out = outcomeOf(ev);
+    for (const f of [...s]) f(out);
+  }
+
+  /**
    * One status from Arcade (the stream's, a webhook's, or its answer to a
-   * post): routed to every instance holding the transaction, once — a proof
-   * as an event, anything else as a status message. `askers` (a post's
-   * broadcasters) get it even when it was routed before: Arcade's answer to
-   * a duplicate is the news for an instance that broadcast it later. The
+   * post). A proof or a REJECTED (rule 8) is routed to every instance holding
+   * the transaction, once — a proof as an event, a REJECTED as a status
+   * message; `askers` (a post's broadcasters) get it even when it was routed
+   * before: Arcade's answer to a duplicate is the news for an instance that
+   * broadcast it later. Any other status is the host's: recorded, logged,
+   * sent to no instance. Either way the answers held on it are released. The
    * number of instances it reached.
    */
   async deliver(v: unknown, via: "stream" | "webhook" | "post", askers: string[] = []): Promise<number> {
@@ -358,6 +431,13 @@ export class Broadcaster {
     }
     const key = `${String(ev.txStatus)} ${String(ev.blockHash ?? "")}`;
     const proof = proofOf(ev);
+    if (!intoInstances(ev, proof)) {
+      // The host's own (rule 8): recorded and logged, into no instance; the answers held on it released.
+      if (this.o.db.markStatus(txid, key)) this.say("router", `arcade ${via}: ${txid.slice(0, 8)} ${String(ev.txStatus)} (host-level: not delivered)`);
+      else this.stats.duplicates++;
+      this.release(txid, ev);
+      return 0;
+    }
     const send = async (hs: string[]): Promise<number> => {
       let n = 0;
       for (const h of hs) {
@@ -373,6 +453,7 @@ export class Broadcaster {
     if (busy) await busy;
     if (busy || this.o.db.hasStatus(txid, key)) {
       this.stats.duplicates++;
+      this.release(txid, ev);
       if (!askers.length) return 0;
       const n = await send(askers);
       this.say("router", `arcade ${via}: ${txid.slice(0, 8)} ${String(ev.txStatus)} (routed before) → ${askers.join(", ")}, who broadcast it`);
@@ -382,6 +463,7 @@ export class Broadcaster {
       const hs = [...new Set([...(await this.holders(txid)), ...askers])];
       const n = await send(hs);
       this.o.db.markStatus(txid, key);
+      this.release(txid, ev);
       this.stats.routed++;
       this.stats.admitted += n;
       if (proof) this.stats.proofs += n; else this.stats.statuses += n;
@@ -455,7 +537,8 @@ export class Broadcaster {
     try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: classified by the HTTP code alone */ }
     const ans = answerOf(r.status, v);
     if (ans.class === "status" || ans.class === "invalid") {
-      // Taken (or a duplicate's current status), or the transaction is invalid: the row goes, and the answer is a status.
+      // Taken (or a duplicate's current status), or the transaction is invalid: the row goes, and the answer is a
+      // status — into the broadcasters only if it is a REJECTED or a proof (rule 8); the holds on it released.
       this.o.db.unqueueBroadcast(row.txid);
       await this.deliver({ ...ans.status, txid: row.txid }, "post", row.instances);
       return;
