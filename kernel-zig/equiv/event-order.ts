@@ -18,6 +18,12 @@
 //   - killed mid-entry (a slow subscription step running): nothing of the
 //     entry committed; restarted, the entry runs again, numbered after every
 //     step committed before (the replay checks the numbers are the log's);
+//   - the same, the trigger a message through the front door: re-run, the mail
+//     admitted and routed once (0.8.1: lost before, the mail program read the
+//     killed attempt's block as "already admitted");
+//   - the same message delivered twice (a record with its own nonce, as an
+//     instance's redelivered emit): two request entries, one admission (the
+//     kernel's unique map), the handler once, the same id in both answers;
 //   - index-store.ts derives the kernel's events, resting and awaits maps
 //     from the chains (the rebuild = the live index); `skein-kernel dump`
 //     decodes an event's place as the host's id gives it;
@@ -195,6 +201,50 @@ try {
   await r.settled();
   const s5 = await until("op/x/s5 after the restart", async () => { await r.settled(); const x = await hostRead("op/x/s5"); return x.length ? x : undefined; }, 60_000);
   check(s5.length === 1 && sOf(s5[0]!.id) > committedMax, `restarted, the entry processed again: its fact once, numbered after every step committed before the kill (s ${sOf(s5[0]!.id)} > ${committedMax})`);
+
+  // ------------------------------------------------ killed mid-entry, the trigger a MESSAGE through the front door
+  // (0.8.1) The same, the trigger sent as mail over HTTP (`/sendMessage`). The client has its answer before
+  // the mail is routed; the kill leaves the mail record's block in the store but nothing of the entry. Before
+  // 0.8.1 the mail program took the block for "already admitted" and the re-run admitted nothing: the message
+  // was lost. Now it admits, and the kernel — which marks a message admitted only with the entry — routes it.
+  await send({ kind: "on", name: "op/t/s7" });
+  const n7 = lines.length;
+  void box.send(identity, "op", { kind: "go", name: "op/t/s7", spin }).catch(() => undefined);
+  for (const end = Date.now() + 30_000; !lines.slice(n7).some((l) => /event op\/t\/s7 \S+ → op\.heard/.test(l)) && Date.now() < end; ) await sleep(20);
+  await sleep(200);
+  const k7 = (await r.hydrate(handle)).kernel as unknown as { machine?: { worker: { terminate(): Promise<number> } }; proc?: { kill(s: string): void }; host?: { proc?: { kill(s: string): void } }; exited(): Promise<void> };
+  const midway7 = lines.slice(n7).some((l) => /event op\/t\/s7 \S+ → op\.heard/.test(l)) && (await hostRead("op/x/s7")).length === 0;
+  if (k7.machine) await k7.machine.worker.terminate(); else if (k7.host?.proc) k7.host.proc.kill("SIGKILL"); else k7.proc!.kill("SIGKILL");
+  await k7.exited();
+  check(midway7, "killed while a message's slow delivery ran (sent through the front door): op/x/s7 not indexed yet");
+  await r.hydrate(handle);
+  await r.settled();
+  const s7 = await until("op/x/s7 after the restart", async () => { await r.settled(); const x = await hostRead("op/x/s7"); return x.length ? x : undefined; }, 60_000).catch(() => [] as Row[]);
+  const routed7 = lines.slice(n7).filter((l) => /message \S+ in op from \S+ → order-probe/.test(l)).length;
+  check(s7.length === 1, `restarted, the message's entry processed again: the mail admitted and routed, its fact once (${s7.length} facts; routed ${routed7}× in the log, the killed attempt and the re-run)`);
+
+  // ------------------------------------------------ the same message delivered twice: admitted once
+  // The same record twice: a message with its own `nonce` (as another instance delivers its emit, kept as
+  // the record it emitted — and delivered again when the sender restarts and offers its `deliver` again).
+  // Two requests, two request entries (each HTTP request is its own package, logged as received, as
+  // before 0.8.1), and ONE admission: the kernel's `unique` map refuses the second ("already admitted;
+  // nothing runs"); the handler runs once; both answers carry the same id. (A client's two sends of one
+  // body are two messages: each is its own request's, `session` in the record.)
+  await send({ kind: "on", name: "op/t/s6" });
+  const n6 = lines.length;
+  const e6 = (await hostRead("op/x/", "")).length;
+  const raw6 = { message: { recipient: Uint8Array.from(Buffer.from(identity, "hex")), messageBox: "op", body: dagCbor.encode({ kind: "go", name: "op/t/s6" }), nonce: new Uint8Array(16).fill(6) } };
+  const post = (box as unknown as { post(p: string, b: Record<string, unknown>): Promise<{ status: number; v: Record<string, unknown> }> }).post.bind(box);
+  const sentA = await post("/sendMessage", raw6);
+  await r.settled();
+  const sentB = await post("/sendMessage", raw6);
+  await r.settled();
+  const requests6 = lines.slice(n6).filter((l) => / http request \S+ → frontdoor /.test(l)).length;
+  const routed6 = lines.slice(n6).filter((l) => /message \S+ in op from \S+ → order-probe/.test(l)).length;
+  const refused6 = lines.slice(n6).filter((l) => /message \S+: already admitted; nothing runs/.test(l)).length;
+  check(sentA.status === 200 && sentB.status === 200 && String(sentA.v.id) === String(sentB.v.id), `the same message twice: both answered success, the same id (${String(sentA.v.id).slice(-8)}, ${String(sentB.v.id).slice(-8)})`);
+  check(requests6 === 2 && routed6 === 1 && refused6 === 1, `two request entries, the message admitted once, the second refused by the kernel (requests ${requests6}, routed ${routed6}, refused ${refused6})`);
+  check((await hostRead("op/x/s6")).length === 1 && (await hostRead("op/x/", "")).length === e6 + 1, "its handler ran once: one fact");
 
   // ------------------------------------------------ the rebuild (index-store.ts derive) = the live index
   // The one comparison of the two index implementations (index.zig, index-store.ts derive): every map.

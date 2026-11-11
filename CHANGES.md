@@ -2,7 +2,21 @@
 
 ## 0.8.1
 
-Build and tests only: the kernel, the host and the log are 0.8.0's.
+The kernel, the host and the log are 0.8.0's; the stock mail program changes (a new module CID in
+the kernel's pins and the default image: fresh homes pick it up).
+
+- **A message is no longer lost when the kernel dies mid-entry.** The mail program
+  (programs/mail, `/sendMessage`) took "the message's record is in the store" for "already
+  admitted" and admitted nothing. A record's block is kept the moment it is put, also by an
+  attempt whose entry was never committed: a kill after the sender's 200 and before the entry
+  committed left the block, the entry ran again at restart, and the message was never routed
+  (silently; the sender had its success). The program always answers the entry to admit now; the
+  kernel admits a message once, by its `unique` map, committed with the entry that admits it. The
+  same message delivered again (the same record: an instance's emit, delivered again after its
+  restart) is two request entries, as before, and one admission: the kernel refuses the second
+  ("already admitted; nothing runs"), its handler runs once, both answers carry the same id
+  (event-order.ts: the kill case through the front door, and the double delivery; replayed
+  exactly).
 
 - **The kernel builds from a clean clone.** It pins skein-sdk v0.21.2
   (placeholder modules in the first configure pass), so kernel-zig/build.zig

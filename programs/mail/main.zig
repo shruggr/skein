@@ -220,8 +220,10 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
         try ok.put("results", .{ .array = results });
     }
     try ok.put("id", cbor.string(id_text));
-    // A replayed request is the same record: nothing to admit again.
-    if (try sk.getOpt(a, id) != null) return .{ .status = 200, .cbor = rb.cbor, .body = ok.value() };
+    // Always the entry to admit: the kernel admits a message once (its `unique` map, committed with the
+    // entry that admits it — scheduler.zig routeAdmits), so the same record sent again is refused there.
+    // Whether the record's block is in the store says nothing: a block is kept the moment it is put,
+    // also by an attempt whose entry was never committed (a kill mid-entry), and a re-run must admit.
     var e = cbor.MapBuilder.init(a);
     try e.put("mail", rec.value());
     try e.put("body", .{ .bytes = blk.bytes });

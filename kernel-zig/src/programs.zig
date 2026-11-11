@@ -20,7 +20,7 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// (shruggr/skein-overlay).
 pub const modules = [_]Module{
     // The skein's own mail in and out (issues #33, #40): Zig, wasm32-wasi (programs/mail).
-    .{ .name = "mail", .cid = "bafkreibilg3pxsatmgycfce6gpl4lfzrwjcqxkpjf7jitz6grn3e6nrxo4" },
+    .{ .name = "mail", .cid = "bafkreiantm275qmr5vtvc2jdgf436hn2k57jy6iens44qtracforho2nmy" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreigjlvm5rsofqcqspijlcusppqka2tzb4cskh2zjcdtnzd3shwkvpq" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
