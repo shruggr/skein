@@ -20,7 +20,6 @@
 //     while evy's step runs; nothing of the
 //     entry was committed, and once restarted each subscription is stepped
 //     once — the cursor (entries processed) resumes it, nothing twice;
-//   - index-store.ts derives the kernel's `on` map from the chains;
 //   - the store replays to itself exactly (the subscriptions in the state CID)
 //     — on SQLite, with SKEIN_EQUIV_STORE=rocksdb on RocksDB, with =wasm on the
 //     WASM host.
@@ -41,7 +40,6 @@ import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { Router } from "../../src/host/router.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
-import { buildTree, derive, type IndexStore } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { BACKEND, WASM_MODE, routerStore, specFor, storeFor } from "./backend.ts";
 
@@ -205,14 +203,6 @@ try {
   check(slowY.length === 1 && slowZ.length === 1, `restarted: each subscription stepped once (evy ${slowY.length}, evz ${slowZ.length})`);
   check((await read("evx/slow")).length === 1, "the fact indexed once");
 
-  // ------------------------------------------------ the TypeScript derivation (index-store.ts) = the kernel's map
-  const same = await withStore(async (st) => {
-    const d = await derive(st);
-    const want = st.state().roots.on;
-    const got = buildTree(d.pairs.on).root;
-    return { ok: !!want && !!got && want.equals(got), n: d.pairs.on.length };
-  });
-  check(same.ok && same.n === 7, `index-store.ts derives the kernel's on map from the chains (${same.n} subscriptions, the same root)`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

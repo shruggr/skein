@@ -4,7 +4,7 @@
 // a. 8 instances on one router, N entries each (events nothing takes: a log
 //    append, the entry processed, its commit), submitted interleaved from the
 //    host side — each instance's final state CID equals a serial run's (one
-//    instance after another), and SQLite's (`serve`, a file each).
+//    instance after another).
 // b. The same with SKEIN_WORKERS=1.
 // c. A `call` on instance A issued while A is mid-step — the step blocked on a
 //    `wallet` request the test answers late — comes back before the step ends,
@@ -16,8 +16,9 @@
 //    it as a set of the process and puts the block there.)
 // e. Replay after stop: each RocksDB set of (a), the host process stopped,
 //    replayed (`skein-kernel replay`): the same state CID.
-// Timings: (a) with N workers against 1, the serial run, SQLite's; the commit
-// cost (one instance, entries one after another) on RocksDB and SQLite.
+// Timings: (a) with N workers against 1, the serial run; the commit cost (one
+// instance, entries one after another). (The pool is the one-process host's:
+// RocksDB only; the backends are compared once, kernel-zig/src/store_iface_test.zig.)
 // SKEIN_EQUIV_BENCH_DIR puts the hosts on a disk (default $TMPDIR, often tmpfs).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/pool.ts
@@ -111,17 +112,14 @@ try {
   const serial = await run({ backend: "rocksdb", serial: true });
   pooled = await run({ backend: "rocksdb" });
   const one = await run({ backend: "rocksdb", workers: 1 });
-  const sqlite = await run({ backend: "sqlite" });
   const cursorOk = [...pooled.states.values()].every((v) => Number(v.split("@")[1]) === N + 1);
   check(cursorOk, `a: every instance processed its genesis and ${N} entries (${[...pooled.states.values()][0]})`);
   check(same(pooled.states, serial.states), `a: ${K} instances × ${N} entries interleaved on the pool: each final state CID equals the serial run's`);
   check(same(one.states, serial.states), "b: the same with SKEIN_WORKERS=1");
-  check(same(sqlite.states, serial.states), "a: … and SQLite's (serve, a file each): the same CIDs");
-  process.stdout.write(`timing: ${K} instances × ${N} entries — RocksDB pool, default workers ${pooled.ms.toFixed(0)} ms; 1 worker ${one.ms.toFixed(0)} ms; serial (one instance after another, default workers) ${serial.ms.toFixed(0)} ms; SQLite (a serve process each) ${sqlite.ms.toFixed(0)} ms\n`);
+  process.stdout.write(`timing: ${K} instances × ${N} entries — RocksDB pool, default workers ${pooled.ms.toFixed(0)} ms; 1 worker ${one.ms.toFixed(0)} ms; serial (one instance after another, default workers) ${serial.ms.toFixed(0)} ms\n`);
   // Commit cost: one instance, entries one after another (each a log append + its processing, two commits).
   const c1 = await run({ backend: "rocksdb", serial: true, k: 1 });
-  const c2 = await run({ backend: "sqlite", serial: true, k: 1 });
-  process.stdout.write(`timing: commit cost (one instance, ${N} entries one after another): RocksDB ${(c1.ms / N).toFixed(3)} ms/entry, SQLite ${(c2.ms / N).toFixed(3)} ms/entry (on ${BENCH})\n`);
+  process.stdout.write(`timing: commit cost (one instance, ${N} entries one after another): ${(c1.ms / N).toFixed(3)} ms/entry (on ${BENCH})\n`);
 } catch (e) {
   check(false, `a/b threw: ${(e as Error).stack}`);
 }

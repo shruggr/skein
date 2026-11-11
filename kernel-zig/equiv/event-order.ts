@@ -41,7 +41,7 @@ import { Signer } from "../../src/host/signer.ts";
 import { Router } from "../../src/host/router.ts";
 import { SseStream, type SseEvent } from "../../src/host/feeds.ts";
 import { openStoreFile } from "../../src/host/stores.ts";
-import { buildTree, derive, type IndexStore } from "../../src/runtime/index-store.ts";
+import { buildTree, derive, MAPS, type IndexStore } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { BACKEND, WASM_MODE, routerStore, specFor, storeFor } from "./backend.ts";
 
@@ -197,13 +197,14 @@ try {
   check(s5.length === 1 && sOf(s5[0]!.id) > committedMax, `restarted, the entry processed again: its fact once, numbered after every step committed before the kill (s ${sOf(s5[0]!.id)} > ${committedMax})`);
 
   // ------------------------------------------------ the rebuild (index-store.ts derive) = the live index
+  // The one comparison of the two index implementations (index.zig, index-store.ts derive): every map.
   const same = await withStore(async (st) => {
     const d = await derive(st);
-    const roots = st.state().roots;
-    const eq = (m: "events" | "resting" | "awaits") => { const want = roots[m]; const got = buildTree(d.pairs[m]).root; return (want === null && got === null) || (!!want && !!got && want.equals(got)); };
-    return { events: eq("events"), resting: eq("resting"), awaits: eq("awaits"), n: d.pairs.events.length };
+    const roots = st.state().roots as Record<string, CID | null>;
+    const differ = MAPS.filter((m) => { const want = roots[m] ?? null; const got = buildTree(d.pairs[m]).root; return !((want === null && got === null) || (!!want && !!got && want.equals(got))); });
+    return { differ, n: d.pairs.events.length, on: d.pairs.on.length, awaits: d.pairs.awaits.length };
   });
-  check(same.events && same.resting && same.awaits, `index-store.ts derives the kernel's events (${same.n} keys), resting and awaits maps from the chains: the same roots (${JSON.stringify(same)})`);
+  check(same.differ.length === 0 && same.n > 0 && same.on > 0 && same.awaits > 0, `index-store.ts derives every map of the kernel's index from the chains (${MAPS.join(", ")}; ${same.n} events, ${same.on} subscriptions, ${same.awaits} waits): the same roots${same.differ.length ? ` — differ: ${same.differ.join(", ")}` : ""}`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

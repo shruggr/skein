@@ -3,8 +3,9 @@
 //
 // wasmtime: the C API release, not vendored. Its directory comes from
 // -Dwasmtime=<dir> or $WASMTIME_C_API, default
-// ~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api. The static
-// libwasmtime.a is linked, so the binary needs nothing of it at run time.
+// ~/.local/wasmtime-c-api/wasmtime-v49.0.1-<arch>-<os>-c-api for the machine
+// building (scripts/wasmtime-c-api.sh puts it there). The static libwasmtime.a
+// is linked, so the binary needs nothing of it at run time.
 // SQLite: the system libsqlite3 (JSON1 is built in since 3.38).
 // RocksDB (#158, the one-process kernel's store, rocksdb_store.zig): the system
 // librocksdb through its C API (rocksdb/c.h), linked as sqlite3 is (jr: 11.1.1;
@@ -24,6 +25,9 @@
 // (src/web.zig; kernel-zig/web/). Needs neither wasmtime nor SQLite.
 const std = @import("std");
 
+/// The wasmtime C API release the kernel is built against (scripts/wasmtime-c-api.sh fetches it).
+const WASMTIME_VERSION = "v49.0.1";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
@@ -39,7 +43,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const home = b.graph.environ_map.get("HOME") orelse "/root";
-    const default_wt = b.fmt("{s}/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api", .{home});
+    const host = b.graph.host.result;
+    const default_wt = b.fmt("{s}/.local/wasmtime-c-api/wasmtime-{s}-{s}-{s}-c-api", .{ home, WASMTIME_VERSION, @tagName(host.cpu.arch), if (host.os.tag == .macos) "macos" else @tagName(host.os.tag) });
     const env_wt = b.graph.environ_map.get("WASMTIME_C_API");
     const wt = b.option([]const u8, "wasmtime", "wasmtime C API directory (include/, lib/)") orelse env_wt orelse default_wt;
 
@@ -104,10 +109,13 @@ fn sdkImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTar
 
 /// The SDK's chain module, as `chainlib`: the door's BEEF verifier (door.zig, #121) in both builds,
 /// and natively the host chain's tracker (host_chain.zig, #156). It brings bsvz (the SDK's lazy
-/// dependency).
+/// dependency). On a first build bsvz is not fetched yet: the SDK's `lazyDependency` asks for it and
+/// registers no `chain` module, the build runner fetches it and runs this build again — so its absence
+/// here is that first pass, not an error (`sdk.module` would panic on it).
 fn chainImport(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const sdk = b.dependency("skein_sdk", .{ .target = target, .optimize = optimize, .wallet = false });
-    m.addImport("chainlib", sdk.module("chain"));
+    const chain = sdk.builder.modules.get("chain") orelse return;
+    m.addImport("chainlib", chain);
 }
 
 fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {

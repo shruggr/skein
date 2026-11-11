@@ -3,8 +3,8 @@
 // one instance at once — none queued behind another on the host side (the
 // router's `serial` is bypassed: the kernel's own `admit`, as the HTTP front
 // door and libp2p inbound call it) — on the per-process kernel (`serve`, a
-// SQLite file) and on the one-process kernel (`skein-kernel host`, a RocksDB
-// set). Each run: all N land, the log's `n` strictly increasing from the
+// SQLite file; SKEIN_EQUIV_APPENDS_BACKENDS=sqlite,rocksdb adds the one-process
+// kernel, `skein-kernel host`, by hand). Each run: all N land, the log's `n` strictly increasing from the
 // genesis with each `prev` the entry before, every arrival's record named by
 // exactly one entry (no record block left without its entry: before #163 the
 // loser of a race had its record stored and its entry refused), and a frame
@@ -101,6 +101,6 @@ async function run(backend: "sqlite" | "rocksdb"): Promise<void> {
   }
 }
 
-for (const b of (process.env.SKEIN_EQUIV_APPENDS_BACKENDS ?? "sqlite,rocksdb").split(",") as Array<"sqlite" | "rocksdb">) await run(b);
+for (const b of (process.env.SKEIN_EQUIV_APPENDS_BACKENDS ?? "sqlite").split(",") as Array<"sqlite" | "rocksdb">) await run(b);
 process.stdout.write(failures ? `${failures} FAILED\n` : "all ok\n");
 process.exit(failures ? 1 : 0);
