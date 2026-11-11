@@ -1,5 +1,28 @@
 # Changes
 
+## 0.8.1
+
+Build and tests only: the kernel, the host and the log are 0.8.0's.
+
+- **The kernel builds from a clean clone.** It pins skein-sdk v0.21.2
+  (placeholder modules in the first configure pass), so kernel-zig/build.zig
+  needs no guard for the SDK's `chain` module; checked from a fresh clone with
+  empty Zig caches. scripts/wasmtime-c-api.sh fetches the wasmtime C API where
+  build.zig looks (per host arch); the workflow installs librocksdb-dev and
+  builds the wasm kernel.
+- **The suite, to one rule: a backend is checked by the interface it
+  implements.** One storage-interface test per interface
+  (src/store_iface_test.zig: SQLite, RocksDB; src/host/store-iface.test.ts:
+  the shim's MemoryStore, the wasm host's SqliteSetStore); every scenario runs
+  once (SQLite serve; pool, hostchain and teranode on the one-process RocksDB
+  host, where those features are); one comparison per pair of real double
+  implementations (index-store.ts `derive` vs index.zig, every map, in
+  event-order.ts; the wasm kernel vs native in wasm-host.ts; instrumented vs
+  wasmtime fuel; the dag-cbor / dispatch fixtures); a check about one
+  backend's own code stays per backend (format_test.zig: the old-format
+  refusal on SQLite and on RocksDB). replays.ts no longer replays into
+  RocksDB or migrates.
+
 ## 0.8.0
 
 **Existing instances do not replay on this kernel, and their stores do not
