@@ -45,9 +45,10 @@ jobs:
       - name: skein-host starts (its imports resolve)
         run: SKEIN_HOME="$RUNNER_TEMP/skein-home" bin/skein-host --help
 
+      # Native, and the browser build (the wasm kernel some host tests and wasm-host.ts load).
       - name: Build the kernel
         working-directory: kernel-zig
-        run: mise exec -- zig build --release
+        run: mise exec -- zig build --release && mise exec -- zig build web --release
 
       - name: The kernel's unit tests
         working-directory: kernel-zig

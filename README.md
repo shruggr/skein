@@ -475,7 +475,7 @@ clone, as `.github/workflows/test.yml` runs it:
 ```
 scripts/wasmtime-c-api.sh                        # once: the wasmtime C API where build.zig looks
 npm ci
-cd kernel-zig && mise exec -- zig build --release # first: the host tests run kernel-zig/zig-out/bin/skein-kernel
+cd kernel-zig && mise exec -- zig build --release && mise exec -- zig build web --release # first: the host tests run zig-out/bin/skein-kernel and zig-out/web/skein-kernel.wasm
 cd kernel-zig && mise exec -- zig build test     # the kernel's unit tests (the storage interface among them)
 npm run typecheck && npm run web:typecheck
 npm test                                         # the host, client, formats (node --test src/**/*.test.ts)
