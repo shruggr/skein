@@ -172,6 +172,8 @@ export class Kernel {
           try { k.peers.notify?.(op, op === "say" || op === "panic" ? dec.decode(b) : b); } catch { /* the host's problem */ }
         },
         take(p) { k.bytesAt(p, k.held.length).set(k.held); },
+        // 0.9.1: a monotonic clock for a step line's duration (the line only, never recorded).
+        now_ms() { return performance.now(); },
       },
     };
   }

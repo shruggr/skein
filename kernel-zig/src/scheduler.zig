@@ -174,6 +174,10 @@ pub const Peers = struct {
     /// runs: the host holding the client's connection answers it now.
     on_answer: ?*const fn (ctx: *anyopaque, thread: []const u8, entry: []const u8) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
+    /// 0.9.1: a monotonic clock (ns), read around a step only for the duration on its log line —
+    /// never into an update, a record, an event, the in-step clock or anything a replay reads.
+    /// Absent (replay, tests): the line carries the fuel alone.
+    now_ns: ?*const fn (ctx: *anyopaque) u64 = null,
 };
 
 /// A log entry the processing of which drives a step or a shell.
@@ -2251,11 +2255,13 @@ pub const Runtime = struct {
                 _ = rt.stepping.remove(key);
                 rt.gpa.free(key);
             }
-            const r = rt.stepBody(a, origin, ctx, resolved, reply, &meter, &calls) catch |err| {
+            // 0.9.1: the step's wall-clock start, for its log line only.
+            const t0: ?u64 = if (rt.peers.now_ns) |f| f(rt.peers.ctx) else null;
+            const r = rt.stepBody(a, origin, ctx, resolved, reply, &meter, &calls, t0) catch |err| {
                 const exhausted = err == error.FuelExhausted;
                 const msg = if (exhausted) runner.FUEL_EXHAUSTED else if (err == error.Failed or err == error.Fatal or err == error.Diverged or err == error.NoWitness) last_error else @errorName(err);
                 const label = if (err == error.Diverged) "DIVERGED" else if (err == error.NoWitness) "cannot run" else "failed";
-                rt.say("{s} step {s}: {s}", .{ short(a, origin), label, msg });
+                rt.say("{s} step {s}{s}: {s}", .{ short(a, origin), label, try rt.timing(a, t0, &meter), msg });
                 if (err == error.Diverged or err == error.NoWitness) return;
                 var m = cbor.MapBuilder.init(a);
                 try m.put("state", cbor.string("errored"));
@@ -2312,7 +2318,18 @@ pub const Runtime = struct {
 
     const After = struct { launched: []const []const u8, emitted: []const []const u8 = &.{}, update: []const u8 = "", rested: bool, stdout: []const u8 = "" };
 
-    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
+    /// 0.9.1: a step line's ` · 12.3 ms · fuel 1234567` — the wall-clock time since `t0` (when the
+    /// host gave a clock) and the fuel the step used. Text for the line only.
+    fn timing(rt: *Runtime, a: std.mem.Allocator, t0: ?u64, meter: *engine.Meter) ![]const u8 {
+        if (t0) |s| if (rt.peers.now_ns) |f| {
+            const t1 = f(rt.peers.ctx);
+            const us = (if (t1 > s) t1 - s else 0) / 1000;
+            return std.fmt.allocPrint(a, " · {d}.{d} ms · fuel {d}", .{ us / 1000, (us % 1000) / 100, meter.used() });
+        };
+        return std.fmt.allocPrint(a, " · fuel {d}", .{meter.used()});
+    }
+
+    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8), t0: ?u64) anyerror!After {
         const o = try rt.getOrNotFound(a, origin);
         const prog = try rt.programOf(a, o);
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
@@ -2538,6 +2555,8 @@ pub const Runtime = struct {
             try w.appendSlice(" · awaits ");
             try shortList(w, a, st.awaits.items);
         }
+        // 0.9.1: the step's duration and fuel, before any program text, so always on the first line.
+        try w.appendSlice(try rt.timing(a, t0, meter));
         // What the program wrote on stderr: the error, or a note of a step that
         // went on (e.g. the loop's undeliverable answer, #40) — once, here.
         // 0.8.0: bounded (the line is a summary; the program's whole stderr is in the update's result).

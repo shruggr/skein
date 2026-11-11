@@ -412,6 +412,11 @@ const Server = struct {
         s.answered(arena.allocator(), thread, entry);
     }
 
+    /// 0.9.1: the monotonic clock for a step line's duration (never recorded).
+    fn pNow(_: *anyopaque) u64 {
+        return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
+    }
+
     fn pSay(_: *anyopaque, line: []const u8) void {
         say(line);
     }
@@ -468,6 +473,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         .emit = Server.pEmit,
         .on_answer = Server.pOnAnswer,
         .say = Server.pSay,
+        .now_ns = Server.pNow,
     });
 
     var fds_buf: [2]std.posix.pollfd = undefined;

@@ -599,6 +599,7 @@ const Host = struct {
             .emit = pEmit,
             .on_answer = pOnAnswer,
             .say = pSay,
+            .now_ns = pNow,
         });
         h.q.lock();
         t.state = .open;
@@ -913,6 +914,11 @@ const Host = struct {
             };
             h.reply(a, t.handle, w.id, v, null, null);
         }
+    }
+
+    /// 0.9.1: the monotonic clock for a step line's duration (never recorded).
+    fn pNow(_: *anyopaque) u64 {
+        return @intCast(Io.Clock.awake.now(g_io).toNanoseconds());
     }
 
     fn pSay(p: *anyopaque, line: []const u8) void {

@@ -177,6 +177,8 @@ for (const source of sources) {
   if (j1.index.record !== j2.index.record) diffs.push(`state record: ${j1.index.record} vs ${j2.index.record}`);
   if (j1.index.record !== d1.state) diffs.push(`state record: the replay ended at ${j1.index.record}, the store holds ${d1.state}`);
   for (const l of [...j1.lines, ...j2.lines] as string[]) if (/DIVERGED|cannot run/.test(l)) { diffs.push(`replay: ${l}`); break; }
+  // 0.9.1: a replay has no clock: its step lines carry the step's fuel, never a wall-clock time.
+  for (const l of [...j1.lines, ...j2.lines] as string[]) if (/ step \d+ → /.test(l) && (/ ms · fuel /.test(l) || !/ · fuel \d+/.test(l))) { diffs.push(`replay step line (fuel only, no time): ${l}`); break; }
   diffs.push(...dumpDiff(d1, d2, "z1 vs z2"));
   if (fuelReport(z1) !== fuelReport(z2)) diffs.push("skein-kernel fuel differs");
   // Every step that ended records its fuel (thread chains; heads and subscriptions have none).

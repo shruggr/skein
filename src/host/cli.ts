@@ -170,6 +170,7 @@ import { oneKeySetting, signerOf } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { homeOf as homeOfVars, identityOf, operatorKey, withHostEnv } from "./hostenv.ts";
 import { hostArcConfig } from "./arc.ts";
+import { lineWriter } from "./stamp.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { DEFAULT_HUBS, TERANODE_BOOTSTRAP } from "./teranode.ts";
 import { addressBook } from "./deploy.ts";
@@ -936,7 +937,9 @@ async function run(db: HostDb, rest: string[], env: Env): Promise<number> {
 }
 
 if (import.meta.main) {
-  process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${l}\n`), err: (l) => process.stderr.write(`${l}\n`) });
+  // 0.9.1: `run`'s every line carries a wall-clock stamp (stamp.ts); the other commands' output as it is.
+  const line = lineWriter(process.argv[2] === "run");
+  process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${line(l)}\n`), err: (l) => process.stderr.write(`${line(l)}\n`) });
 }
 
 /** SKEIN_STORE named the host's LMDB environment (#96): LMDB is no longer supported, so a set SKEIN_STORE is refused. */

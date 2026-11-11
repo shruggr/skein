@@ -23,6 +23,7 @@ import { encode } from "../runtime/cid.ts";
 import { dirSource } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
+import { KERNEL_WASM } from "./wasm-kernel.ts";
 import { Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, type MailRecord } from "./providers.ts";
 import { Router } from "./router.ts";
@@ -63,7 +64,7 @@ test("deadline: an event on the step, kept by the host's waker across a restart,
   await router.cronEvent("w", "tick", { name: "one", rest: 4000 });
   await router.settled();
   const k = (await router.hydrate("w")).kernel;
-  const rested = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → waiting · emitted \S+ · awaits \S+$/.test(l));
+  const rested = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → waiting · emitted \S+ · awaits \S+ · \d+\.\d ms · fuel \d+$/.test(l));
   assert.ok(rested, `step 1 recorded its deadline (no signer call) and awaits it:\n${lines.filter((l) => l.startsWith("[w]")).join("\n")}`);
   const [emitted, awaited] = [/emitted (\S+)/.exec(rested!)![1], /awaits (\S+)/.exec(rested!)![1]];
   assert.equal(emitted, awaited, "it awaits the event it recorded");
@@ -101,6 +102,34 @@ test("deadline: an event on the step, kept by the host's waker across a restart,
   const woke = lines.find((l) => /^\[w\] #\d+ message \S+ in wake from \S+: wake → \S+$/.test(l));
   assert.ok(woke, "the waker's signed answer, carrying the instance's signed request, is the wake");
   await router.stop();
+});
+
+test("0.9.1: a step's line on the wasm kernel (the one production runs) carries its wall-clock time and its fuel", { skip: !existsSync(KERNEL_WASM) && "the wasm kernel not built", timeout: 120_000 }, async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-emit-wasm-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const dir = join(home, "tree");
+  await fs.mkdir(join(dir, "bin"), { recursive: true });
+  await fs.mkdir(join(dir, "etc"));
+  await fs.writeFile(join(dir, "bin/cron-demo.wasm"), readFileSync(DEMO_WASM));
+  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([{ address: "tick", program: "cron-demo" }]));
+  const db = new HostDb(join(home, "host.db"));
+  t.after(() => db.close());
+  const signer = new Signer(PrivateKey.fromRandom());
+  const lines: string[] = [];
+  const sqliteStore = join(home, "store.sqlite");
+  db.add("w", { store: `sqlite:${sqliteStore}`, identity: signer.identity("w") });
+  const router = new Router({
+    db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), owner: PrivateKey.fromRandom().toPublicKey().toString(),
+    home, idleMs: 0, cron: false, sqliteStore, kernel: { env: { SKEIN_HOME: home } }, log: (s, l) => { lines.push(`[${s}] ${l}`); },
+  });
+  t.after(() => router.stop());
+  const d = await dirSource(dir);
+  await router.bootRow("w", { kind: "tree", root: d.root, objects: d.objects });
+  await router.start();
+  await router.cronEvent("w", "tick", { name: "one", rest: 4000 });
+  await router.settled();
+  const line = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → /.test(l));
+  assert.match(line ?? "", /^\[w\] \S+ cron-demo step 1 → waiting · emitted \S+ · awaits \S+ · \d+\.\d ms · fuel [1-9]\d*$/, lines.filter((l) => l.startsWith("[w]")).join("\n"));
 });
 
 /** The deadline event cron-demo's first step recorded: the CID its update lists in `emitted`, read from the store file. */

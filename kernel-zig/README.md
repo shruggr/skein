@@ -950,7 +950,8 @@ Imports: `skein_engine` (`compile`, `instantiate`, `run`, `release`,
 `skein_store` (`get`/`take`, `has`, `put`, `begin`/`commit`/`rollback`,
 `pointer_get`/`pointer_set`), `skein_peer` (`request(op, v)` → the answer,
 blocking, for `wallet` and `http` (#126: authfetch's bytes, the page's fetch); `notify(op, v)` for `emit` (an intention among them),
-`say`, `panic`; `take`).
+`say`, `panic`; `take`; 0.9.1: `now_ms()` → `performance.now()`, a monotonic clock read only for a step
+line's duration, never into anything recorded).
 
 **Programs on V8.** The kernel hands the shim a program's bytes; the shim
 compiles and instantiates them with an import object whose every function

@@ -57,6 +57,8 @@ const peer = struct {
     extern "skein_peer" fn request(op: [*]const u8, op_len: usize, v: [*]const u8, v_len: usize) i32;
     extern "skein_peer" fn notify(op: [*]const u8, op_len: usize, v: [*]const u8, v_len: usize) void;
     extern "skein_peer" fn take(ptr: [*]u8) void;
+    /// 0.9.1: a monotonic clock in ms (`performance.now()`), for a step line's duration only.
+    extern "skein_peer" fn now_ms() f64;
 };
 
 pub const std_options: std.Options = .{ .logFn = logFn };
@@ -196,6 +198,7 @@ export fn skein_open(store: u32) i32 {
         .wallet = pWallet,
         .emit = pEmit,
         .say = pSay,
+        .now_ns = pNow,
     }) catch |err| return fail(@errorName(err));
     return 0;
 }
@@ -239,6 +242,12 @@ fn pEmit(_: *anyopaque, o: scheduler.Outgoing) void {
         m.put("place", at.value()) catch return;
     }
     notifyValue("emit", m.value());
+}
+
+/// 0.9.1: the monotonic clock for a step line's duration (never recorded).
+fn pNow(_: *anyopaque) u64 {
+    const ms = peer.now_ms();
+    return if (ms > 0) @intFromFloat(ms * 1e6) else 0;
 }
 
 fn pSay(_: *anyopaque, line: []const u8) void {

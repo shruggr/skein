@@ -1,6 +1,29 @@
 # Changes
 
-## 0.9.0
+## 0.9.1
+
+Logging only: no record, update, event, program or pin changes (the kernel's wasm and native
+builds change for the step line; every module CID, the default image and the genesis are 0.9.0's).
+
+- **A step's line carries its wall-clock time and its fuel.** The kernel's line for a step that
+  ended (finished, waiting, errored) and for one that failed (`step failed|DIVERGED|cannot run`)
+  gains ` · 12.3 ms · fuel 1234567`, before any program stderr text (so always on the line's first
+  line). The time spans the whole step (module load, the run, its in-VM calls, waits on the
+  signer, the update's append), read from a new optional peer `Peers.now_ns` (a monotonic clock):
+  native `host`/`serve` `Io.Clock.awake`, the wasm kernel a new import `skein_peer.now_ms()`
+  (`performance.now()` in web/kernel.js; the new wasm needs the new kernel.js, both shipped
+  here). The clock reaches only the line: never an update, a record, an event, the in-step clock
+  or anything a replay reads. A replay has no clock: its lines carry the fuel alone
+  (equiv/replays.ts checks it), and a store the clocked wasm kernel wrote replays byte-exact.
+- **Every line `skein-host run` writes starts with an ISO UTC stamp**
+  (`2026-11-11T10:22:33.123Z [router] …`), put on at the process writer (src/host/cli.ts,
+  bin/skein-host.js) by `stampLines` (src/host/stamp.ts, exported for Open Exchange); each line of
+  a multi-line chunk is stamped. The other commands' output is unstamped.
+- **The broadcast line carries the post's round trip and the queue wait**
+  (arc.ts): `broadcast <txid8> → Arcade: HTTP 202 RECEIVED · 340 ms · queued 12 ms` — the
+  `queued` part when the row waited (from its first queueing, so a retry's is the whole wait). In
+  memory only.
+
 
 The host only (src/host); the kernel, the programs and the pins are 0.8.1's. David's settled rules
 8-10 of the one-step swap (2026-11-11).

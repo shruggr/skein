@@ -523,6 +523,8 @@ export class Broadcaster {
     for (const h of row.instances) this.note(row.txid, h);
     const from = row.instances[0] ?? "router";
     const a = this.o.arc;
+    // 0.9.1: the post's round trip and, when the row waited, its time in the queue — for the log line only.
+    const t0 = this.now();
     const r = await this.arcade("POST", "/tx", {
       headers: {
         "content-type": "application/octet-stream", "x-callbacktoken": a.token, "x-fullstatusupdates": "true",
@@ -532,7 +534,8 @@ export class Broadcaster {
     });
     this.stats.posted++;
     const what = summary(r.body);
-    this.say(from, `broadcast ${row.txid.slice(0, 8)} → Arcade: ${r.status ? `HTTP ${r.status}` : "no answer"}${what ? ` ${what}` : ""}`);
+    const queued = t0 - row.since;
+    this.say(from, `broadcast ${row.txid.slice(0, 8)} → Arcade: ${r.status ? `HTTP ${r.status}` : "no answer"}${what ? ` ${what}` : ""} · ${this.now() - t0} ms${queued > 0 ? ` · queued ${queued} ms` : ""}`);
     let v: Record<string, unknown> = {};
     try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: classified by the HTTP code alone */ }
     const ans = answerOf(r.status, v);

@@ -19,4 +19,7 @@ if (["run", "add", "event", "init"].includes(cmd)) {
 }
 const built = new URL("dist/host/cli.js", root);
 const { main } = await import(existsSync(built) ? built.href : new URL("src/host/cli.ts", root).href);
-process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${l}\n`), err: (l) => process.stderr.write(`${l}\n`) });
+// 0.9.1: `run`'s every line carries a wall-clock stamp (src/host/stamp.ts); the other commands' output as it is.
+const { lineWriter } = await import(existsSync(built) ? new URL("dist/host/stamp.js", root).href : new URL("src/host/stamp.ts", root).href);
+const line = lineWriter(cmd === "run");
+process.exitCode = await main(process.argv.slice(2), { vars: process.env, out: (l) => process.stdout.write(`${line(l)}\n`), err: (l) => process.stderr.write(`${line(l)}\n`) });
