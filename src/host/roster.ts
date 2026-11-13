@@ -124,7 +124,7 @@ export interface HostRow {
   store: string; tree: string; pid?: number; restarts: number;
   /** The instance's origin: a skein from the default image serves the management site there (#92). */
   origin?: string;
-  /** The instance's next wake (ms), if it has one: the waker's earliest, or the cron provider's next tick (#69). */
+  /** The instance's next wake (ms), if it has one: the waker's earliest. */
   wake?: number;
 }
 

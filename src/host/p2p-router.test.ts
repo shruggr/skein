@@ -7,9 +7,8 @@
 // message's entry carries from/seqno/topic/signature and the body —
 // re-verified here from the entry alone. A rejected (or ignored) message is
 // an entry too, its refusal recorded on its thread, nothing else changed; a
-// redelivered accepted one is ignored (the kernel's `unique` map holds it). A
-// stream round trip alpha → beta → alpha: dial and send are messages to the
-// provider, and the frame comes back as an entry (#67). Each request's fuel on its thread's update. Then both stores
+// redelivered accepted one is ignored (the kernel's `unique` map holds it).
+// Each request's fuel on its thread's update. Then both stores
 // replayed with no router and no network: identical.
 
 import { test } from "node:test";
@@ -34,6 +33,8 @@ import { HostDb } from "./instances.ts";
 import { Signer } from "./signer.ts";
 import { keyOfPeerId, peerIdOf } from "./p2p.ts";
 import { Router } from "./router.ts";
+import { dirSource } from "./boot.ts";
+import { imageTree } from "./testhost.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -97,7 +98,7 @@ async function reverify(ev: { topic: string; from: Uint8Array; seqno: Uint8Array
   return await key.verify(signed, ev.signature);
 }
 
-test("libp2p across two routers: publish → validate → admit (re-verifiable), reject recorded, a stream round trip whose frame arrives as an entry, fuel on the updates, replay with no network", { timeout: 180_000 }, async (t) => {
+test("libp2p across two routers: publish → validate → admit (re-verifiable), reject recorded, fuel on the updates, replay with no network", { timeout: 180_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "skein-p2p-router-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   process.env.SKEIN_EXTRA_MODULES = DEMO_WASM; // the kernels install it (not pinned)
@@ -109,26 +110,28 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   const idA = peerIdOf(signer.peerKey("alpha")).toString(), idB = peerIdOf(signer.peerKey("beta")).toString();
   const lines: string[] = [];
 
-  const mk = (handle: string, listen: string, bootstrap: string, genesis: ConstructorParameters<typeof Router>[0]["genesis"]) => {
+  const mk = (handle: string, listen: string, bootstrap: string) => {
     const db = new HostDb(join(home, `${handle}-host.db`));
     db.add(handle, { store: join(home, handle, "runtime.db") });
     const r = new Router({
       db, walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (h) => signer.peerKey(h), providerKeyFor: (n) => signer.providerKey(n), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
       kernel: { command: kernel, env: { SKEIN_HOME: home } },
       libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
-      genesis,
       log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
     });
     return { db, r };
   };
-  const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`, {
-    subscriptions: [{ box: "p2p", handler: DEMO_CID }],
-    libp2p: { topics: [TOPIC] },
-  });
-  const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`, {
-    libp2p: { topics: [TOPIC], protocols: { [PROTOCOL]: { program: DEMO_CID.toString(), fn: "stream" } } },
-    dispatch: [{ transport: "libp2p", address: TOPIC, program: DEMO_CID.toString(), fn: "topic" }],
-  });
+  const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`);
+  const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`);
+  // Each booted from a system tree (one loader, SPEC 8): the default image with p2p-demo, its rows and its libp2p config.
+  const demoBin = { "p2p-demo.wasm": readFileSync(DEMO_WASM), "p2p-demo.json": JSON.stringify({ inputs: DEMO.inputs, services: DEMO.services, description: DEMO.description }) };
+  await A.r.bootRow("alpha", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-alpha"), {
+    bin: demoBin, config: { collect: [], libp2p: { topics: [TOPIC] } }, dispatch: [{ address: "p2p", program: "p2p-demo" }],
+  })) });
+  await B.r.bootRow("beta", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-beta"), {
+    bin: demoBin, config: { collect: [], libp2p: { topics: [TOPIC], protocols: { [PROTOCOL]: { program: "p2p-demo", fn: "stream" } } } },
+    dispatch: [{ transport: "libp2p", address: TOPIC, program: "p2p-demo", fn: "topic" }],
+  })) });
   let stopped = false;
   const stop = async () => { if (stopped) return; stopped = true; await Promise.all([A.r.stop(), B.r.stop()]); A.db.close(); B.db.close(); };
   t.after(stop);
@@ -205,11 +208,6 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.equal((await logOf(lb.kernel)).length, n1 + 1, "one entry: the redelivery as received");
   assert.equal(accepted().length, 1, "accepted once");
 
-  // ------------------------------------------------ a stream round trip: dial, send, the frame arrives as an entry (#67)
-  await send({ op: "echo", peer: idB, protocol: PROTOCOL, text: "ping" });
-  await until(() => lines.some((l) => l.startsWith("[alpha]") && / message \S+ in frame from \S+: reply to /.test(l)), "the echo's frame arrives at alpha as a reply to its dial");
-  assert.ok(verdicts.some((v) => v.call.protocol === PROTOCOL), "the frame went through beta's front door");
-
   // ------------------------------------------------ fuel: on each request thread's updates (#68), not a ledger
   await B.r.settled();
   {
@@ -226,7 +224,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
         const last = await view.get(ups.at(-1)!) as unknown as { state: string; fuel: number };
         assert.ok(last.state === "finished" && last.fuel > 0, `a libp2p request's thread ends finished, its fuel on its update (${JSON.stringify(last)})`);
       }
-      assert.ok(requests >= 5, `one thread per message and frame (${requests})`);
+      assert.ok(requests >= 4, `one thread per message (${requests})`);
     } finally { view.close?.(); }
   }
 
@@ -252,7 +250,6 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
     } finally { view.close?.(); }
   };
   await A.r.settled();
-  await until(async () => (await readUpdates()).some((u) => u.stdout.startsWith("reply ")), "the echo thread finishes");
   const ups = await readUpdates();
   const pub = ups.find((u) => u.emitted[0]?.box === "publish" && new TextDecoder().decode(u.emitted[0].body.body as Uint8Array) === "hello");
   assert.ok(pub, "the publish is a message to the libp2p provider, on its step's update");
@@ -260,12 +257,6 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.equal(pub!.state, "waiting", "the publishing step waits on the answer");
   const published = ups.find((u) => u.thread === pub!.thread && u.stdout.startsWith("published "));
   assert.equal(published?.stdout, `published ${Buffer.from(ev.seqno).toString("hex")}\n`, "the provider's answer: the admitted message's seqno");
-  const reply = ups.find((u) => u.stdout.startsWith("reply "));
-  assert.equal(reply?.stdout, "reply echo: ping\n", "the reply, the frame that arrived as an entry");
-  assert.deepEqual(reply!.emitted.map((e) => e.box), ["close"]);
-  const echo = ups.filter((u) => u.thread === reply!.thread);
-  assert.deepEqual(echo[0]!.emitted.map((e) => e.box), ["dial"], "the echo's first step dials");
-  assert.ok(echo.some((u) => u.emitted.some((e) => e.box === "send")), "and, on the dial's answer, sends");
 
   // ------------------------------------------------ replay, no router, no network
   await stop();

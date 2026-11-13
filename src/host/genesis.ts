@@ -13,7 +13,6 @@
 //             calls?: {<caller>: {<callee>: [<name>]}}, services?: {<caller>: [<service>]}
 //             (call permissions: written into the grants head at birth, kernel-zig grants.zig),
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
-//             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
 //             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}],
 //             heads?: {<head name>: <record CID>}}  (#141: an image's installed apps, `<app>/app`)
@@ -35,7 +34,8 @@
 //            them is refused)
 //            (`libp2p`, #51: the host's libp2p node runs for the instance, subscribes `topics` and serves
 //            `protocols`; each message or frame is a front-door step routed by its `libp2p` route)
-//            (`feeds`: what the host holds for the instance, feeds.ts; `defaults.ownerMessagebox`: the root
+//            (no `feeds`, skein next: the host's one header intake tells every instance the chain; a tree
+//            naming them is refused; `defaults.ownerMessagebox`: the root
 //            holder's messagebox URL — the one peer a genesis names; `defaults.resolveOrigin`: where the
 //            instance's own domain is looked up (a dev host))
 //
@@ -56,7 +56,6 @@ import { DEFAULTS, nextEntry } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
-import type { FeedSpec } from "./feeds.ts";
 
 /** Session expiry (#33 part 2, #40): the instance's own policy, judged against the session record's stamp (a day). */
 export const SESSION_DEFAULTS: Record<string, string> = { sessionTtlMs: "86400000" };
@@ -96,8 +95,6 @@ export interface Genesis2Config {
   subscriptions?: Array<{ box: string; handler: CID }>;
   /** More routes of any transport (#77), after these: the route as a system writes it (handler names resolved against the programs). */
   dispatch?: DispatchSpec[];
-  /** Feeds the host holds for the instance (code genesis; a tree's config names its own). */
-  feeds?: FeedSpec[];
   /** Code genesis (#51): libp2p for the instance (a tree's config names its own). */
   libp2p?: Libp2pSpec;
   /** Write scopes of genesis-wired programs beyond STOCK_SCOPES (#77): program name → head names (a prefix ends in `/`). */
@@ -222,7 +219,6 @@ export interface ConfigSpec {
   peers?: Record<string, string>;
   names?: Array<{ identityKey: string; handle: string; domain: string }>;
   collect?: string[];
-  feeds?: FeedSpec[];
   /** The root holder as a peer (#40): its messagebox URL — the one peer a genesis names. */
   owner?: { messagebox?: string };
   /** libp2p (#51): the topics the host subscribes for the instance, the protocols it serves, the node's own listen addresses. */
@@ -261,7 +257,6 @@ export interface System {
   collect: string[];
   /** The system tree (a git tree CID): `main` starts there. */
   tree?: CID;
-  feeds?: FeedSpec[];
   /** libp2p (#51): what the host's libp2p node does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
   /** #141: heads the genesis sets (an image's installed apps: `<app>/app`), name → record CID. */
@@ -364,6 +359,7 @@ export function rowsOf(specs: DispatchSpec[], programs: Record<string, CID>): Di
  * is left out (the kernel's operation keeps the box), with a warning.
  */
 export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, config: ConfigSpec = {}, tree?: CID, specs: DispatchSpec[] = []): System {
+  if ((config as { feeds?: unknown }).feeds !== undefined) throw new Error("etc/config.json: `feeds` are gone (skein next, SPEC 8): an instance declares no header source; the host's one header intake sends every instance the chain pointer event");
   if ((config as { jobs?: unknown }).jobs !== undefined) throw new Error("etc/config.json: `jobs` are gone (#69): a schedule is a program's message to the cron provider ({fn: \"tick\", every | at, box, body?, name}, docs/MESSAGES.md)");
   if (config.scopes !== undefined && (typeof config.scopes !== "object" || Array.isArray(config.scopes) || Object.values(config.scopes).some((v) => !Array.isArray(v) || v.some((h) => typeof h !== "string" || !h)))) throw new Error("etc/config.json: scopes is {<program name>: [<head name | prefix/>]}");
   if (config.roles !== undefined && (typeof config.roles !== "object" || Array.isArray(config.roles) || Object.values(config.roles).some((v) => !Array.isArray(v) || v.some((f) => typeof f !== "string" || !f.includes("."))))) throw new Error("etc/config.json: roles is {<role>: [\"<program>.<fn>\"]}");
@@ -387,7 +383,6 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     services: { ...STOCK_SERVICES },
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
-    ...(feedsIn(config.feeds ?? c.feeds)),
     ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
 }
@@ -397,18 +392,6 @@ function mergeRoles(a: Record<string, string[]>, b: Record<string, string[]>): R
   const out: Record<string, string[]> = {};
   for (const [r, fs] of [...Object.entries(a), ...Object.entries(b)]) out[r] = [...new Set([...(out[r] ?? []), ...fs])];
   return out;
-}
-
-/** A system's feeds, checked. */
-function feedsIn(fs: FeedSpec[] | undefined): { feeds?: FeedSpec[] } {
-  if (!fs) return {};
-  if (!Array.isArray(fs)) throw new Error("etc/config.json: feeds is a list");
-  for (const f of fs) {
-    if (f?.kind === "headers" && typeof f.url === "string" && f.url) continue;
-    if ((f as { kind?: unknown })?.kind === "arc-callback") throw new Error("etc/config.json: the arc-callback feed is gone (#58): transaction statuses come from the host's broadcaster (SKEIN_ARC_URL), routed to every instance holding the transaction");
-    throw new Error(`etc/config.json: a feed is {kind: "headers", url, box?}: ${JSON.stringify(f)}`);
-  }
-  return fs.length ? { feeds: fs } : {};
 }
 
 /** DEFAULTS < the host's fill-ins (its facts, its network) < the tree's config < explicit overrides (warned when they replace a tree value). */
@@ -443,7 +426,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "root" | "han
     ...(Object.keys(s.roles).length ? { roles: s.roles } : {}),
     ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
-    defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
+    defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}), ...(s.heads && Object.keys(s.heads).length ? { heads: s.heads } : {}),
     ...(s.calls && Object.keys(s.calls).length ? { calls: s.calls } : {}), ...(s.services && Object.keys(s.services).length ? { services: s.services } : {}),
   };

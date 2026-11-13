@@ -19,7 +19,7 @@ import { testHost, until } from "./testhost.ts";
 test("skein peers: add / remove as the owner's messages to the `peers` box, over the control socket and on a session; skein-host peers list reads them back", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   await h.ownerInbox();
-  h.instance("alpha");
+  await h.instance("alpha");
   await h.router.start();
   await h.router.listenControl(join(h.home, "host.sock"));
   await h.router.settled();

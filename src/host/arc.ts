@@ -66,12 +66,10 @@
 //
 // A status already routed (txid + txStatus + blockHash, host.db
 // `status_seen`) is not routed again — but Arcade's REJECTED or proof in answer to a post always
-// reaches the instances that broadcast it (a later broadcaster's news). Who holds a transaction is read, never
-// written: the kernel's `has` of the transaction's CID (bitcoin-tx: its
-// txid), cached per txid — filled by the broadcasts (who sent it) and by a
-// sweep of every enabled instance (hydrated to ask) at a txid's first status
-// since the router started; a later status asks again only the running
-// instances not yet known.
+// reaches the instances that broadcast it (a later broadcaster's news). Who holds a transaction is the
+// host's holder map (skein next, SPEC 8: Router.holdersOf — the instances whose `chain/tx/<txid>` fact
+// says pending or seen, followed from their facts and rebuilt from their stores at a start): no kernel is
+// started to ask.
 //
 // Arcade itself may later sign its statuses (a signed-message callback beside
 // webhook and SSE): it would then be the status provider an instance
@@ -153,10 +151,8 @@ export interface BroadcasterOptions {
   admit(handle: string, box: string, event: Record<string, unknown>): Promise<unknown>;
   /** Send `handle` a status message from the host's status provider (providers.ts `status`): box `chain/status` (#128), `subject` the transaction's CID. */
   status(handle: string, body: Record<string, unknown>, subject: ReturnType<typeof txCid>): Promise<unknown>;
-  /** The instances a transaction may be in: every enabled row, and those whose kernel runs now. */
-  instances(): { all: string[]; running: string[] };
-  /** Whether `handle`'s state holds the transaction (a read), hydrating it if it is not running. */
-  holds(handle: string, txid: string): Promise<boolean>;
+  /** The instances holding the unsettled transaction `txid` (the host's holder map, SPEC 8; no kernel started). */
+  holders(txid: string): string[];
   log?(source: string, line: string): void;
   fetch?: typeof fetch;
   /** SSE reconnect backoff, ms (default 500 → 30 000). */
@@ -167,8 +163,6 @@ export interface BroadcasterOptions {
   giveUpMs?: number;
   /** How long a call to Arcade may take (default 30 000 ms). */
   timeoutMs?: number;
-  /** Transactions whose holders are cached (default 100 000; the oldest go first). */
-  maxKnown?: number;
   /** The clock (ms): the queue's. */
   now?(): number;
 }
@@ -289,8 +283,6 @@ export class Broadcaster {
   readonly o: BroadcasterOptions;
   /** Held answers (rule 10), in memory: txid → the waiters on this host's broadcast of it. */
   private holds = new Map<string, Set<(t: Taken) => void>>();
-  /** txid → the instances known to hold it, and whether every enabled instance was asked. */
-  private known = new Map<string, { handles: Set<string>; swept: boolean }>();
   /** Statuses being routed now (txid + key): a webhook and the stream delivering the same one route it once. */
   private inflight = new Map<string, Promise<number>>();
   private stream?: SseStream;
@@ -337,30 +329,8 @@ export class Broadcaster {
     this.stream = undefined;
   }
 
-  /** `handle` holds `txid` (it broadcast it). */
-  note(txid: string, handle: string): void {
-    const t = txid.toLowerCase();
-    let k = this.known.get(t);
-    if (!k) {
-      this.known.set(t, (k = { handles: new Set(), swept: false }));
-      const max = this.o.maxKnown ?? 100_000;
-      if (this.known.size > max) this.known.delete(this.known.keys().next().value!);
-    }
-    k.handles.add(handle);
-  }
-
-  /** The instances holding `txid`: the cached ones, and those a read finds (every enabled one the first time, then the running ones not known yet). */
-  async holders(txid: string): Promise<string[]> {
-    const k = this.known.get(txid) ?? { handles: new Set<string>(), swept: false };
-    this.known.set(txid, k);
-    const { all, running } = this.o.instances();
-    const ask = (k.swept ? running : all).filter((h) => !k.handles.has(h));
-    for (const h of ask) {
-      try { if (await this.o.holds(h, txid)) k.handles.add(h); } catch (e) { this.say(h, `arcade: could not read whether it holds ${txid.slice(0, 8)}: ${(e as Error).message}`); }
-    }
-    k.swept = true;
-    return [...k.handles].filter((h) => all.includes(h));
-  }
+  /** The instances holding `txid`: the host's holder map (SPEC 8). */
+  holders(txid: string): string[] { return this.o.holders(txid.toLowerCase()); }
 
   /**
    * Until this host's broadcast of `txid` is taken by Arcade (its 2xx to the post, or any status of it but a
@@ -422,7 +392,7 @@ export class Broadcaster {
     const known = via !== "post" && ev.txStatus === "REJECTED" && typeof ev.code === "number" ? ARC_CODES[ev.code] : undefined;
     if (known && known.stream !== "invalid") {
       const why = `REJECTED with ARC ${String(ev.code)} (${known.what})${typeof ev.extraInfo === "string" ? `: ${ev.extraInfo}` : ""}`;
-      const hs = [...(this.known.get(txid)?.handles ?? [])];
+      const hs = this.holders(txid);
       const line = known.stream === "not-final"
         ? `arcade ${via}: ${txid.slice(0, 8)} ${why}: not final yet, no verdict — not routed`
         : `ERROR arcade ${via}: ${txid.slice(0, 8)} ${why}: our payload or request at fault (a host defect), no verdict on the transaction — not routed`;
@@ -460,7 +430,7 @@ export class Broadcaster {
       return n;
     }
     const p = (async () => {
-      const hs = [...new Set([...(await this.holders(txid)), ...askers])];
+      const hs = [...new Set([...this.holders(txid), ...askers])];
       const n = await send(hs);
       this.o.db.markStatus(txid, key);
       this.release(txid, ev);
@@ -492,7 +462,6 @@ export class Broadcaster {
     const b = arcadeBody(beef);
     if (b.txid !== undefined && b.txid !== raw) return fail(`the event's BEEF is of ${b.txid}, not of its transaction (a chain-app defect)`);
     if ("why" in b) return fail(b.mined ? `${b.why} (a chain-app defect: a linked transaction is never broadcast)` : b.why);
-    this.note(raw, handle);
     this.o.db.queueBroadcast(raw, b.bytes, handle, this.now());
     this.kick();
     return raw;
@@ -520,7 +489,6 @@ export class Broadcaster {
   }
 
   private async post(row: { txid: string; body: Uint8Array; instances: string[]; attempts: number; since: number }): Promise<void> {
-    for (const h of row.instances) this.note(row.txid, h);
     const from = row.instances[0] ?? "router";
     const a = this.o.arc;
     // 0.9.1: the post's round trip and, when the row waited, its time in the queue — for the log line only.

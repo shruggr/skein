@@ -13,8 +13,7 @@
 //            as a `local` request, as it is (unsigned: the front door finds the
 //            record in the instance's store, its own emit)
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
-//            package, a peer ID gets it as one frame on /skein/message/1.0.0;
-//            the libp2p provider answers {replyTo, seqno, recipients} | {replyTo, sent: true}
+//            package; the libp2p provider answers {replyTo, seqno, recipients}
 //   event    (#65, #119, #126) not a message: an event (`address` its name).
 //            `broadcast` — {kind: "broadcast", tx: <cid>, beef?}, the
 //            transaction's bytes as `body` — to the host's broadcaster (arc.ts: a
@@ -59,16 +58,7 @@
 //   waker      a `deadline` intention's signed request (#126: a step's deadline, a
 //              shell's sleep) → at `at`: {replyTo: <the event>, request, at}; a
 //              wake-me message wake {at: ms} (a kernel before #126) → {at}
-//   cron       cron {fn: "tick", every | at, box, body?, name} → {name, next};
-//              then each tick, a message of its own (no `replyTo`) in `box`:
-//              {...body, kind: body.kind ?? "cron", name, due}
-//              cron {fn: "stop", name} → {name, stopped} (#69, cron.ts)
 //   libp2p     publish {topic, body}   → {seqno: bytes(8), recipients}
-//              dial {peer, protocol}   → {stream}; then each frame read from the
-//                                        stream, in box `frame`: {stream, body}, and
-//                                        its end: {stream, closed: true, error?}
-//              send {stream, body}     → {}
-//              close {stream}          → {}
 //   status     takes no messages (#65): it speaks first. Each status of a transaction
 //              an instance holds (but a proof: that is an event, arc.ts) is a message
 //              from it in box `chain/status` (the chain app's, #128), `subject` the
@@ -88,9 +78,8 @@
 //                     and it started (Router.createInstance). Refused (an answer
 //                     {error}): a bad or taken handle, a bad owner key, another
 //                     image, no claim, another key's claim, a refused claim
-//              start {handle}   → {handle, started: true, url}: published and started
-//              stop {handle}    → {handle, stopped: true}: unpublished and stopped (off its
-//                     libp2p node too: its beacons stop, skein-amm#4)
+//              (start and stop are no messages: the host's own Router.startInstance /
+//              stopInstance, skein next)
 //              create {…, domain?} (#113): the handle's domain, recorded with the row
 //              (`list` later.) It signs no claim (#127): it forwards the owner's,
 //              as signed — but on a one-key host (#160, #162) a create with no
@@ -99,8 +88,6 @@
 //                     at birth ({<app>: {…}}, merged as an install's --config);
 //                     `image` the default image, or an image by name
 //                     ($SKEIN_HOME/images/<name>, SKEIN_IMAGES_DIR)
-//              Also for the instances SKEIN_MANAGER_FOR names (#162): the manager in
-//              their address book at birth, their messages taken as the host skein's
 //   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,
 //              as the manager. Its key is the certifier key, the manifest's
 //              metanet.trust.publicKey (the master's child, key ID `certifier`).
@@ -126,8 +113,6 @@ import { encode } from "../runtime/cid.ts";
 /** The signing a provider's answer and an intention's request get (BRC-169 §7.2, on skein's mail record); an emit is unsigned (#126 step 4). */
 export const MESSAGE_PROTOCOL: [2, string] = [2, "metanet handles envelope"];
 export const MESSAGE_KEY_ID = "send";
-/** The stream protocol a signed message travels on to a libp2p recipient. */
-export const MESSAGE_STREAM = "/skein/message/1.0.0";
 
 /** A message as the kernel keeps it: an emit's unsigned, a provider's answer and an intention's request signed. */
 export interface MailRecord {
@@ -142,7 +127,7 @@ export interface Outgoing {
 }
 
 /** The stock providers' names (each one's address on this host: `local`, <name>). */
-export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager", "certifier"] as const;
+export const PROVIDERS = ["fetch", "waker", "libp2p", "status", "manager", "certifier"] as const;
 /** The providers only the host skein's address book names (#90, #113): they act for it alone. */
 export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certifier"];
 export type ProviderName = typeof PROVIDERS[number];
@@ -181,8 +166,6 @@ export interface ProvidersOptions {
   topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** #148: every event record {kind: "event", event, …} from `handle`, whatever its name, as it is handed over (after its step's commit), with its place in the log — sent on to the event streams (events.ts). Besides what its name is wired to. */
   emitted?(handle: string, record: Record<string, unknown>, place: { s: number; i: number; thread: CID }): void;
-  /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
-  cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
   /**
    * The instance manager (#90, Router): `from()` names the host skein (its
    * handle and identity, hex) — the one sender it acts for (none: it acts for
@@ -190,18 +173,10 @@ export interface ProvidersOptions {
    */
   manager?: {
     from(): { handle: string; identity: string } | undefined;
-    /** #162 (SKEIN_MANAGER_FOR): the other instances the instance manager acts for (not the certifier), each its handle and identity (hex). */
-    alsoFor?(): Array<{ handle: string; identity: string }>;
     request(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
   /** The certifier (#113): an issue request from the host skein → the answer body (handles.ts). Absent: none. */
   certifier?(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
-  /**
-   * #164: an application host's wiring — an event record {kind: "event", event, app?, …} from `handle`
-   * whose name no stock wiring takes (not broadcast, an intention, nor the libp2p node's),
-   * handed over after its step's commit as `topicEvent`'s are. Absent: nothing (not logged).
-   */
-  appEvent?(handle: string, record: Record<string, unknown>): void;
   /**
    * #157: a `deliver` event from `handle` (its CID and record): the host carries it (deliver.ts) and
    * admits the answer → whether an answer was admitted. Handed over again at the instance's next
@@ -211,9 +186,6 @@ export interface ProvidersOptions {
   /** The libp2p host, when there is one: the instance's node does the work. */
   p2p?: {
     publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }>;
-    dial(handle: string, peer: string, protocol: string, frames: (f: { body: Uint8Array } | { closed: true; error?: string }) => void): Promise<number>;
-    send(handle: string, stream: number, body: Uint8Array): Promise<void>;
-    close(handle: string, stream: number): Promise<void>;
   };
   /** The clock (ms), as entries are stamped. */
   now(): number;
@@ -298,8 +270,8 @@ export class Providers {
   /**
    * An event out (#65, #119): addressed to no one, acted on by its name —
    * `broadcast` → the broadcaster (Arcade); `subscribe` / `unsubscribe` → the
-   * libp2p node (the topics it subscribes: p2p.ts; delivery is the kernel's, by the subscription); any other name: the application host's `appEvent` when it has one (#164), else a log
-   * line, nothing else (the step is not told). A broadcast is acted on every
+   * libp2p node (the topics it subscribes: p2p.ts; delivery is the kernel's, by the subscription); any other name:
+   * nothing (the step is not told). A broadcast is acted on every
    * time it is handed over (a kernel's start hands over again what a waiting
    * thread awaits: the queue takes a transaction once); any other event is
    * handed over once.
@@ -337,11 +309,6 @@ export class Providers {
       this.o.topicEvent(handle, m);
       return;
     }
-    if (this.o.appEvent && m.kind === "event" && m.event === out.address) {
-      // #164: the application host's (e.g. the Open Exchange's): it acts on the names it knows.
-      try { this.o.appEvent(handle, m); } catch (e) { this.say(handle, `provider: an event ${out.address}: the host's wiring: ${(e as Error).message}`); }
-      return;
-    }
     // An event no wiring takes is the normal case (an app's facts: chain/tx, chain/output, amm/…): nothing to do, nothing logged.
   }
 
@@ -361,8 +328,7 @@ export class Providers {
       // #90, #113: the host skein's alone — any other sender's message is not acted on, and not answered.
       const host = this.o.manager?.from();
       const may = (h: { handle: string; identity: string } | undefined) => !!h && handle === h.handle && hex(out.message.sender) === h.identity;
-      // #162: the manager also for the instances SKEIN_MANAGER_FOR names; the certifier for the host skein alone.
-      if (!may(host) && !(name === "manager" && (this.o.manager?.alsoFor?.() ?? []).some(may))) throw new Error(`the ${name === "manager" ? "instance manager" : name} takes messages from the host skein only: not acted on`);
+      if (!may(host)) throw new Error(`the ${name === "manager" ? "instance manager" : name} takes messages from the host skein only: not acted on`);
     }
     let body: Record<string, unknown>;
     try { body = dagCbor.decode(out.body) as Record<string, unknown>; } catch { return await this.answer(handle, name, out.message, id, { error: "the body is not dag-cbor" }); }
@@ -372,7 +338,6 @@ export class Providers {
         case "fetch": return await this.fetch(handle, out.message, id, box, body);
         case "waker": return this.wake(handle, out.message, id, box, body);
         case "libp2p": return await this.p2p(handle, out.message, id, box, body);
-        case "cron": return await this.cron(handle, out.message, id, box, body);
         case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"chain/status\")" });
         case "manager": return await this.answer(handle, "manager", out.message, id, await this.o.manager!.request(box, body));
         case "certifier": {
@@ -519,63 +484,23 @@ export class Providers {
         const r = await p.publish(handle, b.topic, b.body);
         return await this.answer(handle, "libp2p", m, id, { seqno: r.seqno, recipients: r.recipients });
       }
-      case "dial": {
-        if (typeof b.peer !== "string" || typeof b.protocol !== "string") return await this.answer(handle, "libp2p", m, id, { error: "dial wants {peer, protocol}" });
-        // Each frame, and the end, is a message in box `frame` answering the dial: the thread awaits the dial's CID.
-        let stream = -1;
-        const queue: Array<Record<string, unknown>> = [];
-        let ready = false;
-        const frames = (f: { body: Uint8Array } | { closed: true; error?: string }) => {
-          const x = { ...("body" in f ? { body: f.body } : { closed: true, ...(f.error ? { error: f.error } : {}) }) };
-          if (!ready) { queue.push(x); return; }
-          this.track(this.answer(handle, "libp2p", m, id, { stream, ...x }, "frame").catch((e) => this.say(handle, `libp2p: frame: ${(e as Error).message}`)));
-        };
-        stream = await p.dial(handle, b.peer, b.protocol, frames);
-        await this.answer(handle, "libp2p", m, id, { stream });
-        ready = true;
-        for (const x of queue) await this.answer(handle, "libp2p", m, id, { stream, ...x }, "frame");
-        return;
-      }
-      case "send": {
-        if (typeof b.stream !== "number" || !(b.body instanceof Uint8Array)) return await this.answer(handle, "libp2p", m, id, { error: "send wants {stream, body}" });
-        await p.send(handle, b.stream, b.body);
-        return await this.answer(handle, "libp2p", m, id, {});
-      }
-      case "close": {
-        if (typeof b.stream !== "number") return await this.answer(handle, "libp2p", m, id, { error: "close wants {stream}" });
-        await p.close(handle, b.stream);
-        return await this.answer(handle, "libp2p", m, id, {});
-      }
       default:
-        return await this.answer(handle, "libp2p", m, id, { error: `the libp2p provider takes publish, dial, send, close: not ${box}` });
+        return await this.answer(handle, "libp2p", m, id, { error: `the libp2p provider takes publish: not ${box}` });
     }
   }
 
-  /** A message to a libp2p recipient: its package published on the topic, or written to the peer on MESSAGE_STREAM. */
+  /** A message to a libp2p recipient: its package published on the topic (a peer is not dialled: the dial provider is gone). */
   private async libp2pRecipient(handle: string, id: CID, out: Outgoing): Promise<void> {
     const p = this.o.p2p;
     const pkg = dagCbor.encode({ message: out.message, body: out.body });
     const fail = (error: string) => this.answer(handle, "libp2p", out.message, id, { error }, "sent");
     if (!p) return await fail("this host runs no libp2p");
     try {
-      if (out.address.startsWith("topic:")) {
-        const r = await p.publish(handle, out.address.slice("topic:".length), pkg);
-        return await this.answer(handle, "libp2p", out.message, id, { seqno: r.seqno, recipients: r.recipients }, "sent");
-      }
-      const s = await p.dial(handle, out.address, MESSAGE_STREAM, () => {});
-      await p.send(handle, s, pkg);
-      await p.close(handle, s);
-      await this.answer(handle, "libp2p", out.message, id, { sent: true }, "sent");
+      if (!out.address.startsWith("topic:")) return await fail(`no libp2p recipient ${out.address}: a message goes to a topic only`);
+      const r = await p.publish(handle, out.address.slice("topic:".length), pkg);
+      return await this.answer(handle, "libp2p", out.message, id, { seqno: r.seqno, recipients: r.recipients }, "sent");
     } catch (e) {
       await fail((e as Error).message);
     }
-  }
-
-  // ---------------------------------------------------------------- cron (#69)
-
-  private async cron(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
-    if (!this.o.cron) return await this.answer(handle, "cron", m, id, { error: "this host keeps no schedules" });
-    if (box !== "cron") return await this.answer(handle, "cron", m, id, { error: `the cron provider takes box "cron", not ${box}` });
-    await this.answer(handle, "cron", m, id, this.o.cron(handle, hex(m.sender), id.toString(), b));
   }
 }

@@ -16,6 +16,7 @@ import { main } from "./cli.ts";
 import { HostDb } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { Router } from "./router.ts";
+import { imageSource } from "./boot.ts";
 import { ephemeralWallet } from "../wallet.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "cli.ts");
@@ -69,8 +70,12 @@ test("router.close(): the kernels it hydrated, its servers and timers — once, 
   const db = new HostDb(join(home, "host.db"));
   t.after(() => db.close());
   db.add("m", { store: join(home, "m.db") });
-  const before = live();
   const key = PrivateKey.fromRandom();
+  // One loader (SPEC 8): the store booted from a tree (the default image) before its first hydration.
+  const boot = new Router({ db, walletFor: () => ephemeralWallet(key), owner: PrivateKey.fromRandom().toPublicKey().toString(), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  await boot.bootRow("m", await imageSource());
+  await boot.close();
+  const before = live();
   const r = new Router({ db, walletFor: () => ephemeralWallet(key), owner: PrivateKey.fromRandom().toPublicKey().toString(), home, idleMs: 60_000, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } } });
   await r.listen(0);
   const k = (await r.hydrate("m")).kernel;

@@ -137,11 +137,12 @@ test("arc: unset, the network's Arcade (DEFAULT_ARC); its token made once into h
   assert.throws(() => hostArcConfig({ SKEIN_NETWORK: "test" }), /no SKEIN_HOME/);
 });
 
-/** A broadcaster over a fake Arcade with instances a..d: `holding` is who holds what, `running` who runs. */
+/** A broadcaster over a fake Arcade with instances a..d: `holding` is who holds what (the host's holder map, SPEC 8; `running` unused since). */
 function broadcaster(arc: ArcConfig, db: HostDb, holding: Map<string, Set<string>>, running: Set<string>, o: { now?: () => number; giveUpMs?: number } = {}) {
   /** What reached each instance: [handle, how ("proof" event in box chain | "status" message), txid, txStatus]. */
   const admitted: Array<[string, string, string, string]> = [];
-  const asked: Array<[string, string]> = [];
+  /** Each holder lookup (the host's map: no kernel is started to ask). */
+  const asked: string[] = [];
   const lines: string[] = [];
   const b = new Broadcaster({
     arc, db, log: (s, l) => lines.push(`[${s}] ${l}`), backoff: { min: 20, max: 100 }, retry: { min: 20, max: 100 }, ...(o.now ? { now: o.now } : {}), ...(o.giveUpMs ? { giveUpMs: o.giveUpMs } : {}),
@@ -157,8 +158,7 @@ function broadcaster(arc: ArcConfig, db: HostDb, holding: Map<string, Set<string
       assert.equal(body.merklePath, undefined, "never a path: that is a proof's");
       admitted.push([h, "status", String(body.txid), String(body.txStatus)]);
     },
-    instances: () => ({ all: ["a", "b", "c", "d"], running: [...running] }),
-    holds: async (h, txid) => { asked.push([h, txid]); running.add(h); return holding.get(h)?.has(txid) ?? false; },
+    holders: (txid) => { asked.push(txid); void running; return [...holding].filter(([, s]) => s.has(txid)).map(([h]) => h); },
   });
   return { b, admitted, asked, lines };
 }
@@ -254,14 +254,14 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   const owner = PrivateKey.fromRandom().toPublicKey().toString();
   const router = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: (s, l) => lines.push(`[${s}] ${l}`) });
   t.after(() => router.stop());
-  assert.deepEqual(router.addressSeed().map((e) => e.address), ["fetch", "waker", "cron", "status"], "a new genesis names the status provider (#65): this host has an Arcade");
+  assert.deepEqual(router.addressSeed().map((e) => e.address), ["fetch", "waker", "status"], "a new genesis names the status provider (#65): this host has an Arcade");
   const { beef } = await spend(7);
   const post = async (r: Router, path: string) => (await r.dispatch({ method: "POST", url: `http://127.0.0.1:1${path}`, headers: {}, body: beef })).status;
   assert.equal(await post(router, "/arc/v1/tx"), 404, "the broadcast route is gone (#65): a broadcast is an event");
   assert.equal(await post(router, "/arc/callback"), 401, "Arcade's webhook stays (the host token as bearer)");
   const none = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, log: (s, l) => lines.push(`[${s}] ${l}`) });
   t.after(() => none.stop());
-  assert.deepEqual(none.addressSeed().map((e) => e.address), ["fetch", "waker", "cron"], "no Arcade: no status provider");
+  assert.deepEqual(none.addressSeed().map((e) => e.address), ["fetch", "waker"], "no Arcade: no status provider");
   assert.equal(await post(none, "/arc/callback"), 404);
   none.providers.deliver("x", { message: { kind: "broadcast", tx: txCid("ab".repeat(32)) } as never, body: new Uint8Array(), transport: "event", address: "broadcast" });
   assert.ok(lines.some((l) => l === "[x] broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"));
@@ -278,14 +278,15 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   assert.throws(() => resolveSystem({ identity: me, root: [owner], handle: "w", domain: "localhost" }, programs, { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
 });
 
-test("arc: into the instances holding the transaction go only proofs (events) and REJECTED (the status provider's messages); every other status is the host's; the broadcaster, a sweep, then only the running; a redelivery writes nothing", async (t) => {
+test("arc: into the instances holding the transaction go only proofs (events) and REJECTED (the status provider's messages); every other status is the host's; the holders from the host's map, no kernel asked; a redelivery writes nothing", async (t) => {
   const arcade = await FakeArcade.start();
   t.after(() => arcade.close());
   const db = new HostDb(join(home(t), "host.db"));
   t.after(() => db.close());
   const { tx, beef } = await spend(5);
   const X = tx.id("hex");
-  const holding = new Map([["b", new Set([X])], ["c", new Set([X])]]);
+  // The host's holder map (SPEC 8): a broadcast it (its chain/tx fact pending), b and c hold it too.
+  const holding = new Map([["a", new Set([X])], ["b", new Set([X])], ["c", new Set([X])]]);
   const running = new Set(["a", "b"]);
   const { b, admitted, asked } = broadcaster({ url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, db, holding, running);
   t.after(() => b.stop());
@@ -301,11 +302,11 @@ test("arc: into the instances holding the transaction go only proofs (events) an
   assert.equal(asked.length, 0, "and no instance is read for them");
   assert.equal(b.stats.routed, 0);
 
-  // The proof: every holder — the broadcaster, then a sweep of every other enabled instance (c hydrated for it).
+  // The proof: every holder the host's map names — one lookup, no instance read.
   const bump = new MerklePath(103, [[{ offset: 0, hash: X, txid: true }]]).toHex();
   arcade.emit(X, { txStatus: "MINED", blockHash: "11".repeat(32), blockHeight: 103, merklePath: bump });
   await until("the MINED status", () => b.stats.routed === 1 || undefined);
-  assert.deepEqual(asked.map(([h]) => h).sort(), ["b", "c", "d"], "the first routed status of a txid: every other enabled instance is read");
+  assert.deepEqual(asked, [X], "one lookup in the holder map");
   assert.deepEqual(admitted.map(([h, how]) => [h, how]).sort(), [["a", "proof"], ["b", "proof"], ["c", "proof"]], "MINED with its path: a proof event, unsigned");
 
   // Arcade's webhook: the host token only; the same MINED again writes nothing; IMMUTABLE with no path is the host's.
@@ -319,14 +320,14 @@ test("arc: into the instances holding the transaction go only proofs (events) an
   assert.equal(admitted.length, n, "IMMUTABLE with no path: the host's");
   assert.ok(db.hasStatus(X, `IMMUTABLE ${"11".repeat(32)}`));
 
-  // A reorg: MINED in another block is a new proof; a later holder (d, running now) is found, the others not asked again.
+  // A reorg: MINED in another block is a new proof; a later holder (d) is in the map, found by the next lookup.
   holding.set("d", new Set([X]));
   asked.length = 0;
   arcade.emit(X, { txStatus: "SEEN_ON_NETWORK" });
   await new Promise((r) => setTimeout(r, 100));
   arcade.emit(X, { txStatus: "MINED", blockHash: "22".repeat(32), blockHeight: 104, merklePath: bump });
   await until("the re-proof", () => admitted.filter(([, how]) => how === "proof").length === 7 || undefined);
-  assert.deepEqual(asked.map(([h]) => h), ["d"], "only the running instance not yet known");
+  assert.deepEqual(asked, [X], "one lookup again");
   assert.equal(admitted.filter(([, how]) => how === "status").length, 0, "no status message for any of it");
   assert.equal(b.stats.proofs, 7);
 });
@@ -426,8 +427,7 @@ test("arc: a restart resumes the stream after the last event id taken (host.db):
   assert.equal(arcade.connects[2], id2, "Last-Event-ID from host.db");
   assert.deepEqual(two.admitted, [["a", "proof", X, "MINED"]], "exactly the one missed while down");
   assert.equal(db.cursor(arcade.eventsUrl), id3);
-  assert.ok(two.asked.some(([h, x]) => h === "a" && x === X), "a new process knows nothing: the holders are read again");
-  assert.ok(txCid(X).toString().startsWith("bag"), "the read is of the transaction's CID");
+  assert.deepEqual(two.asked, [X], "a new process: the holders looked up in the host's map (rebuilt from the stores at a start, Router.rebuildHolders)");
 });
 
 test("arc: our payload or request at fault — an error on the instance's log, off the queue, no status; not final (476) kept and tried again", async (t) => {

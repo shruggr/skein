@@ -23,7 +23,7 @@ const PROBE = new URL("../../kernel-zig/test/call/probe.wasm", import.meta.url);
 
 test("admitEvent through an event route naming kernel.beef: validated and rewritten, or refused with the door's reason", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 120_000 }, async (t) => {
   const h = await testHost(t);
-  const identity = h.instance("alpha");
+  const identity = await h.instance("alpha");
   const l = await h.router.hydrate("alpha");
   const k = l.kernel;
   const admin = async (box: string, body: unknown) => {

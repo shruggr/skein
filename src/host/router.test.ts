@@ -29,7 +29,7 @@ import { ephemeralWallet } from "../wallet.ts";
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's hosted mailbox over http; list/ack; polls are reads: no entries, nothing moves", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
-  const alpha = h.instance("alpha");
+  const alpha = await h.instance("alpha");
   await h.router.start();
   await h.install("alpha"); // #83: `run` and `chat` are the shell app's and the chat app's
 
@@ -68,7 +68,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
   const tab = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
   const seeded = await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { source: string; address: string; transport: string }));
   assert.ok(seeded.every((p) => p.source === "genesis"), "no peer seeded from the host's rows");
-  assert.deepEqual(seeded.map((p) => p.transport === "local" ? p.address : p.transport).sort(), ["cron", "fetch", "mailbox", "waker"], "the providers (#69: the cron provider among them) and the owner's mailbox");
+  assert.deepEqual(seeded.map((p) => p.transport === "local" ? p.address : p.transport).sort(), ["fetch", "mailbox", "waker"], "the providers (#69: the cron provider among them) and the owner's mailbox");
 
   // Polls: listMessages is a read route (the messagebox app's filter answers it): no entry, the mailbox unchanged.
   const b = await h.inboxHost();
@@ -84,11 +84,11 @@ test("router: the stock client by host name, our client by path prefix; the answ
 
 test("router: an instance's genesis names the owner's configured messagebox (SKEIN_OWNER_MESSAGEBOX) when it is set first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.instance("early"); // genesised before the owner's messagebox is configured
+  await h.instance("early"); // genesised before the owner's messagebox is configured
   await h.router.hydrate("early");
   assert.ok(h.lines.some((l) => l.startsWith("[early] WARNING: its genesis names no owner messagebox")), `warned (${h.lines.join(" | ")})`);
   const mailbox = await h.ownerInbox();
-  h.instance("late");
+  await h.instance("late");
   const k = (await h.router.hydrate("late")).kernel;
   const g = await k.genesis() as { defaults: Record<string, string> };
   assert.equal(g.defaults.ownerMessagebox, mailbox, "the configured messagebox");
@@ -98,7 +98,7 @@ test("router: an instance's genesis names the owner's configured messagebox (SKE
 test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on the host skein that keeps the hosted mailbox (host B) and an instance (host A); a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
-  h.instance("alpha");
+  await h.instance("alpha");
   await h.router.start();
   await h.router.settled();
   const b = await h.inboxHost();
@@ -158,55 +158,6 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.ok(mail.session.signature.length > 0 && mail.session.nonce && mail.session.yourNonce, "the 104 signature and both nonces");
 });
 
-test("router: the host's headers feed (#102) reaches only the instances whose dispatch table takes events in box `chain` — a row added later subscribes, removed unsubscribes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
-  const conns: ServerResponse[] = [];
-  // Only the tip stream (no history here: the image's chain part, #132, stays empty and says so).
-  const server = createServer((req, res) => { if (!req.url?.endsWith("/tip/stream")) { res.writeHead(404).end(); return; } res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  t.after(() => { for (const c of conns) c.end(); server.close(); });
-  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
-  const h = await testHost(t, { headersFeed: url });
-  h.instance("a");
-  h.instance("b");
-  await h.router.start();
-  await h.router.settled();
-  const subscribed = () => ["a", "b"].filter((x) => h.router.feeds.hosts(x));
-  assert.deepEqual(subscribed(), [], "no instance has a chain row yet");
-  // #132: the host listens itself (the default image's chain part grows by it): one connection, shared with the instances later.
-  await until("the host's own connection", () => conns[0]);
-  assert.equal(conns.length, 1, "one connection: the host's own, no instance's");
-
-  // An event route at box `chain` (as the chain app's), added to `a`: `a` is subscribed, live.
-  const programs = Object.keys(((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, unknown> }).programs);
-  const handler = programs.includes("resolve") ? "resolve" : programs[0]!;
-  const gp = ((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, CID> }).programs;
-  const id = h.db.get("a")!.identity!;
-  // #124: the owner's dispatch message (`skein routes`), POSTed to a's /sendMessage on the owner's session.
-  // #143: events are their own transport — an `event` route at box `chain`.
-  const sendRow = (op: "add" | "remove") => sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "a", { prompt: [], recipient: id, messages: [{ box: "dispatch", body: { op, row: { transport: "event", address: "chain", program: gp[handler]! } } }] });
-  await sendRow("add");
-  await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });
-  assert.deepEqual(subscribed(), ["a"]);
-  assert.ok(h.lines.includes(`[router] a: subscribed to the host's headers feed ${url}`), h.lines.join("\n"));
-  assert.equal(conns.length, 1, "the same connection");
-
-  // A header (chaintracks' JSON, mainnet block 1): an entry in `a`, nothing in `b`.
-  const n0 = { a: await h.entries("a"), b: await h.entries("b") };
-  const block1 = {
-    version: 1, previousHash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", merkleRoot: "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098",
-    time: 1231469665, bits: 486604799, nonce: 2573394689, height: 1, hash: "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048",
-  };
-  conns[0]!.write(`data: ${JSON.stringify(block1)}\n\n`);
-  await until("the header admitted into a", async () => (await h.entries("a")) > n0.a || undefined);
-  await h.router.settled();
-  assert.equal(await h.entries("b"), n0.b);
-
-  // The row removed: unsubscribed.
-  await sendRow("remove");
-  await until("a unsubscribed", async () => { await h.router.settled(); return !h.router.feeds.hosts("a") || undefined; });
-  assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
-});
-
 test("router: registration through the host skein (#113) — POST /account/register is an entry in the host skein, answered by its onboarding app; no instance is made: the handle's messagebox is the host skein's messagebox app; a second registration a new serial, the record's trail two long; resolve the current certificate and the paymail PKI; a taken, second or reserved name 409; no host.db row for a handle", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
   await h.hostSkein();
@@ -220,7 +171,7 @@ test("router: registration through the host skein (#113) — POST /account/regis
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
   const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
-  h.instance("alpha");
+  await h.instance("alpha");
 
   // Where a page finds the router and the handle domain (the app's config): at any host name.
   for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {

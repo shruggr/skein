@@ -6,12 +6,9 @@
 //
 // The protocol is one JSON line each way, and it carries one request:
 //
-//   {"op": "event", "handle": h, "box": b, "event": {…}}   → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //   {"op": "message", "handle": h, "message": "<base64>", "body": "<base64>"}
 //                                                       → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //
-// `event` is `skein-host event` (cli.ts): the router sends it as a message
-// from its cron provider, a tick due now (Router.cronEvent, #69).
 // `message` (#142) is a message the client `skein` signed in its own process
 // (src/client/raw.ts signMessage: the operator's key), delivered on the host
 // machine: `message` its mail record's dag-cbor, `body` the body's bytes. The
@@ -26,16 +23,13 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 
 export const CONTROL_SOCKET = "host.sock";
 
-export type ControlRequest =
-  | { op: "event"; handle: string; box: string; event: Record<string, unknown> }
-  | { op: "message"; handle: string; message: string; body: string };
+export type ControlRequest = { op: "message"; handle: string; message: string; body: string };
 export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
 
-/** What the socket's owner does with a request (the router: cronEvent). */
+/** What the socket's owner does with a request (the router: messageLocal). */
 export interface ControlHandler {
-  event(handle: string, box: string, event: Record<string, unknown>): Promise<string>;
-  /** #142: a signed message for `handle` (its mail record's dag-cbor and its body), appended as a `local` request (Router.messageLocal); absent: refused. */
-  message?(handle: string, message: Uint8Array, body: Uint8Array): Promise<string>;
+  /** #142: a signed message for `handle` (its mail record's dag-cbor and its body), appended as a `local` request (Router.messageLocal). */
+  message(handle: string, message: Uint8Array, body: Uint8Array): Promise<string>;
 }
 
 /** The longest request line: ours to choose (#142) — a message carries a module whole (base64), so 64 MiB. */
@@ -46,14 +40,9 @@ function requestOf(line: string): ControlRequest {
   let r: unknown;
   try { r = JSON.parse(line); } catch { throw new Error("not JSON"); }
   const o = r as Record<string, unknown> | null;
-  if (o && typeof o === "object" && o.op === "message") {
-    if (typeof o.handle !== "string" || !o.handle) throw new Error("a message names its instance (handle)");
-    if (typeof o.message !== "string" || typeof o.body !== "string") throw new Error("a message is {message, body}, each base64");
-    return o as unknown as ControlRequest;
-  }
-  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event} or {op: \"message\", handle, message, body}");
-  if (typeof o.handle !== "string" || !o.handle || typeof o.box !== "string" || !o.box) throw new Error("an event names its instance (handle) and its box");
-  if (!o.event || typeof o.event !== "object" || Array.isArray(o.event)) throw new Error("the event is a JSON object");
+  if (!o || typeof o !== "object" || o.op !== "message") throw new Error("want {op: \"message\", handle, message, body}");
+  if (typeof o.handle !== "string" || !o.handle) throw new Error("a message names its instance (handle)");
+  if (typeof o.message !== "string" || typeof o.body !== "string") throw new Error("a message is {message, body}, each base64");
   return o as unknown as ControlRequest;
 }
 
@@ -94,12 +83,7 @@ function serveOne(s: Socket, h: ControlHandler): void {
     if (nl < 0) { if (buf.length > MAX_LINE) reply({ ok: false, error: "request too long" }); return; }
     let req: ControlRequest;
     try { req = requestOf(buf.slice(0, nl)); } catch (e) { reply({ ok: false, error: (e as Error).message }); return; }
-    if (req.op === "message") {
-      if (!h.message) { reply({ ok: false, error: "this router takes no messages here" }); return; }
-      h.message(req.handle, Buffer.from(req.message, "base64"), Buffer.from(req.body, "base64")).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
-      return;
-    }
-    h.event(req.handle, req.box, req.event).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
+    h.message(req.handle, Buffer.from(req.message, "base64"), Buffer.from(req.body, "base64")).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
   });
 }
 

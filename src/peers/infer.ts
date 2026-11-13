@@ -1,10 +1,8 @@
 // The inference peer (docs/ARCH.md, "Everything outside is a peer"): its own
 // identity and wallet, a process of its own. It collects its `infer` box on
-// the messagebox, verifies and opens each BRC-169 envelope with its wallet
-// (open() checks the plaintext against the sender-signed contentHash), calls an
-// OpenAI-compatible endpoint, and seals the completion back to the sender in
-// `completions` with `replyTo` = the request's id, its signed part's CID (which
-// is how the runtime delivers it to the loop thread awaiting it). It is the
+// its messagebox, calls an OpenAI-compatible endpoint, and answers the
+// completion to the sender in `completions` with `replyTo` = the request's id
+// (which is how the runtime delivers it to the loop thread awaiting it). It is the
 // only thing in skein that fetches for inference.
 //
 // It is stateful (issue #12; docs/MESSAGES.md, "The infer protocol"): it holds
@@ -25,7 +23,7 @@
 //
 // Providers come from ~/.skein/infer.json: {"ripper": {"baseUrl": "http://…/v1", "apiKey": "…"}}.
 //
-// Two transports. Since #40 (`raw`): its mailbox is a messagebox (its handle's,
+// The transport (#40, `raw`): its mailbox is a messagebox (its handle's,
 // at a host skein's messagebox app), and it speaks raw BRC-33 on BRC-104 sessions — it lists its
 // `infer` box there (a request's id is its messageId: the record the instance
 // keeps; the sender is the session's identity), and answers in the sender's
@@ -33,29 +31,15 @@
 // address book (key → messagebox URL), which its admin configures
 // (skein-infer: SKEIN_INFER_PEERS; scripts/host/up.sh writes every agent's
 // there). Nobody registers with it: a request from a key not in the address
-// book has nowhere to go, and is dropped with one line saying so. The
-// envelope transport (`box`): BRC-169 envelopes (§7.2, JSON) over any BRC-33
-// messagebox, one listed message per request.
+// book has nowhere to go, and is dropped with one line saying so.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { isoTime, open, seal, type Envelope } from "../envelope.ts";
-import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, wrapCbor, type AnyEnvelope } from "../envelope-cbor.ts";
 import { encode } from "../runtime/cid.ts";
 import type { Listed as RawListed } from "../client/raw.ts";
-
-/** One listed message: BRC-33 fields as the messagebox reports them. */
-export interface Listed { messageId: string; sender?: string; body: unknown; created_at?: string }
-
-/** The part of a BRC-33 messagebox a peer uses, as one identity. */
-export interface MessageBox {
-  list(box: string): Promise<Listed[]>;
-  ack(ids: string[]): Promise<void>;
-  send(m: { recipient: string; box: string; body: object }): Promise<void>;
-}
 
 /** The raw transport (#40): its own mailbox, a session per peer messagebox, its address book. */
 export interface RawTransport {
@@ -170,21 +154,13 @@ export class NodeGraph {
 
 export interface InferOptions {
   wallet: WalletInterface;
-  /** The envelope transport: BRC-169 envelopes over a BRC-33 messagebox. */
-  box?: MessageBox;
   /** The raw transport (#40). */
-  raw?: RawTransport;
+  raw: RawTransport;
   providers: Record<string, Provider>;
   /** The conversation graph. Default: in memory only. */
   graph?: NodeGraph;
   /** Default: global fetch. Tests script it. */
   fetch?: typeof fetch;
-  /** This peer's handle, for the envelopes it seals. Default infer@localhost. */
-  handle?: string;
-  domain?: string;
-  /** Accept `created` within ± this of now. Default 10 minutes. */
-  freshnessMs?: number;
-  now?: () => number;
   log?: (line: string) => void;
 }
 
@@ -216,18 +192,7 @@ export class InferPeer {
 
   /** Collect the `infer` box once: answer each request, acknowledge it. Returns how many were answered. */
   async poll(): Promise<number> {
-    if (this.o.raw) return this.pollRaw(this.o.raw);
-    let n = 0;
-    for (const m of await this.o.box!.list("infer")) {
-      try {
-        if (await this.handle(m)) n++;
-      } catch (e) {
-        this.say(`infer ${m.messageId}: ${(e as Error).message} (left unacknowledged)`);
-        continue;
-      }
-      await this.o.box!.ack([m.messageId]);
-    }
-    return n;
+    return this.pollRaw(this.o.raw);
   }
 
   /** The raw transport (#40): each request answered at the messagebox the address book names for its sender. */
@@ -254,32 +219,6 @@ export class InferPeer {
       await raw.inbox.ack([m.messageId]);
     }
     return n;
-  }
-
-  /** One request: screen, open, complete, reply. False if rejected (logged). */
-  async handle(m: Listed): Promise<boolean> {
-    const reject = (why: string) => { this.say(`infer ${m.messageId}: rejected: ${why}`); return false; };
-    // Either envelope form (issue #33): §7.2 JSON, or §7.3 dag-cbor (BRC-231 bytes, or {"dag-cbor": base64} in a JSON listing).
-    const env = asEnvelope(m.body);
-    if (!env) return reject("not a BRC-169 envelope");
-    let x: ReturnType<typeof inspect>;
-    try { x = inspect(env); } catch (e) { return reject((e as Error).message); }
-    if (!x.verified) return reject("not a verifiable BRC-169 envelope");
-    if (m.sender !== undefined && m.sender !== x.sender) return reject("messagebox sender is not envelope.sender");
-    const now = (this.o.now ?? Date.now)();
-    if (Math.abs(now - Date.parse(env.created)) > (this.o.freshnessMs ?? 10 * 60_000)) return reject(`created ${env.created} is not fresh`);
-    const replyTo = x.id;
-    let result: Completion;
-    try {
-      const plain = isCborEnvelope(env) ? await openCbor(this.o.wallet, env) : await open(this.o.wallet, env as Envelope);
-      const req = dagCbor.decode(plain.body) as InferRequest;
-      result = await this.answer(x.sender, req);
-    } catch (e) {
-      result = { error: (e as Error).message };
-    }
-    await this.reply(env, x.sender, { replyTo, ...result });
-    this.say(`infer ${short(replyTo.toString())} from ${short(x.sender)}: ${"error" in result ? `error: ${result.error}` : "missing" in result ? `missing ${result.missing.map((c) => short(c.toString())).join(", ")}` : `${result.model} ${result.ms} ms${result.message.tool_calls?.length ? ` · ${result.message.tool_calls.length} tool call(s)` : ""}`}`);
-    return true;
   }
 
   /**
@@ -349,19 +288,6 @@ export class InferPeer {
       model: req.model,
       ms: Date.now() - t0,
     }) as Completion;
-  }
-
-  /** Answer in the form the request came in (a JSON-form request gets a JSON-form reply). */
-  private async reply(to: AnyEnvelope, sender: string, body: object): Promise<void> {
-    const [user, domain] = (this.o.handle ?? "infer@localhost").split("@");
-    const args = {
-      recipient: { identityKey: sender, handle: to.sender.handle ?? sender.slice(0, 16), domain: to.sender.domain ?? domain ?? "localhost" },
-      sender: { handle: user, domain: this.o.domain ?? domain ?? "localhost" },
-      body: dagCbor.encode(clean(body)),
-      created: isoTime((this.o.now ?? Date.now)()),
-    };
-    const out = isCborEnvelope(to) ? wrapCbor(await sealCbor(this.o.wallet, args)) : await seal(this.o.wallet, args);
-    await this.o.box!.send({ recipient: sender, box: "completions", body: out });
   }
 }
 

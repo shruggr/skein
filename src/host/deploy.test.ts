@@ -76,7 +76,7 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
   const h = await testHost(t, { infer: inferId });
   const mailbox = await h.ownerInbox();
   const inferBox = await h.inbox(inferKey, "infer");
-  for (const x of handles) h.instance(x);
+  for (const x of handles) await h.instance(x);
   await h.router.start();
   const requests: Json[] = [];
   const f = (async (_url: string, init: { body: string }) => {
@@ -166,31 +166,30 @@ test("onlyIgnore: named files and everything under a named directory, directorie
   assert.ok(!onlyIgnore(d, ["*"])("src/index.ts"));
 });
 
-test("skein deploy: the filtered tree through `objects` as the owner sets main; the same directory again sends nothing; an edited SOUL.md moves main and the next new conversation reads it", { skip }, async (t) => {
-  const { h, peer, requests, owner, store, deploy } = await setup(t, ["martha"]);
+test("skein deploy: the filtered tree through `objects` and `head` as the owner moves main; the same directory again sends nothing; an edited SOUL.md moves main again", { skip }, async (t) => {
+  const { h, store, deploy } = await setup(t, ["martha"]);
   const s = await store("martha");
   const dir = await agentDir(t);
-  const row = h.db.get("martha")!;
   const boxesOf = (p: { messages: Array<{ box: string }> }) => p.messages.map((m) => m.box);
   const before = (await boxes(s)).length;
   const since = async () => (await boxes(s)).slice(before);
 
-  // First deploy: no main yet → objects only (the root on the last bundle: the kernel sets main from it).
+  // First deploy: main is the tree the instance was born from (one loader, SPEC 8) → objects, then `head main`.
   const d1 = await deploy("martha", dir);
-  assert.deepEqual(boxesOf(d1), ["objects"], "no main yet: the objects operation sets it from the root");
+  assert.deepEqual(boxesOf(d1), ["objects", "head"], "main is the image's tree: the objects, then head main");
   const records = (d1.messages[0]!.body as { records: unknown[] }).records.length;
   assert.equal(records, 5, "SOUL.md, IDENTITY.md, skills/x.md, skills/, the root");
   await mainIs(s, d1.root.toString());
   assert.deepEqual(await paths(s, d1.root), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
   assert.deepEqual((await readTree(s, d1.root)).map((e) => e.name), ["IDENTITY.md", "SOUL.md", "skills"]);
-  assert.deepEqual(await since(), ["objects"], "one bundle, one message");
+  assert.deepEqual(await since(), ["objects", "head"], "one bundle, one message, and the head");
   for (const m of await messagesIn(s)) assert.equal(Buffer.from(m.sender as Uint8Array).toString("hex"), h.ownerId, "sent as the owner");
 
   // The same directory: nothing to send.
   const d2 = await deploy("martha", dir);
   assert.deepEqual([d2.root.toString(), d2.messages.length], [d1.root.toString(), 0]);
   await h.router.settled();
-  assert.deepEqual(await since(), ["objects"]);
+  assert.deepEqual(await since(), ["objects", "head"]);
 
   // Edited SOUL.md: only what the store lacks (the new blob, the new root), then `head main`.
   await fs.writeFile(join(dir, "SOUL.md"), "You are Martha, now at the back office.\n");
@@ -198,17 +197,7 @@ test("skein deploy: the filtered tree through `objects` as the owner sets main; 
   assert.equal((d3.messages[0]!.body as { records: unknown[] }).records.length, 2);
   assert.deepEqual(boxesOf(d3), ["objects", "head"]);
   await mainIs(s, d3.root.toString());
-  assert.deepEqual(await since(), ["objects", "objects", "head"]);
-
-  // A new conversation (no tree: main's) gets the new prompt — the chat app installed for it (#83: the genesis has no chat loop).
-  await h.install("martha", [CHAT_APP]);
-  await owner.box(row).send(row.identity!, "chat", { text: "who are you?" });
-  await until("the inference request", async () => { await peer.poll(); return requests.length ? true : undefined; });
-  const system = String((requests[0]!.messages as Json[])[0]!.content);
-  assert.ok(system.includes("You are Martha, now at the back office.") && system.includes(IDENTITY), system);
-  await h.router.settled();
-  const loop = (await appRecordOf(s, "chat"))!.record.programs.loop!;
-  assert.equal((await collect(s.edges.query({ kind: "thread", program: loop }))).length, 1);
+  assert.deepEqual(await since(), ["objects", "head", "objects", "head"]);
 });
 
 test("skein deploy: a directory into main on a session with the instance's origin (objects, head); a stranger's key is refused", { skip }, async (t) => {
@@ -221,7 +210,7 @@ test("skein deploy: a directory into main on a session with the instance's origi
   assert.equal(await adminMain("deploy", [dir, origin, "--dry-run"], e.env), 0, e.err.join("\n"));
   const root = /→ main (\S+)/.exec(e.out.join("\n"))?.[1];
   const sent = e.out.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as { message: { recipient: string; messageBox: string } });
-  assert.ok(root && sent.length && sent.every((m) => m.message.recipient === h.db.get("kurt")!.identity! && m.message.messageBox === "objects"), e.out.join("\n"));
+  assert.ok(root && sent.length && sent.every((m) => m.message.recipient === h.db.get("kurt")!.identity! && ["objects", "head"].includes(m.message.messageBox)), e.out.join("\n"));
   const stranger = join(h.home, "stranger.key");
   await fs.writeFile(stranger, `${PrivateKey.fromRandom().toHex()}\n`);
   assert.equal(await adminMain("deploy", [dir, origin], { ...e.env, vars: { ...e.env.vars, SKEIN_OPERATOR_KEY: stranger } }), 1, "a stranger's objects are refused");
@@ -238,19 +227,19 @@ test("skein routes --instance (#143): a message to box `dispatch` as root, over 
   const plan = async (...argv: string[]) => { const code = await adminMain("routes", [...argv, "--instance", "martha"], e.env); await h.router.settled(); return code; };
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
   const before = await until("the genesis processed (its seed routes)", () => currentDispatch(s));
-  const resolve = (await programsOf(s)).resolve!;
+  const mail = (await programsOf(s)).mail!;
   const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  assert.equal(await plan("add", "register", "resolve"), 0, e.err.join("\n"));
+  assert.equal(await plan("add", "register", "mail"), 0, e.err.join("\n"));
   await until("the new route", async () => (await last()).address === "register" ? true : undefined);
   const row = await last();
-  assert.deepEqual([row.transport, row.address, String(row.program), row.sender], ["mailbox", "register", String(resolve), undefined]);
+  assert.deepEqual([row.transport, row.address, String(row.program), row.sender], ["mailbox", "register", String(mail), undefined]);
   assert.equal(await plan("remove", "register"), 0, e.err.join("\n"));
   await until("the route removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
   assert.deepEqual(await currentDispatch(s), before, "removed: the routes as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");
 
-  assert.equal(await plan("swap", "register", "resolve"), 2);
+  assert.equal(await plan("swap", "register", "mail"), 2);
   assert.equal(await plan("add", "register", "no-such-program"), 1);
   assert.match(e.err.at(-1)!, /not a CID or a program name/);
   assert.equal(await plan("remove", "nothing"), 1);
@@ -263,7 +252,7 @@ test("skein routes --instance (#143): a message to box `dispatch` as root, over 
   await until("granted", async () => (await grants())["demo.ops"]?.length ? true : undefined);
   assert.equal(await adminMain("grant", ["remove", peer, "--role", "demo.ops", "--instance", "martha"], e.env), 0, e.err.join("\n"));
   await until("revoked", async () => !(await grants())["demo.ops"] ? true : undefined);
-  assert.equal(await main(["dispatch", "martha", "add", "register", "resolve"], e.env), 2, "skein-host changes no route table");
+  assert.equal(await main(["dispatch", "martha", "add", "register", "mail"], e.env), 2, "skein-host changes no route table");
 });
 
 // ---------------------------------------------------------------- the roster
@@ -331,43 +320,3 @@ test("rosterFor: the rows a row knows, in row order, never itself; `- @handle@do
   assert.equal(await rosterFor({ ...rowOf("solo"), knows: '["*"]' }, [], f), undefined);
 });
 
-test("skein-host knows / roster --for: each agent's ROSTER.md from host.db and the IDENTITY.md the owner deployed (main); deployed with it as the owner's messages", { skip }, async (t) => {
-  const { h, env, store, deploy } = await setup(t, ["martha", "kurt"]);
-  const mdir = await agentDir(t);
-  const kdir = await agentDir(t);
-  await fs.writeFile(join(kdir, "IDENTITY.md"), KURT);
-  const e = env();
-  const cli = (...argv: string[]) => main(argv, e.env);
-  const rosterOf = async (handle: string) => { const s = await store(handle); return new TextDecoder().decode(await readFile(s, (await headTree(s, MAIN))!, "ROSTER.md")); };
-  // Not --all: the host skein (the owner's and the inference peer's mailboxes) is a row too.
-  assert.equal(await cli("knows", "martha", "kurt"), 0);
-  assert.equal(e.out.at(-1), "martha knows kurt");
-  assert.equal(await cli("knows", "kurt", "martha"), 0);
-  assert.equal(await cli("knows", "kurt"), 0);
-  assert.equal(e.out.at(-1), "kurt knows martha");
-
-  // Before anything is deployed: the handle stands in for the name.
-  assert.equal(await cli("roster", "--for", "martha"), 0);
-  assert.equal(e.out.at(-1), "## Colleagues\n\n- @kurt@localhost — kurt");
-
-  // Kurt deployed (his IDENTITY.md in his main): Martha's roster names him; written into her directory and deployed with it.
-  const k = await deploy("kurt", kdir);
-  await mainIs(await store("kurt"), k.root.toString());
-  assert.equal(await cli("roster", "--for", "martha"), 0);
-  assert.equal(e.out.at(-1), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for");
-  await fs.writeFile(join(mdir, "ROSTER.md"), `${e.out.at(-1)}\n`);
-  const m = await deploy("martha", mdir, ["SOUL.md", "IDENTITY.md", "skills", "ROSTER.md"]);
-  await mainIs(await store("martha"), m.root.toString());
-  assert.equal(await rosterOf("martha"), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for\n");
-  assert.equal(await cli("roster", "--for", "kurt"), 0);
-  assert.equal(e.out.at(-1), "## Colleagues\n\n- @martha@localhost — Martha: Organization front desk and directory service.");
-
-  // Kurt knows nobody now: no ROSTER.md for him.
-  assert.equal(await cli("knows", "kurt", "--none"), 0);
-  assert.equal(await cli("roster", "--for", "kurt"), 0);
-  assert.equal(e.err.at(-1), "kurt knows nobody: no ROSTER.md");
-  await assert.rejects(cli("roster", "--deploy"), /Unknown option '--deploy'/, "skein-host deploys nothing");
-
-  assert.equal(await cli("knows", "nobody", "--all"), 1);
-  assert.equal(await cli("knows", "kurt", "martha", "--all"), 2);
-});

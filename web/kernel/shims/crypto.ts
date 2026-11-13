@@ -1,8 +1,8 @@
 // node:crypto for the browser bundle: only what the shared modules the page
-// imports use (src/envelope.ts, src/runtime/identity.ts): createHash("sha256")
+// imports use (src/runtime/identity.ts): createHash("sha256")
 // and randomBytes. Synchronous like node's; hashing is @bsv/sdk's pure-JS
 // SHA-256 (inputs here are envelope canonical forms, a few hundred bytes).
-// esbuild aliases `node:crypto` to this file (web/build.ts).
+// esbuild aliases `node:crypto` to this file (web/kernel/serve.ts browserOptions).
 
 import { Buffer } from "buffer";
 import { Hash } from "@bsv/sdk";

@@ -1,7 +1,5 @@
 // The inference peer on its own: request mapping to an OpenAI-compatible
-// endpoint (a fake fetch), response mapping, errors, and one request through a
-// messagebox — opened with its wallet, answered in `completions` with replyTo.
-// Then the infer protocol (#12): graph deltas, the missing-node reply, the
+// endpoint (a fake fetch), response mapping, errors. Then the infer protocol (#12): graph deltas, the missing-node reply, the
 // cache on disk, model and thinking per request.
 
 import { test } from "node:test";
@@ -9,12 +7,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { encode } from "../runtime/cid.ts";
-import { messageBoxHub } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { InferPeer, NodeGraph } from "./infer.ts";
 
@@ -28,11 +23,14 @@ function fakeFetch(respond: (url: string, body: Record<string, unknown>, headers
   return { f, calls };
 }
 
+/** No messagebox: these tests call the peer directly. */
+const NO_RAW = { inbox: { list: async () => [], ack: async () => {} }, outbox: () => ({ send: async () => undefined }), addressOf: () => undefined };
+
 const ok = (message: Record<string, unknown>) => new Response(JSON.stringify({ choices: [{ message }], usage: { total_tokens: 7 } }), { status: 200 });
 
 test("infer peer: provider/model split, auth, thinking, tools; content, reasoning and tool calls mapped back; nulls dropped", async () => {
   const { f, calls } = fakeFetch(() => ok({ role: "assistant", content: null, reasoning_content: "hmm", tool_calls: [{ id: "t1", type: "function", function: { name: "bash", arguments: "{\"cmd\":\"ls\"}" } }] }));
-  const peer = new InferPeer({ wallet: ephemeralWallet(), box: messageBoxHub().as("x"), providers: { ripper: { baseUrl: "http://ripper:8001/v1/", apiKey: "vllm" } }, fetch: f });
+  const peer = new InferPeer({ wallet: ephemeralWallet(), raw: NO_RAW, providers: { ripper: { baseUrl: "http://ripper:8001/v1/", apiKey: "vllm" } }, fetch: f });
   const tools = [{ type: "function", function: { name: "bash", parameters: { type: "object" } } }];
   const r = await peer.complete({ model: "ripper/qwen38", messages: [{ role: "user", content: "hi" }], tools, thinking: "off" });
   assert.equal(calls[0].url, "http://ripper:8001/v1/chat/completions");
@@ -52,34 +50,8 @@ test("infer peer: provider/model split, auth, thinking, tools; content, reasonin
 
 test("infer peer: an HTTP error becomes {error}", async () => {
   const { f } = fakeFetch(() => new Response("model not loaded", { status: 404 }));
-  const peer = new InferPeer({ wallet: ephemeralWallet(), box: messageBoxHub().as("x"), providers: { ripper: { baseUrl: "http://r/v1" } }, fetch: f });
+  const peer = new InferPeer({ wallet: ephemeralWallet(), raw: NO_RAW, providers: { ripper: { baseUrl: "http://r/v1" } }, fetch: f });
   assert.deepEqual(await peer.complete({ model: "ripper/q", messages: [] }), { error: "ripper: HTTP 404 model not loaded" });
-});
-
-test("infer peer: a sealed request in its `infer` box → a sealed completion in the sender's `completions`, replyTo the request's CID; acknowledged", async () => {
-  const hub = messageBoxHub();
-  const peerKey = PrivateKey.fromRandom(), instKey = PrivateKey.fromRandom();
-  const peerId = peerKey.toPublicKey().toString(), instId = instKey.toPublicKey().toString();
-  const inst = ephemeralWallet(instKey);
-  const { f } = fakeFetch(() => ok({ role: "assistant", content: "hello" }));
-  const peer = new InferPeer({ wallet: ephemeralWallet(peerKey), box: hub.as(peerId), providers: { ripper: { baseUrl: "http://r/v1" } }, fetch: f });
-  const req = await seal(inst, { recipient: { identityKey: peerId, handle: "infer", domain: "localhost" }, sender: { handle: "skein", domain: "localhost" }, body: dagCbor.encode({ model: "ripper/qwen38", messages: [{ role: "user", content: "hi" }] }) });
-  await hub.as(instId).send({ recipient: peerId, box: "infer", body: req });
-  // Junk and a forged submitter are rejected (and acknowledged).
-  hub.inject(peerId, "infer", { sender: instId, body: "\"not an envelope\"" });
-  hub.inject(peerId, "infer", { sender: PrivateKey.fromRandom().toPublicKey().toString(), body: JSON.stringify(req) });
-  assert.equal(await peer.poll(), 1);
-  assert.equal(hub.pending(peerId, "infer").length, 0);
-  const [m] = hub.pending(instId, "completions");
-  assert.equal(m.sender, peerId);
-  const env = JSON.parse(m.body as string) as Envelope;
-  assert.ok(verify(env));
-  assert.equal(env.recipient.handle, "skein");
-  const body = dagCbor.decode((await open(inst, env)).body) as { replyTo: CID; message: { content: string }; model: string; ms: number };
-  assert.ok(body.replyTo.equals(encode(signedPart(req)).cid), "replyTo is the request's id: its signed part's CID");
-  assert.equal(body.message.content, "hello");
-  assert.equal(body.model, "ripper/qwen38");
-  assert.equal(typeof body.ms, "number");
 });
 
 // ---------------------------------------------------------------- the infer protocol (#12): graph deltas
@@ -91,7 +63,7 @@ const cid = (n: unknown) => encode(n).cid;
 function chatPeer(o: { dir?: string; max?: number } = {}) {
   const { f, calls } = fakeFetch(() => ok({ role: "assistant", content: "ok" }));
   const graph = new NodeGraph(o);
-  const peer = new InferPeer({ wallet: ephemeralWallet(), box: messageBoxHub().as("x"), providers: { ripper: { baseUrl: "http://r/v1" }, big: { baseUrl: "http://big/v1" } }, fetch: f, graph });
+  const peer = new InferPeer({ wallet: ephemeralWallet(), raw: NO_RAW, providers: { ripper: { baseUrl: "http://r/v1" }, big: { baseUrl: "http://big/v1" } }, fetch: f, graph });
   return { peer, graph, calls };
 }
 
@@ -185,23 +157,4 @@ test("infer protocol: model and thinking per request, mapped to the provider tab
   assert.deepEqual([calls[2].body.reasoning_effort, calls[2].body.chat_template_kwargs], [undefined, undefined], "no thinking: the engine's default");
   assert.deepEqual(await peer.answer("alice", { model: "ripper/q", thinking: "max" as never, nodes: [sys] }), { error: "thinking must be one of off, low, medium, high, not \"max\"" });
   assert.equal(calls.length, 3);
-});
-
-test("infer protocol: through the messagebox, a missing parent is a sealed {replyTo, missing} in `completions`", async () => {
-  const hub = messageBoxHub();
-  const peerKey = PrivateKey.fromRandom(), instKey = PrivateKey.fromRandom();
-  const peerId = peerKey.toPublicKey().toString(), instId = instKey.toPublicKey().toString();
-  const inst = ephemeralWallet(instKey);
-  const { f, calls } = fakeFetch(() => ok({ role: "assistant", content: "hello" }));
-  const peer = new InferPeer({ wallet: ephemeralWallet(peerKey), box: hub.as(peerId), providers: { ripper: { baseUrl: "http://r/v1" } }, fetch: f });
-  const lost = cid({ lost: true });
-  const req = await seal(inst, { recipient: { identityKey: peerId, handle: "infer", domain: "localhost" }, sender: { handle: "skein", domain: "localhost" }, body: dagCbor.encode({ model: "ripper/q", parent: lost, nodes: [node(lost, "user", { text: "hi" })] }) });
-  await hub.as(instId).send({ recipient: peerId, box: "infer", body: req });
-  assert.equal(await peer.poll(), 1);
-  assert.equal(calls.length, 0);
-  const [m] = hub.pending(instId, "completions");
-  const body = dagCbor.decode((await open(inst, JSON.parse(m.body as string) as Envelope)).body) as { replyTo: CID; missing: CID[] };
-  assert.ok(body.replyTo.equals(encode(signedPart(req)).cid));
-  assert.equal(body.missing.length, 1);
-  assert.ok(body.missing[0].equals(lost));
 });

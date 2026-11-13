@@ -16,7 +16,7 @@ function host(appRead: NonNullable<ConstructorParameters<typeof Router>[0]["appR
   const home = mkdtempSync(join(tmpdir(), "skein-app-read-"));
   const db = new HostDb(join(home, "host.db"));
   db.add("alpha", { store: join(home, "alpha.db") });
-  const r = new Router({ db, walletFor: () => { throw new Error("unused"); }, cron: false, home, rootInstance: "alpha", appRead });
+  const r = new Router({ db, walletFor: () => { throw new Error("unused"); }, home, rootInstance: "alpha", appRead });
   return { r, db, done: async () => { await r.close(); db.close(); rmSync(home, { recursive: true, force: true }); } };
 }
 

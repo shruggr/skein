@@ -32,6 +32,8 @@ import { ownerCli } from "../testapps.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
+import { dirSource } from "./boot.ts";
+import { imageTree } from "./testhost.ts";
 import { Signer } from "./signer.ts";
 import { P2PHost, peerIdOf, type InboundAnswer } from "./p2p.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
@@ -401,7 +403,7 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
   const ownerWallet = ephemeralWallet(ownerKey);
   const owner = ownerKey.toPublicKey().toString();
   const [pa, pb] = [await freePort(), await freePort()];
-  const mk = (handle: string, listen: number, other: { handle: string; port: number }, genesis?: ConstructorParameters<typeof Router>[0]["genesis"]) => {
+  const mk = (handle: string, listen: number, other: { handle: string; port: number }) => {
     const dir = join(home, handle);
     mkdirSync(dir, { recursive: true });
     const db = new HostDb(join(dir, "host.db"));
@@ -410,14 +412,16 @@ test("sync (#154): an app's libp2p read row answers each frame at the door — i
       db, walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (h) => signer.peerKey(h), providerKeyFor: (n) => signer.providerKey(n), home: dir, owner, idleMs: 0,
       kernel: { command: KERNEL, env: { SKEIN_HOME: dir } },
       libp2p: { listen: [`/ip4/127.0.0.1/tcp/${listen}`], bootstrap: [`/ip4/127.0.0.1/tcp/${other.port}/p2p/${peer(other.handle)}`], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
-      ...(genesis ? { genesis } : {}),
       log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
     });
     return { db, r, dir };
   };
   const A = mk("alpha", pa, { handle: "beta", port: pb });
-  const B = mk("beta", pb, { handle: "alpha", port: pa }, { libp2p: { topics: ["tm_t"] } });
+  const B = mk("beta", pb, { handle: "alpha", port: pa });
   t.after(async () => { await Promise.all([A.r.stop(), B.r.stop()]); A.db.close(); B.db.close(); });
+  // Each booted from a system tree (one loader, SPEC 8): the default image; beta's on topic tm_t.
+  await A.r.bootRow("alpha", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-alpha"))) });
+  await B.r.bootRow("beta", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-beta"), { config: { collect: [], libp2p: { topics: ["tm_t"] } } })) });
   await A.r.listen(0);
   const la = await A.r.hydrate("alpha");
   await B.r.hydrate("beta");

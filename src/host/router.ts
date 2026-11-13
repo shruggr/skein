@@ -4,7 +4,7 @@
 // before authentication, because a BRC-104 handshake does not name its
 // recipient: the URL is the recipient. The router holds no sessions and no
 // mailbox: it keeps the hostname → instance map (host.db), the kernels it has
-// hydrated, the providers (the waker and the cron provider among them), the
+// hydrated, the providers (the waker among them), the
 // feeds, the broadcaster, the fuel ledger.
 //
 //   http://<handle>.localhost:<port>/…   an instance's origin (the Host header). The stock AuthFetch keeps one
@@ -76,9 +76,7 @@
 // answer comes back as a signed message, a `local` request entry. The HTTP
 // proxy (`fetch`) answers a URL of this host's own in process (the same
 // path, no socket) and sends any other out; the waker keeps the instances'
-// deadlines and their shells' sleeps (#69); the cron provider their
-// schedules, each tick a signed message (#69, cron.ts; host.db
-// `cron_schedule`); the status provider tells the instances that subscribe
+// deadlines and their shells' sleeps (#69); the status provider tells the instances that subscribe
 // to it how their transactions stand (#65); the libp2p node is the
 // instance's own (p2p.ts); the instance manager (#90) creates, starts and
 // stops instances for the host skein alone (host.db `host_settings`:
@@ -97,18 +95,16 @@
 // handed it (`settle`), the router reads the head (a kernel read), and when
 // it moved, declares the instance's libp2p config again — an install's
 // topics subscribed, an uninstall's unsubscribed, live (`syncDispatch`).
-// The host's headers feed (#102, `headersFeed`, SKEIN_HEADERS_URL; feeds.ts)
-// follows the table the same way: an enabled instance is subscribed while
-// a row of it takes events in box `chain` (the chain app's), else not. The
-// router itself listens to it too (#132, image-chain.ts): the default image
-// carries the whole header chain and grows with every header the feed
-// brings (filled from genesis at start from the feed's chaintracks history),
-// and createInstance boots each new skein from the image as it stands.
+// The host's headers (skein next, SPEC 8): ONE intake (`takeHeaders`) — the
+// Teranode tracker (teranode.ts) is its source — validates and updates the
+// host chain once (the kernel's, per database: hostHolders), then every
+// loaded instance whose table takes events in box `chain` gets the pointer
+// event {kind: "chain", root, height} (`chainBirth`); an instance is sent the
+// first one inside its load, before it is handed to anyone. No instance has a
+// header source of its own, and the image carries no chain.
 //
-// Nothing here is an instance's clock but its providers (#69): a schedule
-// originates in a program's step, as a message to the cron provider; an
-// idle-stopped instance is hydrated for a tick only if something in it
-// subscribes the tick's box (from the cron provider, or from anyone).
+// Nothing here is an instance's clock but its providers (#69): the waker
+// answers a step's deadline.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
@@ -119,13 +115,13 @@ import { randomBytes } from "node:crypto";
 import { encode as encodeBlock } from "../runtime/cid.ts";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
-import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
+import { short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
-import { BACKFILL_RUN, DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { DEFAULT_BOX, txCid } from "./feeds.ts";
 import { hashOf, TeranodeTracker } from "./teranode.ts";
-import { Cron, dbSchedules } from "./cron.ts";
-import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
+import { HttpHeaders } from "./headers-source.ts";
+import { takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
 import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
 import { WasmHost } from "./wasm-kernel.ts";
 import { openStoreFile, storeExists } from "./stores.ts";
@@ -134,11 +130,10 @@ import { OVERLAY_ROLE } from "./manifest.ts";
 import { appHead } from "./plan.ts";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
-import { chainHeader, chainHolds, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
-import { admitOf, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
+import { bootStore, imageSource, isOverlayImage, namedImageSource, type BootSource, type Booted } from "./boot.ts";
+import { admitBody, admitOf, chainHeader, chainHolds, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
+import { keyBytes, keyHex, type AddressSeed, type Genesis2Config } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
@@ -164,18 +159,22 @@ export interface RouterOptions {
   ownerHandle?: Named;
   inferHandle?: Named;
   fuelPerStep?: string;
-  /** A new genesis's extra routes — boxes (a box and its handler) and routes of any transport (#143: no sender) — and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; dispatch?: DispatchSpec[] };
-  /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
-  feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
-  /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
-  headersFeed?: string;
+  /** A new genesis's defaults: what a tree's config leaves unset (genesis.ts mergeDefaults). */
+  genesis?: { defaults?: Record<string, string> };
+  /** The broadcaster's subscription's reconnect backoff (feeds.ts SseStream). */
+  feeds?: { backoff?: { min: number; max: number } };
   /**
    * #156: the host's headers tracker over the Teranode P2P network (teranode.ts): its bootstrap
    * peers (the network's, SKEIN_TERANODE_BOOTSTRAP), its first-sync hub (the network's default,
-   * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key). Beside the headers feed or alone:
-   * both feed the same intake. Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
+   * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key): the source of the one header intake
+   * (skein next, SPEC 8). Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
    */
+  /**
+   * SKEIN_HEADERS_URL (skein next, SPEC 8: "Headers are headers"): an SSE stream of block headers feeding the one
+   * intake, with its history endpoint, when it has one, for a fill at start (headers-source.ts). Beside the
+   * tracker or alone.
+   */
+  headersUrl?: string;
   teranode?: { bootstrap: string[]; hub?: string; peersFile?: string; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
@@ -215,10 +214,8 @@ export interface RouterOptions {
   network?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
   ledgerMs?: number;
-  /** Tests: the clock entries are stamped with (and ticks fall due by: cron.ts). */
+  /** Tests: the clock entries are stamped with (and deadlines fall due by). */
   now?: () => Stamp;
-  /** The cron provider's clock (#69, cron.ts): false — this router sends no ticks (a one-shot command's router is no clock; it still keeps a schedule a step asks for, in host.db). Default true. */
-  cron?: boolean;
   /** Lines, by source: an instance's handle, or "router". */
   log?(source: string, line: string): void;
   /** Kernel process settings. */
@@ -234,7 +231,7 @@ export interface RouterOptions {
   hostPeerKey?: PrivateKey;
   /**
    * A provider's key (#70, signer.ts providerKey: the HTTP proxy `fetch`, the
-   * `waker`, `cron`, `libp2p`, `status`), which each new genesis's address
+   * `waker`, `libp2p`, `status`), which each new genesis's address
    * book names. Absent: keys of this router's own, made fresh (a test's; a
    * restarted router would not be the providers its instances know).
    */
@@ -254,21 +251,10 @@ export interface RouterOptions {
    * host): a create needs the owner's own signed claim, as before.
    */
   claimer?: WalletInterface;
-  /**
-   * #162, SKEIN_MANAGER_FOR (host env): the instances besides the host skein the instance manager
-   * takes messages from — the manager in their address book at birth, as in the host skein's (not the
-   * certifier). No other instance reaches it.
-   */
-  managerFor?: string[];
   /** SKEIN_ROOT_INSTANCE: the instance served at `/` of any hostname that is no instance's (the standalone's one app at localhost:<port>/). */
   rootInstance?: string;
   /** #162, SKEIN_IMAGES_DIR (default $SKEIN_HOME/images): the images a create names by name, a directory each (the layout `skein-host add --image <dir>` takes). */
   imagesDir?: string;
-  /**
-   * #164: an application host's wiring (providers.ts `appEvent`): an emitted event whose name no
-   * stock wiring takes, from `handle`, handed over after its step's commit. Absent: logged as ignored.
-   */
-  appEvent?(handle: string, record: Record<string, unknown>): void;
   /**
    * An application host's requests (shruggr/open-exchange 0.11.0, the public read API; every method
    * since 0.3.2, so the hook checks `req.method` itself): a request for an
@@ -319,6 +305,9 @@ export interface RouterResponse {
    */
   stream?(send: (chunk: string) => void, end: () => void): () => void;
 }
+
+/** Headers per `headers` frame of the one intake (a long run, the first sync's, goes in runs of this many). */
+export const HEADERS_RUN = 2016;
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
@@ -437,9 +426,6 @@ function errorOf(body: Uint8Array): string {
 
 export class Router {
   readonly o: RouterOptions;
-  readonly feeds: Feeds;
-  /** The cron provider's schedules (#69). */
-  readonly cron: Cron;
   /** The host's broadcaster (#58, #65): present when the host has an Arcade. */
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
@@ -479,14 +465,14 @@ export class Router {
   /** The control socket (control.ts), while this router listens on one. */
   private control?: { server: NetServer; path: string };
 
-  /** The default image (#89), with its chain part (#132): what createInstance boots a new skein from. */
-  readonly image: ImageChain;
+  /** SKEIN_HEADERS_URL's source (headers-source.ts), when the host has one. */
+  headersSource?: HttpHeaders;
   /** #156: the headers tracker over the Teranode mesh (teranode.ts), when the host runs one. */
   tracker?: TeranodeTracker;
   /** #156: the libp2p the host node runs on: the instances' (`p2p`), else one for the tracker alone. */
   hostP2p?: P2PHost;
   private readonly p2pConfig: P2PHostConfig;
-  /** #156: the header intake, one run at a time (the image chain, then the host chains). */
+  /** The one header intake (SPEC 8), one run at a time: the host chains, then the instances' pointer events. */
   private intake: Promise<unknown> = Promise.resolve();
   /** The host's provider keys. */
   private readonly providerKey: (name: ProviderName) => PrivateKey;
@@ -518,26 +504,7 @@ export class Router {
   constructor(o: RouterOptions) {
     this.o = o;
     if (o.rocksStore) this.kernelHost(o.rocksStore); // started with the router: the host's reads go through it (stores.ts)
-    this.image = new ImageChain({ db: o.db, history: historyOf(o.headersFeed), log: (l) => this.say("router", l) });
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
-    this.feeds = new Feeds({
-      headers: (h, box, raws) => this.chainHeaders(h, box, raws), log: (s, l) => this.say(s, l),
-      maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
-    });
-    this.cron = new Cron({
-      now: () => stampMs(this.now()), store: dbSchedules(o.db), log: (s, l) => this.say(s, l),
-      tick: async (s, body) => {
-        const row = this.o.db.get(s.instance);
-        if (!row || row.status !== "enabled") { this.cron.forget(s.instance); throw new Error("the instance is gone"); }
-        await this.providers.send(s.instance, "cron", keyBytes(s.recipient), s.box, body);
-      },
-      // An idle-stopped instance is hydrated for a tick only if something in it takes the box (from the cron provider, or anyone).
-      wake: async (s) => {
-        const l = this.loaded.get(s.instance);
-        if ((l && !l.kernel.gone) || this.loading.has(s.instance)) return true;
-        return await this.subscribes(s.instance, s.box, this.providers.key("cron"));
-      },
-    });
     if (o.arc) {
       this.arc = new Broadcaster({
         arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, ...(o.arcRetry ? { retry: o.arcRetry } : {}), log: (s, l) => this.say(s, l),
@@ -548,8 +515,8 @@ export class Router {
           await this.providers.send(h, "status", keyBytes(id), "chain/status", body, subject);
         },
         now: () => stampMs(this.now()),
-        instances: () => ({ all: this.o.db.list("enabled").map((r) => r.handle), running: [...this.loaded].filter(([, l]) => !l.kernel.gone).map(([h]) => h) }),
-        holds: async (h, txid) => await (await this.hydrate(h)).kernel.hasBlock(txCid(txid)),
+        // SPEC 8: who holds a transaction is the host's holder map (followed from the `chain/tx/<txid>` facts): no kernel started to ask.
+        holders: (txid) => this.holdersOf(txid),
       });
     }
     // #156: the host's libp2p (one node per key; the host node among them) — for the instances, and for the tracker on its own.
@@ -614,15 +581,12 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
-      ...(o.appEvent ? { appEvent: o.appEvent } : {}),
-      emitted: (h, rec, place) => this.events.emitted(h, rec, place),
+      // #148: every fact to the event streams; SPEC 8: the host follows `chain/tx/<txid>` (the holder map) and the overlay's `admitted` (the gossip admit).
+      emitted: (h, rec, place) => { this.events.emitted(h, rec, place); this.followFact(h, rec); },
       deliver: (h, id, rec) => this.deliver(h, id, rec),
-      cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
       manager: {
         from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
-        // #162: SKEIN_MANAGER_FOR — these instances too (each by its own identity).
-        alsoFor: () => (this.o.managerFor ?? []).flatMap((h) => { const r = this.o.db.get(h); return r?.identity && r.status === "enabled" ? [{ handle: r.handle, identity: r.identity }] : []; }),
         request: (box, body) => this.manage(box, body),
       },
       // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
@@ -630,15 +594,11 @@ export class Router {
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
-          dial: (h: string, peer: string, protocol: string, frames: Parameters<P2PHost["dial"]>[3]) => p2p.dial(h, peer, protocol, frames),
-          send: (h: string, s: number, body: Uint8Array) => p2p.send(h, s, body),
-          close: (h: string, s: number) => p2p.close(h, s),
         },
       } : {}),
       now: () => stampMs(this.now()),
       log: (s, l) => this.say(s, l),
     });
-    if (o.cron !== false) this.cron.start();
     const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
@@ -663,19 +623,20 @@ export class Router {
     return h.split(".")[0];
   }
 
-  /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label. */
+  /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label — unless it is the root instance's (ownLabelInstance). */
   reserved(handle: string): boolean {
     return RESERVED_HANDLES.has(handle) || (handle === this.ownLabel() && !this.ownLabelInstance(handle));
   }
 
   /**
-   * The router's own label as an instance (2026-10-28, one public name): allowed only when the operator names
-   * that handle in SKEIN_MANAGER_FOR (managerFor) — the Open Exchange's config instance at the host's own
-   * origin. Its hostname then serves the instance; the router keeps /.well-known/skein-host, /skeins and
-   * /arc/callback there. Any other row named like the router's origin still never takes its requests.
+   * The router's own first label as an instance (skein next: the planner's call, David to review): only the
+   * instance SKEIN_ROOT_INSTANCE names (`rootInstance`, the instance the bare hostname is routed to) may take
+   * it — Open Exchange's `swap` at swap.skein.nexus. Its hostname then serves the instance; the router keeps
+   * /.well-known/skein-host, /skeins and /arc/callback there. Any other handle like the router's label is
+   * reserved. (At v0.9.1 SKEIN_MANAGER_FOR granted this, beside the manager message form; both are gone.)
    */
   ownLabelInstance(handle: string): boolean {
-    return handle === this.ownLabel() && this.managerFor(handle);
+    return handle === this.ownLabel() && handle === this.o.rootInstance;
   }
 
   /** This host's BRC-169 domain: its origin's host name (hostDomain). */
@@ -690,22 +651,23 @@ export class Router {
 
   /** Hydrate every enabled row once (recovery at hydrate time: what a waiting thread awaits is handed to the providers again), then let them idle out. */
   async start(): Promise<void> {
-    // #132, #156: the host's headers — the feed's and the Teranode tracker's — into one intake: the image's chain part, then the host chains.
-    const key = this.headersKey();
-    if (key) this.feeds.listen(key, (raws, at) => this.takeHeaders(raws, at));
-    // #132: the image's chain part, filled from the feed's history (from genesis once; then from near its tip), then grown by the feed.
-    if (this.o.headersFeed) {
-      const started = this.image.start();
-      void started.then(() => this.syncHolders()).catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
-      // With a feed, its history makes the first sync; the tracker follows the mesh once that is done.
-      if (this.o.teranode) void started.then(() => this.startTracker()).catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
-    } else if (this.o.teranode) {
-      // #156: the tracker is the source: its first sync (a hub's, when the network has one) before any instance steps.
+    // SPEC 8: the Teranode tracker is the one source of the header intake; its first sync (a hub's, when the network
+    // has one) before any instance is hydrated, so each is told the chain as the host knows it inside its load.
+    if (this.o.teranode) {
       await this.startTracker().catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
       if (this.tracker?.o.hub) await this.tracker.ready;
     }
-    // #156: a host chain that is empty (or behind) filled from the image chain, before any instance is hydrated.
-    await this.syncHolders().catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
+    // SPEC 8: an HTTP source feeds the same intake (beside the tracker or alone): its history fill awaited, then its stream.
+    if (this.o.headersUrl && !this.headersSource && !this.stopped) {
+      this.headersSource = new HttpHeaders({
+        url: this.o.headersUrl, take: (raws, at) => this.takeHeaders(raws, at), find: (hash) => this.findHeader(hash),
+        tip: async () => { const x = await this.hostTip(); return x ? { height: x.height, hash: x.hash } : undefined; },
+        backoff: this.o.feeds?.backoff, log: (l) => this.say("router", l),
+      });
+      await this.headersSource.start();
+    }
+    // SPEC 8: the holder map, rebuilt from the instances' stores (their `chain/tx/` facts), no kernel started.
+    await this.rebuildHolders().catch((e) => this.say("router", `holders: not rebuilt: ${(e as Error).message}`));
     // #138: the stored liveness beats older than the longest window (a day) go before any instance reloads them.
     this.o.db.pruneBeats(stampMs(this.now()) - LIVENESS_MAX_MS);
     for (const row of this.o.db.list("enabled")) {
@@ -715,10 +677,10 @@ export class Router {
 
   /**
    * Stop everything this router started (#61), once: the providers' (the
-   * waker's, the cron provider's), the idle reaper's and the ledger's timers
+   * waker's), the idle reaper's and the ledger's timers
    * (the owed fuel written first), its
-   * servers and their connections, the control socket (its file removed), the header feeds' and the broadcaster's
-   * SSE clients, the libp2p nodes, and every kernel process it spawned — one
+   * servers and their connections, the control socket (its file removed), the broadcaster's
+   * SSE client, the headers tracker, the libp2p nodes, and every kernel process it spawned — one
    * still hydrating included. Afterwards nothing of it keeps the process
    * alive: `skein-host run`'s shutdown and every one-shot command that builds
    * a router (`add --boot/--packet`) end with it.
@@ -733,14 +695,12 @@ export class Router {
 
   /**
    * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for
-   * `skein-host run`; mode 0600, no HTTP route): `skein-host event` sends its
-   * event here while this router runs, and it reaches the instance as a tick
-   * due now (cronEvent). Removed by `close()`.
+   * `skein-host run`; mode 0600, no HTTP route): a signed message from the
+   * client on this machine (messageLocal). Removed by `close()`.
    */
   async listenControl(path: string): Promise<void> {
     if (this.stopped) throw new Error("the router is stopping");
     const server = await listenControl(path, {
-      event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
       message: async (h, m, body) => (await this.messageLocal(h, m, body)).toString(),
     });
     this.control = { server, path };
@@ -765,7 +725,7 @@ export class Router {
     this.control = undefined;
     this.providers.stop();
     this.events.stop();
-    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.tracker?.stop()]);
+    await Promise.all([this.arc?.stop(), this.tracker?.stop(), this.headersSource?.stop()]);
     await Promise.all([this.p2p?.stop(), this.hostP2p !== this.p2p ? this.hostP2p?.stop() : undefined]); // #156: the host node with them
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
@@ -777,20 +737,6 @@ export class Router {
     await Promise.all([...this.wasmHosts.values()].map((h) => h.release()));
     this.wasmHosts.clear();
     await Promise.all(closed);
-  }
-
-  /**
-   * `skein-host event` (#69): a message from the cron provider into `box`, as
-   * a tick due now would be — {...event, kind: event.kind ?? "cron", due:
-   * now}, signed by the provider and appended as a `local` request; the
-   * instance takes it by its subscription to the box (from the cron provider,
-   * or from anyone). The entry's CID.
-   */
-  async cronEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
-    const row = this.o.db.get(handle);
-    if (!row || row.status !== "enabled") throw new Error(`no enabled instance ${handle}`);
-    const l = await this.hydrate(handle);
-    return await this.providers.send(handle, "cron", keyBytes(l.identity), box, { ...event, kind: event.kind ?? "cron", due: stampMs(this.now()) }) as CID;
   }
 
   /**
@@ -1058,16 +1004,14 @@ export class Router {
 
   // ---------------------------------------------------------------- the host chain (#156)
 
-  /** #156: the key the host's headers arrive under (feeds.ts): the feed's URL, else the tracker's own. */
-  headersKey(): string | undefined {
-    return this.o.headersFeed ?? (this.o.teranode ? `teranode:${this.chainNetwork() ?? "main"}` : undefined);
-  }
-
-  /** #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). */
+  /**
+   * #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). Its
+   * lookups (`tip`, `find`) read the host chain's tip and the recent index below; what it takes goes to the
+   * one intake (takeHeaders).
+   */
   private async startTracker(): Promise<void> {
     const t = this.o.teranode;
     if (!t || this.tracker || this.stopped) return;
-    const key = this.headersKey()!;
     // #156: no instance libp2p (no peer keys: a test's host): the host's libp2p for the tracker alone.
     this.hostP2p ??= new P2PHost({
       host: this.p2pConfig, ...(this.o.hostPeerKey ? { hostKey: this.o.hostPeerKey } : {}), discoveryMs: this.o.libp2pDiscoveryMs,
@@ -1078,39 +1022,71 @@ export class Router {
     this.tracker = new TeranodeTracker({
       network: this.chainNetwork() ?? "main", ...t, p2p: this.hostP2p,
       chain: {
-        tip: () => this.image.tip(),
-        find: (hash) => this.image.find(hash),
-        // A long run (a first sync, a deep catch-up): into the image and the host chains, then each running instance its chain event; a short one as the feed's headers go.
-        take: async (at, raws) => {
-          if (raws.length <= 4 * BACKFILL_RUN) return await this.feeds.inject(key, raws, at);
-          await this.takeHeaders(raws, at);
-          for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
-        },
+        tip: async () => { const x = await this.hostTip(); return x ? { height: x.height, hash: x.hash } : undefined; },
+        find: async (hash) => await this.findHeader(hash),
+        take: (at, raws) => this.takeHeaders(raws, at),
       },
       log: (l) => this.say("router", l),
     });
-    this.image.ready = this.tracker.ready;
     await this.tracker.start();
-    this.image.ready = this.tracker.ready;
   }
 
   /**
-   * #156: a run of headers from either source (the feed's, `at` undefined: image-chain.ts places
-   * each; the tracker's, at height `at`): into the image's chain part, then every host chain synced
-   * from it. One run at a time.
+   * The headers the tracker fed the intake in this run, by height and by hash, within RECENT_DEPTH of the
+   * highest — what the tracker's `find` looks a hash up in (the image chain's `find` window did this before).
+   * // until the host chain answers holds/at (SPEC 5): build K adds the kernel lookups holds(hash) and
+   * at(height); then `find` asks the host chain and this index goes.
    */
-  takeHeaders(raws: Uint8Array[], at?: number): Promise<void> {
+  private recent = { byHeight: new Map<number, string>(), byHash: new Map<string, number>() };
+  /** How far below the highest header the recent index keeps (two retarget periods, the image chain's window). */
+  static readonly RECENT_DEPTH = 2 * 2016;
+
+  /** The run `raws` at `at` into the recent index: what it replaces from `at` up dropped first (a reorg), then pruned below the window. // until the host chain answers holds/at (SPEC 5) */
+  private remember(at: number, raws: Uint8Array[]): void {
+    const r = this.recent;
+    for (const [h, hash] of r.byHeight) if (h >= at) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
+    const top = at + raws.length - 1;
+    for (let i = Math.max(0, raws.length - 1 - Router.RECENT_DEPTH); i < raws.length; i++) { const hash = hashOf(raws[i]!); r.byHeight.set(at + i, hash); r.byHash.set(hash, at + i); }
+    for (const [h, hash] of r.byHeight) if (h < top - Router.RECENT_DEPTH) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
+  }
+
+  /** The tracker's `find`: a hash's height from the recent index, else the host chain's tip when it is that hash. // until the host chain answers holds/at (SPEC 5) */
+  private async findHeader(hash: string): Promise<number | undefined> {
+    const h = this.recent.byHash.get(hash);
+    if (h !== undefined) return h;
+    const tip = await this.hostTip();
+    return tip?.hash === hash ? tip.height : undefined;
+  }
+
+  /** The host chain's tip (the first host chain this host keeps: hostHolders), with its hash; undefined when empty or none is kept. */
+  private async hostTip(): Promise<HostChainTip | undefined> {
+    const h = this.hostHolders()[0];
+    return h ? await h.tip() : undefined;
+  }
+
+  /**
+   * SPEC 8: the ONE header intake — a run of headers, parents first, at height `at` (the tracker's): into
+   * every host chain this host keeps (the kernel validates and keeps them: `headers` frames, runs of
+   * HEADERS_RUN), once; then every loaded instance its pointer event (chainBirth). One run at a time.
+   */
+  takeHeaders(raws: Uint8Array[], at: number): Promise<void> {
     const p = this.intake.then(async () => {
-      if (at === undefined) await this.image.headers(raws);
-      else await this.image.put(at, raws);
-      await this.syncHolders(at);
+      const holders = this.hostHolders();
+      if (!holders.length) { this.say("router", `host chain: ${raws.length} header${raws.length === 1 ? "" : "s"} at ${at}: this host keeps no host chain (no SQLite or RocksDB store): not taken`); return; }
+      for (const h of holders) {
+        const t0 = Date.now();
+        let tip: HostChainTip | undefined;
+        for (let i = 0; i < raws.length; i += HEADERS_RUN) tip = await h.headers(raws.slice(i, i + HEADERS_RUN));
+        if (raws.length > HEADERS_RUN) this.say("router", `host chain: ${raws.length} headers from ${at} (tip ${tip?.height}, ${Date.now() - t0} ms)`);
+      }
+      this.remember(at, raws);
     });
     this.intake = p.catch(() => {});
-    return p;
+    return p.then(() => { for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`)); });
   }
 
   /** #156: the host chains this host keeps once per database (its SQLite one, its RocksDB one, and those its rows name). */
-  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }> {
+  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip> }> {
     const sq = new Set<string>(), rocks = new Set<string>();
     if (this.o.sqliteStore) sq.add(this.o.sqliteStore);
     if (this.o.rocksStore) rocks.add(this.o.rocksStore);
@@ -1121,7 +1097,7 @@ export class Router {
       if (q) sq.add(q.db);
     }
     return [
-      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws), importChain: w.importChain.bind(w) }; }),
+      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws) }; }),
       ...[...rocks].map((dir) => { const k = this.kernelHost(dir); return { name: dir, tip: () => k.chainTip(), headers: (raws: Uint8Array[]) => k.chainHeaders(raws) }; }),
     ];
   }
@@ -1129,47 +1105,6 @@ export class Router {
   /** #156: each host chain this host keeps (by database) and its tip (undefined: empty). */
   async hostChainTips(): Promise<Array<{ name: string; tip: HostChainTip | undefined }>> {
     return await Promise.all(this.hostHolders().map(async (h) => ({ name: h.name, tip: await h.tip() })));
-  }
-
-  /** #156: every host chain brought to the image chain's tip (from `from` when a run replaced from there). */
-  private async syncHolders(from?: number): Promise<void> {
-    for (const h of this.hostHolders()) await this.syncHolder(h.name, h, from).catch((e) => this.say("router", `host chain ${h.name}: not synced from the image chain: ${(e as Error).message}`));
-  }
-
-  /**
-   * #156: a host chain brought to the image chain: an EMPTY one imports the image's chain part
-   * (`chain-import`, as an instance born with it would bring it: one frame) where its kernel can
-   * read it (the wasm kernel's SQLite database), else takes the image's headers from genesis in
-   * `headers` runs; one behind takes the headers it lacks; one the image does not hold at its
-   * height (a fork) from a little below it, or from `from`.
-   */
-  private async syncHolder(name: string, h: { tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }, from?: number): Promise<void> {
-    const top = this.image.height();
-    if (top < 0) return;
-    const tip = await h.tip();
-    const t0 = Date.now();
-    if (!tip && h.importChain) {
-      const part = this.image.chainPart();
-      if (part) {
-        const got = await h.importChain(part.chain, part.objects);
-        this.say("router", `host chain: ${got.added ?? 0} headers imported from the image chain (tip ${got.height}, ${Date.now() - t0} ms)`);
-        return;
-      }
-    }
-    let start = 0;
-    if (tip) {
-      const held = this.image.headerAt(tip.height);
-      start = held && hashOf(held) === tip.hash ? tip.height + 1 : Math.max(0, tip.height - 6);
-      if (from !== undefined) start = Math.min(start, from);
-    }
-    if (start > top) return;
-    let n = 0;
-    for (const run of this.image.runs(start, BACKFILL_RUN)) {
-      await h.headers(run);
-      n += run.length;
-      if (top - start > 10 * BACKFILL_RUN && n % (50 * BACKFILL_RUN) < BACKFILL_RUN) this.say("router", `host chain: ${start + n}/${top + 1} from the image chain`);
-    }
-    if (n > BACKFILL_RUN) this.say("router", `host chain: ${n} headers from the image chain (to ${top}, ${Date.now() - t0} ms)`);
   }
 
   /**
@@ -1187,28 +1122,6 @@ export class Router {
     return net ? { ...this.o.kernel?.env, SKEIN_NETWORK: net } : this.o.kernel?.env;
   }
 
-  /**
-   * A run of headers from a feed for `handle` (#156): into the host chain — the one kernel
-   * process's for a RocksDB set (an instance not running is not hydrated for it: it gets the
-   * chain at its next start), the instance's own serve kernel's otherwise — then, when the
-   * record changed for it, the `chain` event.
-   */
-  async chainHeaders(handle: string, box: string, raws: Uint8Array[]): Promise<void> {
-    const row = this.o.db.get(handle);
-    if (!row) return;
-    const rocks = parseRocksSpec(storeSpec(row));
-    const sq = parseSqliteSpec(storeSpec(row));
-    let tip: HostChainTip;
-    if (rocks || sq) {
-      tip = rocks ? await this.kernelHost(rocks.dir).chainHeaders(raws) : await this.wasmHost(sq!.db).chainHeaders(raws);
-      const l = this.loaded.get(handle);
-      if (!l || l.kernel.gone) return;
-    } else {
-      tip = await (await this.hydrate(handle)).kernel.chainHeaders(raws);
-    }
-    await this.chainEvent(handle, box, tip);
-  }
-
   /** The `chain` event (#156) for `handle` in `box`, unless it was sent that record already since its start. */
   private async chainEvent(handle: string, box: string, tip: HostChainTip): Promise<void> {
     const key = tip.root.toString();
@@ -1222,26 +1135,7 @@ export class Router {
     }
   }
 
-  /**
-   * Fresh-host bootstrap (#156): the host chain empty and the instance's tree (its head `main`,
-   * an image's) carrying `chain/headers`: those imported into the host chain before the
-   * instance's first event. A tree with none, or a host chain with a tip: nothing.
-   */
-  private async chainBootstrap(handle: string, kernel: KernelSurface): Promise<void> {
-    if (await kernel.chainTip()) return;
-    const tree = await kernel.call("head", "main") as CID | null;
-    if (!tree || tree.code !== 0x78) return;
-    try {
-      const t0 = Date.now();
-      const got = await kernel.chainImport(tree);
-      this.say("router", `host chain: ${got.added} headers imported from ${handle}'s image (tip ${got.height}, ${Date.now() - t0} ms)`);
-    } catch (e) {
-      const m = (e as Error).message;
-      if (!/NoChain|NotEmpty/.test(m)) this.say(handle, `host chain: the image's chain not imported: ${m}`);
-    }
-  }
-
-  /** At start (and once an app takes box `chain` — an install): the host chain's current record, as the `chain` event. */
+  /** The host chain's current record as the `chain` pointer event, unless sent already (a change of the host chain: the intake; an app taking box `chain` installed: syncDispatch). */
   private async chainBirth(handle: string): Promise<void> {
     const l = this.loaded.get(handle);
     if (!l || l.kernel.gone) return;
@@ -1249,6 +1143,115 @@ export class Router {
     if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
     const tip = await l.kernel.chainTip();
     if (tip) await this.chainEvent(handle, DEFAULT_BOX, tip);
+  }
+
+  /**
+   * SPEC 8: the first `chain` pointer event of a load — when the instance's table takes events in box `chain` and
+   * the host chain holds a tip — admitted directly into the kernel being loaded (its `admit`, then its drain is the
+   * kernel's), recorded as sent. Throws: the load fails (an instance not told the chain is not up).
+   */
+  private async firstChainEvent(handle: string, kernel: KernelSurface): Promise<void> {
+    const rows = (await kernel.dispatch()).rows;
+    if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
+    const tip = await kernel.chainTip();
+    if (!tip) return;
+    const event = { kind: "chain", root: tip.root, height: tip.height };
+    await kernel.admit({ box: DEFAULT_BOX, event: cidOf(event) } as never, { event }, this.now());
+    this.sentChain.set(handle, tip.root.toString());
+  }
+
+  // ---------------------------------------------------------------- the holder map and the admit announcement (SPEC 8)
+
+  /**
+   * SPEC 8: the instances holding each UNSETTLED transaction, by txid — followed from each instance's
+   * `chain/tx/<txid>` facts (skein-chain shape.zig statusEvent `{event, status, height?, reason?, by?}`):
+   * `pending` or `seen` (un-mined by a reorg) → remembered; `mined` → forgotten. `rejected` changes nothing
+   * (SPEC 8 names three statuses; plan-host C8 is open). Rebuilt from the stores at a start (rebuildHolders).
+   */
+  readonly holding = new Map<string, Set<string>>();
+
+  /** One `chain/tx/<txid>` status for `handle` into the holder map. */
+  private holdingFact(handle: string, txid: string, status: unknown): void {
+    if (status === "pending" || status === "seen") {
+      let s = this.holding.get(txid);
+      if (!s) this.holding.set(txid, (s = new Set()));
+      s.add(handle);
+    } else if (status === "mined") {
+      const s = this.holding.get(txid);
+      if (!s) return;
+      s.delete(handle);
+      if (!s.size) this.holding.delete(txid);
+    }
+  }
+
+  /** The enabled instances the holder map names for `txid` (a txid in display hex). */
+  holdersOf(txid: string): string[] {
+    const s = this.holding.get(txid.toLowerCase());
+    return s ? [...s].filter((h) => this.o.db.get(h)?.status === "enabled") : [];
+  }
+
+  /**
+   * SPEC 8: the holder map after a restart — each enabled instance's latest `chain/tx/` fact per txid, read from
+   * its store's event index (events.ts: the store file read-only), no kernel started.
+   */
+  async rebuildHolders(): Promise<void> {
+    this.holding.clear();
+    let n = 0;
+    for (const row of this.o.db.list("enabled")) {
+      for (const d of await this.events.read(row.handle, { name: `${DEFAULT_BOX}/tx/`, prefix: true, latest: true })) {
+        const txid = d.event.slice(`${DEFAULT_BOX}/tx/`.length);
+        let status: unknown;
+        try { status = (JSON.parse(d.data) as { status?: unknown }).status; } catch { continue; } // a record that is no JSON object names no status
+        this.holdingFact(row.handle, txid, status);
+      }
+    }
+    for (const s of this.holding.values()) n += s.size;
+    if (n) this.say("router", `holders: ${this.holding.size} unsettled transaction${this.holding.size === 1 ? "" : "s"}, ${n} holder${n === 1 ? "" : "s"}, from the stores`);
+  }
+
+  /** The (handle, txid, topic) announcements published in this run: a fact handed over again publishes nothing. */
+  private announced = new Set<string>();
+
+  /**
+   * A fact from `handle` (after its step's commit): `chain/tx/<txid>` → the holder map; the overlay's
+   * `<app>/topic/tx/<txid>` with verdict `admitted` → the gossip `admit` (announceAdmitted).
+   */
+  private followFact(handle: string, rec: Record<string, unknown>): void {
+    const name = typeof rec.event === "string" ? rec.event : "";
+    const tx = /^chain\/tx\/([0-9a-f]{64})$/.exec(name);
+    if (tx) return this.holdingFact(handle, tx[1]!, rec.status);
+    const ov = /^([a-z0-9][a-z0-9-]*)\/topic\/tx\/([0-9a-f]{64})$/.exec(name);
+    if (ov && rec.verdict === "admitted") this.announceAdmitted(handle, ov[2]!, rec.topics);
+  }
+
+  /**
+   * SPEC 7/8: the host publishes the gossip `admit` when it sees the overlay's `admitted` fact — per topic the
+   * fact's `topics: {<topic>: {outputsToAdmit, coinsToRetain}}` names, `{kind: "admit", txid, topics: {<topic>:
+   * …}}` on `<topic>` from the instance's libp2p node (sync.ts admitBody), once per (instance, txid, topic) in
+   * this run. A fact with no `topics` publishes nothing here.
+   * WAITING ON build C: skein-overlay v0.28.1's fact carries no `topics`; until it does, its admission is
+   * published by the overlay itself through the libp2p provider's `publish` box (providers.ts, kept beside this:
+   * remove that path when the overlay stops asking for it).
+   */
+  private announceAdmitted(handle: string, txid: string, topics: unknown): void {
+    if (!topics || typeof topics !== "object" || Array.isArray(topics) || topics instanceof Uint8Array) return;
+    const p2p = this.p2p;
+    if (!p2p) { this.say(handle, `gossip: ${txid.slice(0, 8)} admitted: this host runs no libp2p: not announced`); return; }
+    const nums = (v: unknown): number[] | undefined => Array.isArray(v) && v.every((x) => (typeof x === "number" && Number.isInteger(x) && x >= 0) || typeof x === "bigint") ? v.map(Number) : undefined;
+    for (const [topic, e] of Object.entries(topics as Record<string, unknown>)) {
+      const steak = e as { outputsToAdmit?: unknown; coinsToRetain?: unknown } | null;
+      const outputsToAdmit = nums(steak?.outputsToAdmit), coinsToRetain = nums(steak?.coinsToRetain);
+      if (!topic || !outputsToAdmit || !coinsToRetain) { this.say(handle, `gossip: ${txid.slice(0, 8)} admitted on ${topic}: not {outputsToAdmit, coinsToRetain}: not announced`); continue; }
+      const k = `${handle} ${txid} ${topic}`;
+      if (this.announced.has(k)) continue;
+      this.announced.add(k);
+      if (this.announced.size > 100_000) this.announced.delete(this.announced.values().next().value!);
+      const p = p2p.publish(handle, topic, admitBody(txid, topic, { outputsToAdmit, coinsToRetain }))
+        .then((r) => this.say(handle, `gossip: ${txid.slice(0, 8)} admit published on ${topic} (${r.recipients} peer${r.recipients === 1 ? "" : "s"})`))
+        .catch((x) => { this.announced.delete(k); this.say(handle, `gossip: ${txid.slice(0, 8)} admit on ${topic} not published: ${(x as Error).message}`); });
+      this.syncing.add(p);
+      void p.finally(() => this.syncing.delete(p));
+    }
   }
 
   // ---------------------------------------------------------------- hydration
@@ -1288,24 +1291,21 @@ export class Router {
     const kernel: KernelSurface = sq ? await this.wasmHost(sq.db).open(ko) : rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
     let g: { identity?: unknown } | null;
     try {
-      if (!(await kernel.store.log.tip())) {
-        // No tree was loaded into this store (`skein-host add --boot/--packet` does that): the stock system, through the same loader.
-        const b = await boot(kernel, { kind: "code" }, this.genesisConfig(row, identity), this.now());
-        this.say(handle, `genesis ${b.entry}`);
-      }
+      // One loader (SPEC 8): an instance starts from a tree (an image, `skein-host add --boot/--packet`); an empty store is no instance.
+      if (!(await kernel.store.log.tip())) throw new Error("its store is empty: an instance starts from a tree (an image, or skein-host add --image/--boot/--packet), and none was loaded into it");
       g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
-      // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
-      await this.chainBootstrap(handle, kernel);
-      // #156: a serve kernel's own host chain still empty (born before the image held a chain): from the image chain now.
-      if (kernel instanceof Kernel) await this.syncHolder(handle, { tip: () => kernel.chainTip(), headers: (raws) => kernel.chainHeaders(raws) }).catch((e) => this.say(handle, `host chain: not synced from the image chain: ${(e as Error).message}`));
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
       { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
-      this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
+      // SPEC 8: not up until it has been told the chain as far as the host knows it — the first pointer event,
+      // straight to the kernel here, before the instance is handed to anyone (not through admitEvent/serial: that
+      // would hydrate, and wait on this load). Anything admitted after the load lands after it in the log.
+      this.sentChain.delete(handle);
+      await this.firstChainEvent(handle, kernel);
     } catch (e) {
       await kernel.stop(1000);
       throw e;
@@ -1320,29 +1320,10 @@ export class Router {
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
-    // #156: the host chain as it stands, once at each start (not awaited: an admit made here would wait on this load).
-    this.sentChain.delete(handle);
-    void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the start event not sent: ${(e as Error).message}`));
     // The settled sync design: the peers each overlay topic's beats came from (host.db), asked at once.
     if (this.sync) void this.askKnownPeers(l).catch((e) => this.say(handle, `sync: the known peers not asked: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
-  }
-
-  /**
-   * Whether a stopped instance's route table routes an entry in `box` — an event, or (given a
-   * sender) a message: the kernel's rule (#77, #143: dispatch.zig forMail/forEvent, by the box
-   * alone; who may run the function is the gate's, when it is routed). Read from its store file,
-   * read-only, with no kernel.
-   */
-  async subscribes(handle: string, box: string, sender?: string): Promise<boolean> {
-    const row = this.o.db.get(handle);
-    if (!row || !storeExists(storeSpec(row))) return false;
-    const s = openStoreFile(storeSpec(row), { readOnly: true });
-    try {
-      const rows = await currentDispatch(s);
-      return !!rows?.some((r) => sender !== undefined ? takesMail(r, box) : takesEvent(r, box));
-    } finally { s.close(); }
   }
 
   /**
@@ -1358,7 +1339,7 @@ export class Router {
     if ((o.owner || o.appConfig) && !o.image) throw new Error("an owner and app config at birth are an image's (#142)");
     const identity = await rootIdentity(await this.o.walletFor(row));
     // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
-    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
+    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity);
     const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.kernelEnv(), log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -1371,12 +1352,12 @@ export class Router {
 
   /**
    * A new agent's address book seed (#70): this host's providers — the HTTP
-   * proxy, the waker, the cron provider (#69), the libp2p node (when it runs
+   * proxy, the waker, the libp2p node (when it runs
    * one), the status provider (#65, when it has an Arcade) — and the owner's
    * mailbox, when it knows it.
    */
   addressSeed(handle?: string): AddressSeed[] {
-    const names: ProviderName[] = ["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(handle !== undefined && this.managerFor(handle) ? ["manager" as const] : [])];
+    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])];
     const out: AddressSeed[] = this.providers.entries(names);
     const mb = this.ownerMessagebox();
     if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
@@ -1393,18 +1374,14 @@ export class Router {
    * in its address book too (no other instance's book names them).
    */
   imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
-    // #162: an instance SKEIN_MANAGER_FOR names gets the instance manager (not the certifier), as the host skein has it.
-    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : this.managerFor(row.handle) ? ["manager" as const] : [])]);
+    const seed = this.providers.entries(["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
-      feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
+      defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
     };
   }
-
-  /** #162: whether SKEIN_MANAGER_FOR names `handle` (the instance manager in its address book, its messages taken). */
-  managerFor(handle: string): boolean { return (this.o.managerFor ?? []).includes(handle); }
 
   /**
    * #162: the image a create names, as a boot source — the built-in `default` (this host's, with its
@@ -1414,10 +1391,10 @@ export class Router {
    * image/ reads `..` beside the repository's image, not beside the link).
    */
   private async namedImage(name: string | undefined, host: boolean | undefined): Promise<BootSource> {
-    if (host || name === undefined || name === "default") return await this.image.source({ host, ...(name ? { image: name } : {}) });
+    if (host || name === undefined || name === "default") return await namedImageSource({ host, ...(name ? { image: name } : {}) });
     const dir = this.imageDir(name);
     if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
-    return isOverlayImage(dir) ? await this.image.source({ overlay: dir }) : await imageSource(dir);
+    return isOverlayImage(dir) ? await namedImageSource({ overlay: dir }) : await imageSource(dir);
   }
 
   /** #162: an image by name: its directory under imagesDir (resolved), or undefined. */
@@ -1490,18 +1467,11 @@ export class Router {
     this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain(), ...(o.topics?.length ? { topics: JSON.stringify(o.topics) } : {}) }); // #137: the names it is routed by. H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
-      await this.image.ready; // #132: born with the chain as the host holds it
       // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
       // operator's key, `appConfig` merged.
       // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
       // #164: an owned instance's genesis names `owner` root (boot.ts then seeds no claim route), as the host skein's does.
-      // The image read from its root to the last object walked: a header taken meanwhile keeps the objects it replaces.
-      const release = this.image.hold();
-      try {
-        await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
-      } finally {
-        release();
-      }
+      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
@@ -1518,8 +1488,8 @@ export class Router {
         if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
       }
       if (o.host) this.o.db.setSetting("host_skein", handle);
-      if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
-      const tip = this.image.tip();
+      if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
+      const tip = this.sentChain.has(handle) ? await l.kernel.chainTip() : undefined;
       this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${owned ? `owned by ${short(owner)}${o.host ? "" : " (born owned, #164)"}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
@@ -1535,79 +1505,76 @@ export class Router {
   }
 
   /**
-   * The instance manager's work (#90; providers.ts `manager`): a message from
-   * the host skein in box `create`, `start` or `stop` → the answer body. A
-   * refusal throws (the provider answers {error}).
+   * The instance manager's work (#90; providers.ts `manager`): a message from the host skein in box `create`
+   * → the answer body. A refusal throws (the provider answers {error}). (skein next, SPEC 8: start and stop
+   * are no messages any more: the host's own startInstance / stopInstance.)
    */
   private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (box !== "create") throw new Error(`the instance manager takes create: not ${box}`);
     const handle = typeof b.handle === "string" ? b.handle : "";
-    if (box === "create") {
-      // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
-      const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
-      const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
-      if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
-      if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
-      // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
-      if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
-      // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
-      const topics = topicsArg(b.topics);
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
-      return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
-    }
-    if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
+    // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
+    const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
+    const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
+    if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
+    if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
+    // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
+    if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
+    // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
+    const topics = topicsArg(b.topics);
+    const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
+    return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+  }
+
+  /**
+   * Start an instance (skein next, SPEC 8: the host's own action): its row enabled — published under its
+   * hostname — and its kernel hydrated (told the chain inside the load). `topics` (#137) replaces the overlay
+   * names the row is routed by at the bare host; absent keeps them. Throws for no such row or bad topics.
+   */
+  async startInstance(handle: string, o: { topics?: string[] } = {}): Promise<{ handle: string; started: true; url: string }> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
-    if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein: it is not started or stopped by a message from itself`);
-    if (box === "start") {
-      // #137: `topics` replaces the names the row is routed by; absent keeps them.
-      const topics = topicsArg(b.topics);
-      if (topics) this.o.db.setTopics(handle, topics);
-      this.o.db.setStatus(handle, "enabled");
-      await this.hydrate(handle);
-      await this.refollowHeaders(handle);
-      this.say("router", `${handle}: started by the instance manager`);
-      return { handle, started: true, url: this.originOf(handle) };
-    }
+    const topics = topicsArg(o.topics);
+    if (topics) this.o.db.setTopics(handle, topics);
+    this.o.db.setStatus(handle, "enabled");
+    await this.hydrate(handle);
+    this.say("router", `${handle}: started`);
+    return { handle, started: true, url: this.originOf(handle) };
+  }
+
+  /**
+   * Stop an instance (skein next, SPEC 8: the host's own action): its row disabled (no hostname: nothing
+   * reaches it), its kernel stopped, off its libp2p node (its beacons stop beating, skein-amm#4) and its
+   * event streams closed. A start's hydrate declares it again. Throws for no such row.
+   */
+  async stopInstance(handle: string): Promise<{ handle: string; stopped: true }> {
+    if (!this.o.db.get(handle)) throw new Error(`no instance ${handle}`);
     this.o.db.setStatus(handle, "disabled");
-    await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
-    // skein-amm#4: off its libp2p node too, so a stopped instance's beacons stop beating; a start's hydrate declares it again.
     await this.p2p?.declare(handle, undefined).catch(() => {});
     this.events.drop(handle);
-    this.say("router", `${handle}: stopped by the instance manager`);
+    this.say("router", `${handle}: stopped`);
     return { handle, stopped: true };
   }
 
-  /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */
-  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
-    if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    const genesisDefaults = this.o.genesis?.defaults;
-    const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
-    const warn = (l: string) => this.say(row.handle, l);
+  /**
+   * What this host brings to the genesis of a system tree booted with an owner (`skein-host add --boot/--packet`,
+   * boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults — the tree's
+   * config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
+   */
+  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string): Genesis2Config {
+    if (!this.o.owner) throw new Error("a system tree booted with an owner needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(row.handle), providers: Object.fromEntries(this.addressSeed(row.handle).filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
-    if (!code) {
-      // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
-      return {
-        identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, network: this.o.network, ...facts,
-      };
-    }
     return {
       identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-      // Code genesis takes DEFAULTS under the host's.
-      defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
-      subscriptions: this.o.genesis?.subscriptions,
-      feeds: this.o.genesis?.feeds,
-      libp2p: this.o.genesis?.libp2p, dispatch: this.o.genesis?.dispatch,
-      network: this.o.network, ...facts,
+      defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn: (l) => this.say(row.handle, l), network: this.o.network, ...facts,
     };
   }
 
   /**
    * The kernel counts as busy until it has processed what was just admitted
-   * (its `idle` answers after the drain); then the libp2p node and the host's
-   * headers feed follow the dispatch table (#72, #77, #102).
+   * (its `idle` answers after the drain); then the libp2p node and the chain
+   * pointer event follow the dispatch table (#72, #77).
    */
   private settle(l: Loaded): void {
     const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
@@ -1616,23 +1583,22 @@ export class Router {
   }
 
   /**
-   * What the host does by the instance's dispatch table (#72, #77, #102):
-   * read the table (the kernel's `dispatch` frame); when its chain's tip
-   * moved since it was last followed (or `first`), the host's headers feed
-   * subscribes or unsubscribes it (followHeaders), and its libp2p node is
-   * declared again as its genesis and the table ask (p2p.ts libp2pConfig) —
-   * started, reconfigured (topics subscribed and unsubscribed, protocols
-   * handled and unhandled) or stopped. A failure is logged, not fatal.
+   * What the host does by the instance's dispatch table (#72, #77): read the table (the kernel's `dispatch`
+   * frame); when it moved since it was last followed (or `first`), its libp2p node is declared again as its
+   * genesis and the table ask (p2p.ts libp2pConfig) — started, reconfigured (topics subscribed and
+   * unsubscribed, protocols handled and unhandled) or stopped — and (not `first`: the load sent it) an app
+   * that takes box `chain` installed into the running instance gets the chain pointer event now (chainBirth;
+   * one already sent is not sent again). A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
-    if ((!this.p2p && !this.headersKey()) || l.kernel.gone) return;
+    if (l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
     l.dispatchTip = key;
     l.rows = d.rows;
-    this.followHeaders(l.row.handle, d.rows);
+    if (!first && d.rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) void this.chainBirth(l.row.handle).catch((e) => this.say(l.row.handle, `host chain: the install event not sent: ${(e as Error).message}`));
     // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
     // removes every row naming the app and leaves its heads).
     if (l.beacons.length || l.live.length) {
@@ -1872,58 +1838,21 @@ export class Router {
   }
 
   /**
-   * The host's headers feed (#102) for an instance whose dispatch table is
-   * `rows`: subscribed (box `chain`) while it is enabled and a row takes
-   * events in box `chain` by name (the chain app's `event` row; dispatch.zig
-   * forEvent) — a catch-all `*` row is not one —
-   * else not. One line when that changes.
-   */
-  private followHeaders(handle: string, rows: DispatchRow[]): void {
-    const url = this.headersKey();
-    if (!url) return;
-    const want = this.o.db.get(handle)?.status === "enabled" && rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX));
-    if (want === this.feeds.hosts(handle)) return;
-    // #141: on subscribing, the headers it lacks first — from its tip (its chain state's, else its image's) to the host's.
-    const backfill = async () => {
-      const row = this.o.db.get(handle);
-      if (!row || !storeExists(storeSpec(row))) return [];
-      const s = openStoreFile(storeSpec(row), { readOnly: true });
-      let tip: Awaited<ReturnType<typeof skeinTip>>;
-      try { tip = await skeinTip(s); } finally { s.close(); }
-      return await this.image.after(tip);
-    };
-    void this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined, want ? backfill : undefined);
-    this.say("router", `${handle}: ${want ? "subscribed to" : "unsubscribed from"} the host's headers feed ${url}`);
-    // #156: an app that takes box `chain` installed into a running instance: the host chain as it stands, now.
-    if (want) void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the install event not sent: ${(e as Error).message}`));
-  }
-
-  /** Follow the host's headers feed for an instance whose status changed (#102): its table read again. */
-  private async refollowHeaders(handle: string): Promise<void> {
-    if (!this.headersKey()) return;
-    const l = this.loaded.get(handle);
-    const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch((e) => { this.say(handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; }) : undefined;
-    this.followHeaders(handle, d?.rows ?? []);
-  }
-
-  /**
-   * The waker answers every wake-me due by this router's clock, and the cron
-   * provider sends every tick due (#69) — what their timers do in real time,
-   * for a clock that is not (a script clock: tests, the corpus).
+   * The waker answers every wake-me due by this router's clock — what its
+   * timers do in real time, for a clock that is not (a script clock: tests,
+   * the corpus).
    */
   async wake(): Promise<void> {
     this.providers.wakeDue();
-    await this.cron.tick();
     await this.providers.idle();
   }
 
-  /** An instance's next wake (ms), if any (the host page): the waker's earliest, or its next tick (#69). */
+  /** An instance's next wake (ms), if any (the host page): the waker's earliest. */
   nextWake(handle: string): number | undefined {
-    const xs = [this.providers.nextWake(handle), ...this.cron.of(handle).map((s) => s.next)].filter((x): x is number => x !== undefined);
-    return xs.length ? Math.min(...xs) : undefined;
+    return this.providers.nextWake(handle);
   }
 
-  /** Stop kernels idle for `ms` with nothing queued. Their deadlines and sleeps stay with the waker, their schedules with the cron provider. */
+  /** Stop kernels idle for `ms` with nothing queued. Their deadlines and sleeps stay with the waker. */
   private async reap(ms: number): Promise<void> {
     for (const [handle, l] of this.loaded) {
       if (l.kernel.busy > 0 || this.queues.has(handle) || Date.now() - l.kernel.last < ms) continue;
@@ -2011,7 +1940,7 @@ export class Router {
       return json(200, { origin: this.origin(), domain: await this.handleDomain() });
     }
     const t = this.target(url);
-    // The router's own paths at its own hostname stay the router's when an instance takes that label (ownLabelInstance).
+    // The router's own paths at its own hostname stay the router's when the root instance takes that label (ownLabelInstance).
     if (t && !/^\/@/.test(url.pathname) && this.ownLabelInstance(t.handle)) {
       if (req.method === "GET" && url.pathname === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
       if (url.pathname === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, url.pathname);

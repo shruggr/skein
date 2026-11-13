@@ -49,7 +49,6 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Libp2p } from "@libp2p/interface";
 import { multiaddr } from "@multiformats/multiaddr";
-import { headerProblem } from "./image-chain.ts";
 import { NETWORK_NAMES, tableSize, type P2PHost } from "./p2p.ts";
 
 /** The network's bootstrap peers (go-teranode-p2p-client config.go); regtest has none. */
@@ -72,6 +71,30 @@ export function blockTopic(network: string): string {
 const SIZE = 80;
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 const display = (h: Uint8Array) => Buffer.from(h).reverse().toString("hex");
+
+/** The target a compact `bits` encodes, or undefined when it is not usable (skein-sdk header.zig `target`). */
+function target(bits: number): bigint | undefined {
+  const mantissa = BigInt(bits & 0x007fffff);
+  const negative = (bits & 0x00800000) !== 0;
+  const exponent = bits >>> 24;
+  let t: bigint;
+  if (exponent <= 3) t = mantissa >> BigInt(8 * (3 - exponent));
+  else {
+    const shift = 8 * (exponent - 3);
+    if (shift >= 256) return undefined;
+    t = mantissa << BigInt(shift);
+    if (t >> 256n !== 0n) return undefined;
+  }
+  return t === 0n || negative ? undefined : t;
+}
+
+/** (Moved from image-chain.ts, skein next.) Why a header (80 bytes) is not one the chain app takes on its own: an unusable target, or a hash that misses it. */
+export function headerProblem(raw: Uint8Array): string | undefined {
+  if (raw.length !== SIZE) return "not 80 bytes";
+  const t = target(Buffer.from(raw).readUInt32LE(72));
+  if (t === undefined) return "an unusable target";
+  return BigInt(`0x${display(sha256d(raw))}`) <= t ? undefined : "its hash misses its target";
+}
 /** A header's hash, display hex. */
 export const hashOf = (raw: Uint8Array) => display(sha256d(raw));
 /** A header's parent's hash, display hex. */
@@ -152,13 +175,13 @@ export async function hubBack(hub: string, hash: string, n: number, o: HubOption
 
 // ---------------------------------------------------------------- the tracker
 
-/** What the tracker reads and writes: the host's image chain and the intake behind it (Router). */
+/** What the tracker reads and writes: the host chain and the one intake in front of it (Router, SPEC 8). */
 export interface TrackerChain {
-  /** The tip held (undefined: nothing held). */
-  tip(): { height: number; hash: string } | undefined;
-  /** The height of a header held near the tip, by hash (display hex). */
-  find(hash: string): number | undefined;
-  /** A run of headers, parents first, at `height` (its first one's): into the image chain and on to the host chain and the instances. */
+  /** The host chain's tip (undefined: nothing held). */
+  tip(): Promise<{ height: number; hash: string } | undefined>;
+  /** The height of a header held, by hash (display hex); undefined when not found. */
+  find(hash: string): Promise<number | undefined>;
+  /** A run of headers, parents first, at `height` (its first one's): into the one intake (the host chain, then the instances' pointer events). */
   take(height: number, raws: Uint8Array[]): Promise<void>;
 }
 
@@ -310,14 +333,14 @@ export class TeranodeTracker {
   /** go-chaintracks processBlockMessage: known, a child of a header near the tip, or a crawl back from its hub. */
   private async follow(a: Announcement): Promise<void> {
     const c = this.o.chain;
-    if (!c.tip()) {
+    if (!(await c.tip())) {
       // The first sync failed or had no hub: this announcement's hub, from it.
       if (!a.hub) throw new Error("nothing held yet, and the announcement names no data hub: dropped");
       await this.bulk(a.hub, { hash: a.hash, height: a.height });
       return;
     }
-    if (c.find(a.hash) !== undefined) { this.stats.known++; return; }
-    const parent = c.find(prevOf(a.header));
+    if ((await c.find(a.hash)) !== undefined) { this.stats.known++; return; }
+    const parent = await c.find(prevOf(a.header));
     if (parent !== undefined) {
       await c.take(parent + 1, [a.header]);
       this.stats.taken++;
@@ -345,7 +368,7 @@ export class TeranodeTracker {
       const got = await hubBack(hub, at, page, this.o.hub_);
       if (pages.length && prevOf(pages.at(-1)!.at(-1)!) !== hashOf(got[0]!)) throw new Error(`${hub}: a page that does not continue the last`);
       for (const [i, raw] of got.entries()) {
-        const h = c.find(hashOf(raw));
+        const h = await c.find(hashOf(raw));
         if (h !== undefined) {
           pages.push(got.slice(0, i));
           return { base: h, run: pages.flat().reverse() };
@@ -368,14 +391,14 @@ export class TeranodeTracker {
       // Every start: to the hub's best (go-chaintracks's bootstrap sync) — the whole chain when none is held,
       // else what was missed while the host was down (the mesh may take a while to find).
       const best = await hubBest(hub, this.o.hub_);
-      if (this.o.chain.find(best.hash) !== undefined) return;
-      if (!this.o.chain.tip()) return await this.bulk(hub, best);
+      if ((await this.o.chain.find(best.hash)) !== undefined) return;
+      if (!(await this.o.chain.tip())) return await this.bulk(hub, best);
       const { base, run } = await this.crawl(hub, best.hash, this.o.bulkPage ?? 10_000, Number.POSITIVE_INFINITY);
       await this.o.chain.take(base + 1, run);
-      this.say(`headers: caught up from ${hub}: ${run.length} header${run.length === 1 ? "" : "s"} to ${this.o.chain.tip()?.height}`);
+      this.say(`headers: caught up from ${hub}: ${run.length} header${run.length === 1 ? "" : "s"} to ${(await this.o.chain.tip())?.height}`);
       return;
     }
-    if (this.o.chain.tip()) return;
+    if (await this.o.chain.tip()) return;
     this.say(`headers: no data hub for ${this.o.network}: waiting for the first block announcement to sync from its hub`);
     // follow() runs the sync for the first announcement (bulk from its hub).
   }
@@ -391,7 +414,7 @@ export class TeranodeTracker {
       const { base, run } = await this.crawl(hub, best.hash, this.o.bulkPage ?? 10_000, Number.POSITIVE_INFINITY, (have) => this.say(`headers: initial sync ${have}/${of}`));
       const fetched = Date.now() - t0;
       await c.take(base + 1, run);
-      this.say(`headers: initial sync done: ${run.length} headers to ${c.tip()?.height} in ${((Date.now() - t0) / 1000).toFixed(1)} s (fetch ${(fetched / 1000).toFixed(1)} s)`);
+      this.say(`headers: initial sync done: ${run.length} headers to ${(await c.tip())?.height} in ${((Date.now() - t0) / 1000).toFixed(1)} s (fetch ${(fetched / 1000).toFixed(1)} s)`);
     } finally {
       this.syncing = false;
     }

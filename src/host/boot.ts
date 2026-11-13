@@ -1,5 +1,5 @@
-// The bootstrap loader (issue #4): one loader, two sources, no genesis by code
-// alone. An instance boots from a **system tree** (docs/BOOTSTRAP.md):
+// The bootstrap loader (issue #4): one loader, no genesis by code (skein next,
+// SPEC 8: everything about the starting point comes from the tree). An instance boots from a **system tree** (docs/BOOTSTRAP.md):
 //
 //   bin/<name>.wasm   a handler program's module (WASI), or
 //   bin/<name>.cid    the CID (raw, bafkrei…) of a module the source or the kernel holds
@@ -20,12 +20,11 @@
 //
 // The sources only differ in where the objects come from (`Objects`): a
 // directory scanned into memory (A), a store file (`--boot <cid> --from`),
-// or a verified chain packet (B, packet.ts). An instance with no tree takes
-// the stock system in code (genesis.ts codeSystem) through the same writer; a
+// or a verified chain packet (B, packet.ts). A
 // packet with a checkpoint (#30's state record) is restored instead: its
 // blocks put, the state pointer moved, nothing rebuilt. The router's
-// hydration of an empty store and `skein-host add --boot/--packet` both call
-// `boot` here.
+// createInstance / bootRow and `skein-host add --image/--boot/--packet` call
+// `boot` here; an empty store is no instance (the router refuses to start it).
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -44,7 +43,7 @@ import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type GrantOp, type InstanceView, type ViewStore } from "./plan.ts";
-import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
+import { CLAIM_ROW, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import { appIgnore } from "./install.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
 
@@ -232,8 +231,6 @@ export function checkImageApps(apps: ImageApps | undefined): void {
 // ---------------------------------------------------------------- the loader
 
 export type BootSource =
-  /** No tree: the stock system in code (the live agents). */
-  | { kind: "code" }
   /**
    * A system tree whose objects are in `objects` (a scanned directory, a store, a verified packet). `apps` (#152):
    * the trees of the apps its etc/apps.json names by a directory outside the image, by appKey, read with the image
@@ -246,8 +243,8 @@ export type BootSource =
 export interface Booted { entry?: CID; tree?: CID; state?: CID; objects: number; programs: string[]; /** #141: the apps the image installed at birth. */ apps?: Array<{ name: string; version: string; notes: string[] }> }
 
 /**
- * Boot an empty store through its kernel: pre-fill and write the genesis (a
- * tree, or the stock system), or restore a checkpoint. The kernel processes
+ * Boot an empty store through its kernel: pre-fill and write the genesis from
+ * a tree, or restore a checkpoint. The kernel processes
  * the genesis when it starts (the dispatch rows; `main` → the tree).
  */
 export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: Stamp = clockNow()): Promise<Booted> {
@@ -258,11 +255,6 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
   // A tree takes from the kernel only the front door, unless its bin/ has one (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them). No shell (#83): the shell is an app.
-  if (src.kind === "code") {
-    const kernelPrograms = await k.call("programs") as Record<string, CID>;
-    const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
-    return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
-  }
   const t = await readSystemTree(src.objects, src.root);
   const kernelPrograms = t.programs.some((p) => p.name === "frontdoor") ? {} : await k.call("programs", ["frontdoor"]) as Record<string, CID>;
   let n = 0;
@@ -566,6 +558,20 @@ export async function overlayImage(base: ImageStatic, dir: string): Promise<Imag
 export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSource & { kind: "tree" }> {
   const d = await imageDir(dir);
   return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)), apps: d.apps };
+}
+
+/**
+ * An image by the names a create or `skein-host add --image` gives (skein next, SPEC 8: the image as the
+ * repository holds it — no live chain part, image-chain.ts is gone): `default` (images/default); `host`
+ * (images/host merged over it, #142); `overlay` a directory with no bin/ merged over it (#152). With the
+ * repo's pinned modules beside its objects (imageSource).
+ */
+export async function namedImageSource(o: { host?: boolean; image?: string; overlay?: string } = {}): Promise<BootSource & { kind: "tree" }> {
+  if (o.image !== undefined && o.image !== "default" && o.image !== "host") throw new Error(`image ${JSON.stringify(o.image)}: this host has default, host`);
+  const over = o.overlay ?? (o.host || o.image === "host" ? HOST_IMAGE : undefined);
+  if (over === undefined) return await imageSource(DEFAULT_IMAGE);
+  const s = await overlayImage(await imageDir(DEFAULT_IMAGE), over);
+  return { kind: "tree", root: s.root, objects: anyOf(s.objects, wasmDirObjects(WASM_DIR)), apps: s.apps };
 }
 
 /**

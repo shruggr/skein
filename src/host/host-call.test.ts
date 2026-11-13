@@ -28,6 +28,8 @@ import { HostDb } from "./instances.ts";
 import { Signer } from "./signer.ts";
 import { peerIdOf } from "./p2p.ts";
 import { Router } from "./router.ts";
+import { dirSource } from "./boot.ts";
+import { imageTree } from "./testhost.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEMO_WASM = join(ROOT, "kernel-zig/test/p2p/p2p-demo.wasm");
@@ -75,7 +77,7 @@ for (const under of ["native", "wasm"] as const) {
     const row = (h: string) => under === "wasm" ? `sqlite:${join(home, `${h}.sqlite`)}` : join(home, h, "runtime.db");
     const store = (h: string) => under === "wasm" ? `${row(h)}#${h}` : row(h);
 
-    const mk = (handle: string, listen: string, bootstrap: string, genesis: ConstructorParameters<typeof Router>[0]["genesis"], answerWaitMs?: number) => {
+    const mk = (handle: string, listen: string, bootstrap: string, answerWaitMs?: number) => {
       const db = new HostDb(join(home, `${handle}-host.db`));
       if (!db.get(handle)) db.add(handle, { store: row(handle) });
       const r = new Router({
@@ -83,16 +85,19 @@ for (const under of ["native", "wasm"] as const) {
         ...(answerWaitMs ? { answerWaitMs } : {}),
         kernel: { command: KERNEL, env: { SKEIN_HOME: home } },
         libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
-        genesis,
         log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
       });
       return { db, r };
     };
-    const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`, { libp2p: { topics: ["skein-test/call"] } });
+    const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`);
     // Beta's answer wait is short (500 ms): its slow handler rests 3 s past it, and its answer is still written.
-    const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`, {
-      libp2p: { topics: ["skein-test/call"], protocols: { [ECHO]: { program: DEMO_CID.toString(), fn: "stream" }, [SLOW]: { program: DEMO_CID.toString(), fn: "slow" } } },
-    }, 500);
+    const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`, 500);
+    // Each booted from a system tree (one loader, SPEC 8): the default image with p2p-demo and its libp2p config.
+    const demoBin = { "p2p-demo.wasm": DEMO_BYTES, "p2p-demo.json": JSON.stringify({ inputs: DEMO.inputs, services: DEMO.services, description: DEMO.description }) };
+    await A.r.bootRow("alpha", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-alpha"), { bin: demoBin, config: { collect: [], libp2p: { topics: ["skein-test/call"] } } })) });
+    await B.r.bootRow("beta", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-beta"), {
+      bin: demoBin, config: { collect: [], libp2p: { topics: ["skein-test/call"], protocols: { [ECHO]: { program: "p2p-demo", fn: "stream" }, [SLOW]: { program: "p2p-demo", fn: "slow" } } } },
+    })) });
     const stops: Array<() => Promise<void>> = [];
     t.after(async () => { for (const s of stops) await s().catch(() => {}); });
     stops.push(async () => { await B.r.stop(); B.db.close(); });
