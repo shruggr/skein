@@ -244,12 +244,6 @@ export interface RouterOptions {
    * host): a create needs the owner's own signed claim, as before.
    */
   claimer?: WalletInterface;
-  /**
-   * #162, SKEIN_MANAGER_FOR (host env): the instances besides the host skein the instance manager
-   * takes messages from — the manager in their address book at birth, as in the host skein's (not the
-   * certifier). No other instance reaches it.
-   */
-  managerFor?: string[];
   /** SKEIN_ROOT_INSTANCE: the instance served at `/` of any hostname that is no instance's (the standalone's one app at localhost:<port>/). */
   rootInstance?: string;
   /** #162, SKEIN_IMAGES_DIR (default $SKEIN_HOME/images): the images a create names by name, a directory each (the layout `skein-host add --image <dir>` takes). */
@@ -583,8 +577,6 @@ export class Router {
       // #90: the instance manager acts for the host skein alone.
       manager: {
         from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
-        // #162: SKEIN_MANAGER_FOR — these instances too (each by its own identity).
-        alsoFor: () => (this.o.managerFor ?? []).flatMap((h) => { const r = this.o.db.get(h); return r?.identity && r.status === "enabled" ? [{ handle: r.handle, identity: r.identity }] : []; }),
         request: (box, body) => this.manage(box, body),
       },
       // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
@@ -623,17 +615,7 @@ export class Router {
 
   /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label. */
   reserved(handle: string): boolean {
-    return RESERVED_HANDLES.has(handle) || (handle === this.ownLabel() && !this.ownLabelInstance(handle));
-  }
-
-  /**
-   * The router's own label as an instance (2026-10-28, one public name): allowed only when the operator names
-   * that handle in SKEIN_MANAGER_FOR (managerFor) — the Open Exchange's config instance at the host's own
-   * origin. Its hostname then serves the instance; the router keeps /.well-known/skein-host, /skeins and
-   * /arc/callback there. Any other row named like the router's origin still never takes its requests.
-   */
-  ownLabelInstance(handle: string): boolean {
-    return handle === this.ownLabel() && this.managerFor(handle);
+    return RESERVED_HANDLES.has(handle) || handle === this.ownLabel();
   }
 
   /** This host's BRC-169 domain: its origin's host name (hostDomain). */
@@ -1249,7 +1231,7 @@ export class Router {
    * mailbox, when it knows it.
    */
   addressSeed(handle?: string): AddressSeed[] {
-    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(handle !== undefined && this.managerFor(handle) ? ["manager" as const] : [])];
+    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])];
     const out: AddressSeed[] = this.providers.entries(names);
     const mb = this.ownerMessagebox();
     if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
@@ -1266,8 +1248,7 @@ export class Router {
    * in its address book too (no other instance's book names them).
    */
   imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
-    // #162: an instance SKEIN_MANAGER_FOR names gets the instance manager (not the certifier), as the host skein has it.
-    const seed = this.providers.entries(["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : this.managerFor(row.handle) ? ["manager" as const] : [])]);
+    const seed = this.providers.entries(["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
@@ -1275,9 +1256,6 @@ export class Router {
       warn: (l) => this.say(row.handle, l),
     };
   }
-
-  /** #162: whether SKEIN_MANAGER_FOR names `handle` (the instance manager in its address book, its messages taken). */
-  managerFor(handle: string): boolean { return (this.o.managerFor ?? []).includes(handle); }
 
   /**
    * #162: the image a create names, as a boot source — the built-in `default` (this host's, with its
@@ -1401,45 +1379,55 @@ export class Router {
   }
 
   /**
-   * The instance manager's work (#90; providers.ts `manager`): a message from
-   * the host skein in box `create`, `start` or `stop` → the answer body. A
-   * refusal throws (the provider answers {error}).
+   * The instance manager's work (#90; providers.ts `manager`): a message from the host skein in box `create`
+   * → the answer body. A refusal throws (the provider answers {error}). (skein next, SPEC 8: start and stop
+   * are no messages any more: the host's own startInstance / stopInstance.)
    */
   private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (box !== "create") throw new Error(`the instance manager takes create: not ${box}`);
     const handle = typeof b.handle === "string" ? b.handle : "";
-    if (box === "create") {
-      // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
-      const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
-      const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
-      if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
-      if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
-      // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
-      if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
-      // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
-      const topics = topicsArg(b.topics);
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
-      return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
-    }
-    if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
+    // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
+    const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
+    const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
+    if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
+    if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
+    // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
+    if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
+    // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
+    const topics = topicsArg(b.topics);
+    const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
+    return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+  }
+
+  /**
+   * Start an instance (skein next, SPEC 8: the host's own action): its row enabled — published under its
+   * hostname — and its kernel hydrated (told the chain inside the load). `topics` (#137) replaces the overlay
+   * names the row is routed by at the bare host; absent keeps them. Throws for no such row or bad topics.
+   */
+  async startInstance(handle: string, o: { topics?: string[] } = {}): Promise<{ handle: string; started: true; url: string }> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
-    if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein: it is not started or stopped by a message from itself`);
-    if (box === "start") {
-      // #137: `topics` replaces the names the row is routed by; absent keeps them.
-      const topics = topicsArg(b.topics);
-      if (topics) this.o.db.setTopics(handle, topics);
-      this.o.db.setStatus(handle, "enabled");
-      await this.hydrate(handle);
-      this.say("router", `${handle}: started by the instance manager`);
-      return { handle, started: true, url: this.originOf(handle) };
-    }
+    const topics = topicsArg(o.topics);
+    if (topics) this.o.db.setTopics(handle, topics);
+    this.o.db.setStatus(handle, "enabled");
+    await this.hydrate(handle);
+    this.say("router", `${handle}: started`);
+    return { handle, started: true, url: this.originOf(handle) };
+  }
+
+  /**
+   * Stop an instance (skein next, SPEC 8: the host's own action): its row disabled (no hostname: nothing
+   * reaches it), its kernel stopped, off its libp2p node (its beacons stop beating, skein-amm#4) and its
+   * event streams closed. A start's hydrate declares it again. Throws for no such row.
+   */
+  async stopInstance(handle: string): Promise<{ handle: string; stopped: true }> {
+    if (!this.o.db.get(handle)) throw new Error(`no instance ${handle}`);
     this.o.db.setStatus(handle, "disabled");
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
-    // skein-amm#4: off its libp2p node too, so a stopped instance's beacons stop beating; a start's hydrate declares it again.
     await this.p2p?.declare(handle, undefined).catch(() => {});
     this.events.drop(handle);
-    this.say("router", `${handle}: stopped by the instance manager`);
+    this.say("router", `${handle}: stopped`);
     return { handle, stopped: true };
   }
 
@@ -1788,7 +1776,7 @@ export class Router {
     if (m) { const h = decodeURIComponent(m[1]!); return enabled(h) ? { handle: h, route: m[2] ?? "/" } : undefined; }
     const name = url.hostname.toLowerCase();
     const label = name.includes(".") ? name.split(".")[0]! : "";
-    if (label && HANDLE.test(label) && (label !== this.ownLabel() || this.ownLabelInstance(label)) && enabled(label)) return { handle: label, route: url.pathname }; // #161: a path-only handle never by hostname
+    if (label && HANDLE.test(label) && label !== this.ownLabel() && enabled(label)) return { handle: label, route: url.pathname }; // #161: a path-only handle never by hostname
     return undefined;
   }
 
@@ -1826,11 +1814,6 @@ export class Router {
       return json(200, { origin: this.origin(), domain: await this.handleDomain() });
     }
     const t = this.target(url);
-    // The router's own paths at its own hostname stay the router's when an instance takes that label (ownLabelInstance).
-    if (t && !/^\/@/.test(url.pathname) && this.ownLabelInstance(t.handle)) {
-      if (req.method === "GET" && url.pathname === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
-      if (url.pathname === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, url.pathname);
-    }
     // #161: an overlay request routed by its topic goes to the token instance it names, at an instance's
     // hostname too (one public name for the pages and the wallets' provider URL, 2026-10-28).
     if (req.method === "POST" && (url.pathname === "/submit" || url.pathname === "/lookup") && (!t || t.route === url.pathname)) {

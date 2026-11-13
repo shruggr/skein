@@ -75,8 +75,6 @@
 //   SKEIN_KEY_FILE        #160: one-key mode — the ONE key every instance signs with (a file, read and never made), or
 //                         SKEIN_KEY (hex); refused beside SKEIN_MASTER_KEY(_FILE). Every row the same identity, one peer key
 //                         (signer.ts Signer.oneKey), one libp2p node for all (p2p.ts); a create claimed by the host's key (#162)
-//   SKEIN_MANAGER_FOR     #162: the instances (handles, comma-separated) besides the host skein the instance manager acts for:
-//                         the manager in their address book at birth, their create/start/stop taken
 //   SKEIN_IMAGES_DIR      #162: where a create's image by name is (<dir>/<name>), default $SKEIN_HOME/images
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
 //   SKEIN_ROOT_INSTANCE   the instance served at / of a hostname that is no instance's (the standalone's app at http://localhost:<port>/)
@@ -598,7 +596,6 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
     ...((s) => (s ? { sqliteStore: s } : {}))(sqliteStoreOf(v, home)), // the settled split: the wasm kernel
     // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
-    ...(v.SKEIN_MANAGER_FOR ? { managerFor: handles(v.SKEIN_MANAGER_FOR) } : {}),
     ...(v.SKEIN_ROOT_INSTANCE ? { rootInstance: v.SKEIN_ROOT_INSTANCE } : {}),
     imagesDir: resolve(v.SKEIN_IMAGES_DIR || join(home, "images")),
     // #142: settings host.env may give (the environment's are read where they are used, too).

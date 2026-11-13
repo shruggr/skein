@@ -8,7 +8,8 @@
 // it — a create with no claim, another key's claim or a forged one is
 // refused and nothing is published; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
-// unpublishes, `start` publishes again. #113: `create` records the domain it
+// and `start` are no messages (skein next, SPEC 8): the host's own
+// Router.stopInstance / startInstance (their own test below). #113: `create` records the domain it
 // is given. GET /skeins?key=
 // lists a key's skeins on the host from their grants. (kernel-zig/
 // equiv/host.ts runs the whole flow through the onboarding app.)
@@ -32,7 +33,7 @@ import { testHost } from "./testhost.ts";
 const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 const hex = (b: unknown) => b instanceof Uint8Array ? Buffer.from(b).toString("hex") : String(b);
 
-test("the instance manager: create (the owner's claim forwarded before published), refusals, the host skein's only, stop and start", { skip, timeout: 180_000 }, async (t) => {
+test("the instance manager: create (the owner's claim forwarded before published), refusals, the host skein's only; stop and start are no messages", { skip, timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
   const answers: Array<{ handle: string; box: string; body: Record<string, unknown> }> = [];
   const append = h.router.providers.o.append;
@@ -138,17 +139,46 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.equal(h.db.get("bob"), undefined, "nothing created");
   assert.ok(h.lines.slice(lines).some((l) => /the instance manager takes messages from the host skein only: not acted on/.test(l)));
 
-  // stop and start.
+  // stop and start are the host's own actions now (skein next, SPEC 8): as messages, refused.
   a = await send("host", "stop", { handle: "alice" });
-  assert.equal(a[0]!.body.stopped, true);
-  assert.equal(h.db.get("alice")!.status, "disabled");
-  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 404, "unpublished");
+  assert.match(String(a[0]?.body.error), /the instance manager takes create: not stop/);
+  assert.equal(h.db.get("alice")!.status, "enabled", "nothing stopped");
   a = await send("host", "start", { handle: "alice" });
-  assert.equal(a[0]!.body.started, true);
-  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 401, "published again (#125: its explorer row answers; nothing is at /)");
-  a = await send("host", "stop", { handle: "host" });
-  assert.match(String(a[0]?.body.error), /is the host skein/);
+  assert.match(String(a[0]?.body.error), /the instance manager takes create: not start/);
   void host;
+});
+
+test("skein next (SPEC 8): Router.stopInstance / startInstance — the host's own actions: unpublished, the kernel stopped, its event streams closed; published again, the topics replaced", { skip, timeout: 120_000 }, async (t) => {
+  const h = await testHost(t);
+  await h.instance("alice");
+  await h.router.start();
+  const k = (await h.router.hydrate("alice")).kernel;
+  h.db.setTopics("alice", ["tm_a"]);
+  let closed = 0;
+  await h.router.events.subscribe("alice", { name: "x/", prefix: true }, () => {}, () => { closed++; });
+  assert.equal(h.router.events.count("alice"), 1);
+
+  assert.deepEqual(await h.router.stopInstance("alice"), { handle: "alice", stopped: true });
+  assert.equal(h.db.get("alice")!.status, "disabled");
+  assert.ok(k.gone, "its kernel stopped");
+  assert.ok(!h.router.loaded.has("alice"));
+  assert.equal(closed, 1, "its event stream closed");
+  assert.equal(h.router.events.count("alice"), 0);
+  assert.equal((await fetch(`${h.base}/@alice/.well-known/skein`)).status, 404, "unpublished");
+
+  const started = await h.router.startInstance("alice", { topics: ["tm_b", "ls_b"] });
+  assert.deepEqual(started, { handle: "alice", started: true, url: h.origin("alice") });
+  assert.equal(h.db.get("alice")!.status, "enabled");
+  assert.deepEqual(JSON.parse(h.db.get("alice")!.topics!), ["tm_b", "ls_b"], "the topics replaced");
+  assert.ok(h.router.loaded.get("alice") && !h.router.loaded.get("alice")!.kernel.gone, "hydrated again");
+  assert.equal((await fetch(`${h.base}/@alice/.well-known/skein`)).status, 200, "published again");
+  await h.router.stopInstance("alice");
+  await h.router.startInstance("alice");
+  assert.deepEqual(JSON.parse(h.db.get("alice")!.topics!), ["tm_b", "ls_b"], "no topics given: kept");
+
+  await assert.rejects(h.router.startInstance("nobody"), /no instance nobody/);
+  await assert.rejects(h.router.stopInstance("nobody"), /no instance nobody/);
+  await assert.rejects(h.router.startInstance("alice", { topics: ["a", "a"] }), /topics:/);
 });
 
 test("#164: an owned create — an image instance born owned: root its owner's from the genesis, no claim and no claim route; root's admin message runs, another key's does not", { skip, timeout: 120_000 }, async (t) => {

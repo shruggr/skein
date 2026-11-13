@@ -78,9 +78,8 @@
 //                     and it started (Router.createInstance). Refused (an answer
 //                     {error}): a bad or taken handle, a bad owner key, another
 //                     image, no claim, another key's claim, a refused claim
-//              start {handle}   → {handle, started: true, url}: published and started
-//              stop {handle}    → {handle, stopped: true}: unpublished and stopped (off its
-//                     libp2p node too: its beacons stop, skein-amm#4)
+//              (start and stop are no messages: the host's own Router.startInstance /
+//              stopInstance, skein next)
 //              create {…, domain?} (#113): the handle's domain, recorded with the row
 //              (`list` later.) It signs no claim (#127): it forwards the owner's,
 //              as signed — but on a one-key host (#160, #162) a create with no
@@ -89,8 +88,6 @@
 //                     at birth ({<app>: {…}}, merged as an install's --config);
 //                     `image` the default image, or an image by name
 //                     ($SKEIN_HOME/images/<name>, SKEIN_IMAGES_DIR)
-//              Also for the instances SKEIN_MANAGER_FOR names (#162): the manager in
-//              their address book at birth, their messages taken as the host skein's
 //   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,
 //              as the manager. Its key is the certifier key, the manifest's
 //              metanet.trust.publicKey (the master's child, key ID `certifier`).
@@ -176,8 +173,6 @@ export interface ProvidersOptions {
    */
   manager?: {
     from(): { handle: string; identity: string } | undefined;
-    /** #162 (SKEIN_MANAGER_FOR): the other instances the instance manager acts for (not the certifier), each its handle and identity (hex). */
-    alsoFor?(): Array<{ handle: string; identity: string }>;
     request(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
   /** The certifier (#113): an issue request from the host skein → the answer body (handles.ts). Absent: none. */
@@ -333,8 +328,7 @@ export class Providers {
       // #90, #113: the host skein's alone — any other sender's message is not acted on, and not answered.
       const host = this.o.manager?.from();
       const may = (h: { handle: string; identity: string } | undefined) => !!h && handle === h.handle && hex(out.message.sender) === h.identity;
-      // #162: the manager also for the instances SKEIN_MANAGER_FOR names; the certifier for the host skein alone.
-      if (!may(host) && !(name === "manager" && (this.o.manager?.alsoFor?.() ?? []).some(may))) throw new Error(`the ${name === "manager" ? "instance manager" : name} takes messages from the host skein only: not acted on`);
+      if (!may(host)) throw new Error(`the ${name === "manager" ? "instance manager" : name} takes messages from the host skein only: not acted on`);
     }
     let body: Record<string, unknown>;
     try { body = dagCbor.decode(out.body) as Record<string, unknown>; } catch { return await this.answer(handle, name, out.message, id, { error: "the body is not dag-cbor" }); }
