@@ -10,7 +10,7 @@
 // `?height=<h>&count=<n>`: whole 80-byte headers), the host chain is brought up to it ONCE at start —
 // from a little below the host chain's tip (from 0 when it is empty) — through the same intake, before any
 // instance is hydrated; and again whenever a streamed header links to no header known (a gap, a reorg
-// deeper than the recent index). Without one, such a header is dropped with a line.
+// deeper than the host chain holds). Without one, such a header is dropped with a line.
 //
 // Nothing per instance: no subscription, no queue, no backfill; the intake tells the instances. It may
 // run beside the Teranode tracker: both feed the one intake. (The parsing is feeds.ts's, as at v0.9.1.)

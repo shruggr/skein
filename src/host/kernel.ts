@@ -414,6 +414,10 @@ export class KernelHost {
   async chainImport(set: string, root: CID): Promise<HostChainTip> { return tipOf(await this.request(undefined, "chain-import", { set, root })); }
   /** #156: the host chain as it stands, or undefined (empty). */
   async chainTip(): Promise<HostChainTip | undefined> { const v = await this.request(undefined, "chain"); return v == null ? undefined : tipOf(v); }
+  /** SPEC 5: a header's height on the host chain's active line, by hash (display hex), or undefined. */
+  async chainHolds(hash: string): Promise<number | undefined> { const v = await this.request(undefined, "chain-holds", { hash }) as { height?: number | bigint } | null; return v?.height === undefined ? undefined : Number(v.height); }
+  /** SPEC 5: the host chain's header at `height` on its active line, or undefined. */
+  async chainAt(height: number): Promise<{ height: number; hash: string; raw: Uint8Array } | undefined> { const v = await this.request(undefined, "chain-at", { height }) as { height: number | bigint; hash: string; raw: Uint8Array } | null; return v ? { height: Number(v.height), hash: v.hash, raw: v.raw } : undefined; }
 
   /** One holder less; the last one's release stops the process (every instance closed, the database flushed). */
   async release(): Promise<void> {

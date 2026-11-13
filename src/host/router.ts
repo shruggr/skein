@@ -61,7 +61,7 @@ import { short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, txCid } from "./feeds.ts";
-import { hashOf, TeranodeTracker } from "./teranode.ts";
+import { TeranodeTracker } from "./teranode.ts";
 import { HttpHeaders } from "./headers-source.ts";
 import { rowApp, takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
 import { parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
@@ -796,8 +796,8 @@ export class Router {
 
   /**
    * #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). Its
-   * lookups (`tip`, `find`) read the host chain's tip and the recent index below; what it takes goes to the
-   * one intake (takeHeaders).
+   * lookups (`tip`, `find`) read the host chain (the kernel's `chain`, `chain-holds`); what it takes goes to
+   * the one intake (takeHeaders).
    */
   private async startTracker(): Promise<void> {
     const t = this.o.teranode;
@@ -821,31 +821,10 @@ export class Router {
     await this.tracker.start();
   }
 
-  /**
-   * The headers the tracker fed the intake in this run, by height and by hash, within RECENT_DEPTH of the
-   * highest — what the tracker's `find` looks a hash up in (the image chain's `find` window did this before).
-   * // until the host chain answers holds/at (SPEC 5): build K adds the kernel lookups holds(hash) and
-   * at(height); then `find` asks the host chain and this index goes.
-   */
-  private recent = { byHeight: new Map<number, string>(), byHash: new Map<string, number>() };
-  /** How far below the highest header the recent index keeps (two retarget periods, the image chain's window). */
-  static readonly RECENT_DEPTH = 2 * 2016;
-
-  /** The run `raws` at `at` into the recent index: what it replaces from `at` up dropped first (a reorg), then pruned below the window. // until the host chain answers holds/at (SPEC 5) */
-  private remember(at: number, raws: Uint8Array[]): void {
-    const r = this.recent;
-    for (const [h, hash] of r.byHeight) if (h >= at) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
-    const top = at + raws.length - 1;
-    for (let i = Math.max(0, raws.length - 1 - Router.RECENT_DEPTH); i < raws.length; i++) { const hash = hashOf(raws[i]!); r.byHeight.set(at + i, hash); r.byHash.set(hash, at + i); }
-    for (const [h, hash] of r.byHeight) if (h < top - Router.RECENT_DEPTH) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
-  }
-
-  /** The tracker's `find`: a hash's height from the recent index, else the host chain's tip when it is that hash. // until the host chain answers holds/at (SPEC 5) */
+  /** The tracker's `find` (SPEC 5): a hash's height on the host chain's active line (the kernel's `chain-holds`), or undefined. */
   private async findHeader(hash: string): Promise<number | undefined> {
-    const h = this.recent.byHash.get(hash);
-    if (h !== undefined) return h;
-    const tip = await this.hostTip();
-    return tip?.hash === hash ? tip.height : undefined;
+    const h = this.hostHolders()[0];
+    return h ? await h.holds(hash) : undefined;
   }
 
   /** The host chain's tip (the first host chain this host keeps: hostHolders), with its hash; undefined when empty or none is kept. */
@@ -869,7 +848,6 @@ export class Router {
         for (let i = 0; i < raws.length; i += HEADERS_RUN) tip = await h.headers(raws.slice(i, i + HEADERS_RUN));
         if (raws.length > HEADERS_RUN) this.say("router", `host chain: ${raws.length} headers from ${at} (tip ${tip?.height}, ${Date.now() - t0} ms)`);
       }
-      this.remember(at, raws);
     });
     this.intake = p.catch(() => {});
     return p.then(() => {
@@ -878,7 +856,7 @@ export class Router {
   }
 
   /** #156: the host chains this host keeps once per database (its SQLite one, its RocksDB one, and those its rows name). */
-  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip> }> {
+  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; holds(hash: string): Promise<number | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip> }> {
     const sq = new Set<string>(), rocks = new Set<string>();
     if (this.o.sqliteStore) sq.add(this.o.sqliteStore);
     if (this.o.rocksStore) rocks.add(this.o.rocksStore);
@@ -889,8 +867,8 @@ export class Router {
       if (q) sq.add(q.db);
     }
     return [
-      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws) }; }),
-      ...[...rocks].map((dir) => { const k = this.kernelHost(dir); return { name: dir, tip: () => k.chainTip(), headers: (raws: Uint8Array[]) => k.chainHeaders(raws) }; }),
+      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), holds: (hash: string) => w.chainHolds(hash), headers: (raws: Uint8Array[]) => w.chainHeaders(raws) }; }),
+      ...[...rocks].map((dir) => { const k = this.kernelHost(dir); return { name: dir, tip: () => k.chainTip(), holds: (hash: string) => k.chainHolds(hash), headers: (raws: Uint8Array[]) => k.chainHeaders(raws) }; }),
     ];
   }
 
