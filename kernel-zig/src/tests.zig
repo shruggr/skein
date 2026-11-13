@@ -18,7 +18,6 @@ test {
     _ = @import("index_test.zig");
     _ = @import("objects.zig");
     _ = @import("fuel_test.zig");
-    _ = @import("component_test.zig");
     _ = @import("wasm_fuel.zig");
     _ = @import("wasm_fuel_test.zig");
     _ = @import("dispatch.zig");

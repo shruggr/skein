@@ -1,38 +1,10 @@
-// One instance's kernel as the router holds it (#33): a `skein-kernel serve`
-// process spoken to over its stdin/stdout — length-prefixed dag-cbor frames
-// (kernel-zig/src/ipc.zig). This is the kernel's whole surface:
-//
-//   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
-//                        admit (the one call in that writes: a request as received, #68, a feed's or a
-//                        proof's event) · answer (#66: wait on the thread a request entry launched; its answer once it
-//                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
-//                        over the state, no entry, no writes: host-side reads only) · idle · start · running
-//   the kernel asks      wallet (a BRC-100 wire frame → its answer: the signer, #67; #157: nothing
-//                        else — the in-step authfetch and its `http` frame are gone)
-//   the host chain       headers {raws} · chain-import {set, root} · chain (#156: the header chain the
-//                        host keeps once, in the kernel process — a serve instance's in its own store —
-//                        → {root, height, hash, added?, replaced?} | null)
-//   the kernel tells     emit (#70: a signed message for the host to carry out — {message, body,
-//                        transport, address}, a `local` provider's or the libp2p node's, the answer
-//                        coming back as an entry; #65: a broadcast event, transport `event`) · stop
-//
-// Nothing here keeps an instance's time (#69, #126): a step's deadline and a
-// shell's sleep are `deadline` events the host's waker keeps.
-//
-// `Kernel` offers `store` (get/put/log), `admit`, `answer`, `invoke` (the call),
-// `boxes`, `idle`. Log lines (stderr) go to `log`.
-//
-// Two ways to run kernels (#158): `Kernel` is one `skein-kernel serve`
-// process per instance (a SQLite file); `KernelHost` is the one
-// `skein-kernel host` process of a host whose instances are sets of a RocksDB
-// database (SKEIN_STORE_ROCKSDB), every frame tagged with the instance's
-// handle `h`, and `HostedKernel` its per-instance view with the same surface
-// (`KernelSurface`): hydrate = `open`, stop = `close`. The router holds either.
-// The settled split (2026-10-31): a third, `WasmKernel` (wasm-kernel.ts) — the
-// kernel as a wasm module the host LOADS, one per active instance on a worker
-// thread of this process, over a set of the host's one SQLite database
-// (`sqlite:<path>`); what the npm package runs. These two are the native host,
-// kept for file and RocksDB stores.
+// One instance's kernel as the router holds it (#33, #158): the frames of the host's one
+// `skein-kernel host` process (kernel-zig/src/host.zig), length-prefixed dag-cbor
+// (kernel-zig/src/ipc.zig), tagged with the instance's handle `h`. skein next: the
+// one-process-per-instance `serve` mode is gone; `KernelHost` (RocksDB sets) and `WasmKernel`
+// (wasm-kernel.ts: the kernel as a wasm module on a worker thread, over a set of the host's SQLite
+// database — what the npm package runs) are the two ways a host runs kernels. Their surface is
+// `KernelSurface`; the frames are listed in kernel-zig/README.md ("The host surface").
 
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -42,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
-import { parseRocksSpec, refuseLmdb } from "../runtime/index-store.ts";
+import { parseRocksSpec } from "../runtime/index-store.ts";
 import type { Entry, EntryBody } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
@@ -235,93 +207,6 @@ function lines(stream: NodeJS.ReadableStream, each: (line: string) => void): voi
     partial = ls.pop()!;
     for (const l of ls) each(l);
   });
-}
-
-export class Kernel extends KernelSurface {
-  readonly o: KernelOptions;
-  readonly proc: ChildProcess;
-  private nextId = 1;
-  private waiting = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
-  private reader: FrameReader;
-  private wire?: WalletWireProcessor;
-  private done: Promise<void>;
-
-  constructor(o: KernelOptions) {
-    super();
-    this.o = o;
-    if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
-    if (parseRocksSpec(o.db)) throw new Error(`kernel ${o.handle}: a RocksDB set (${o.db}) runs in the host's one kernel process (KernelHost), not in serve`);
-    refuseLmdb(o.db);
-    // A file's kernel gets SKEIN_DB and never a SKEIN_STORE (which serve refuses: LMDB is no longer supported).
-    const env: Record<string, string | undefined> = { ...process.env, ...o.env, SKEIN_HANDLE: `${o.handle}@${o.domain}` };
-    env.SKEIN_DB = o.db; delete env.SKEIN_STORE;
-    this.proc = spawn(o.command ?? KERNEL_BIN, ["serve"], {
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    lines(this.proc.stderr!, (l) => o.log?.(l));
-    this.reader = new FrameReader((f) => void this.onFrame(f));
-    this.proc.stdout!.on("data", (d: Buffer) => this.reader.push(d));
-    this.proc.stdin!.on("error", () => {}); // EPIPE once it is gone
-    this.done = new Promise((resolve) => this.proc.once("close", (code, signal) => {
-      this.gone = true;
-      for (const w of this.waiting.values()) w.reject(new Error(`kernel ${o.handle}: exited (${signal ?? code})`));
-      this.waiting.clear();
-      o.exited?.(code, signal);
-      resolve();
-    }));
-    this.proc.on("error", (e) => o.log?.(`kernel: ${e.message}`));
-  }
-
-  get pid(): number | undefined { return this.proc.pid; }
-
-  // ---------------------------------------------------------------- frames
-
-  private write(v: Frame): void {
-    if (this.gone) throw new Error(`kernel ${this.o.handle}: not running`);
-    this.proc.stdin!.write(frameBytes(v));
-  }
-
-  call(op: string, v?: unknown): Promise<unknown> {
-    const id = this.nextId++;
-    this.busy++;
-    this.last = Date.now();
-    return new Promise<unknown>((resolve, reject) => {
-      this.waiting.set(id, { resolve, reject });
-      try { this.write({ id, op, v }); } catch (e) { this.waiting.delete(id); reject(e as Error); }
-    }).finally(() => { this.busy--; this.last = Date.now(); });
-  }
-
-  private async onFrame(f: Frame): Promise<void> {
-    if (typeof f.re === "number") {
-      const w = this.waiting.get(f.re);
-      if (!w) return;
-      this.waiting.delete(f.re);
-      settle(w, f);
-      return;
-    }
-    // A process that is gone is reported by its exit; any other write failure (a frame that does not encode) is logged.
-    const unwritten = (x: unknown) => { if (!this.gone) this.o.log?.(`the answer to the kernel's ${String(f.op)} frame not written: ${(x as Error).message ?? String(x)}`); };
-    await kernelRequest(this, this.wire, f,
-      (ok) => { try { this.write({ re: f.id, ok }); } catch (x) { unwritten(x); } },
-      (e) => { try { this.write({ re: f.id, error: (e as Error).message ?? String(e) }); } catch (x) { unwritten(x); } });
-  }
-
-  /** Print the ready line (`skein runtime <identity> (<handle>@<domain>) · pid …`). */
-  async running(identity: string): Promise<void> { this.write({ op: "running", v: identity }); }
-
-  /** Close the channel; the kernel stops at EOF. SIGTERM after `killAfterMs`, SIGKILL after twice that. */
-  async stop(killAfterMs = 10_000): Promise<void> {
-    if (this.gone) return;
-    this.proc.stdin!.end();
-    const t = setTimeout(() => this.proc.kill("SIGTERM"), killAfterMs);
-    const k = setTimeout(() => this.proc.kill("SIGKILL"), 2 * killAfterMs);
-    await this.done;
-    clearTimeout(t);
-    clearTimeout(k);
-  }
-
-  exited(): Promise<void> { return this.done; }
 }
 
 function settle(w: { resolve(v: unknown): void; reject(e: Error): void }, f: Frame): void {

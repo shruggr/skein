@@ -60,7 +60,6 @@ const heads = @import("heads.zig");
 const dispatch = @import("dispatch.zig");
 const programs = @import("programs.zig");
 const syscalls = @import("syscalls.zig");
-const shell = @import("shell.zig");
 const program = @import("program.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
@@ -69,7 +68,6 @@ const doorm = @import("door.zig");
 const grants = @import("grants.zig");
 const subsm = @import("subscriptions.zig");
 const onm = @import("on.zig");
-const authfetch = @import("authfetch.zig");
 const bitcoin = @import("bitcoin.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
@@ -130,7 +128,7 @@ pub const Witness = struct {
                 for (calls.array) |c| {
                     if (c != .cid) continue;
                     const av = s.getOpt(a, c.cid);
-                    if (!logm.isSignerCall(av) and !logm.isAuthfetchCall(av)) continue;
+                    if (!logm.isSignerCall(av)) continue;
                     const k = try key(a, Value.cidOf(av.?.get("thread")).?, Value.intOf(av.?.get("step")) orelse -1, Value.intOf(av.?.get("i")) orelse -1);
                     try w.map.put(k, av.?);
                 }
@@ -199,8 +197,6 @@ pub const Runtime = struct {
     draining: bool = false,
     again: bool = false,
 
-    /// Shell threads with a run in progress or parked on a sleep (TS `live`).
-    live: std.StringHashMap(void),
     stepping: std.StringHashMap(void),
     /// A field for the next program step's input (#29): `event` (a plain
     /// entry's record, to the thread awaiting its subject), `message` (#65: a
@@ -223,7 +219,6 @@ pub const Runtime = struct {
             .runner = r,
             .peers = peers,
             .life = std.heap.ArenaAllocator.init(gpa),
-            .live = std.StringHashMap(void).init(gpa),
             .stepping = std.StringHashMap(void).init(gpa),
             .outbox = std.array_list.Managed(Outgoing).init(gpa),
         };
@@ -302,40 +297,8 @@ pub const Runtime = struct {
         rt.say("runtime {s} · log {d} processed{s}", .{ shortKey(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
-        // The messages and events a waiting thread still awaits an answer to go out again (#70,
-        // #126): the host that had them may be gone (a restart), and the waker's timers with it. A
-        // provider that still has one ignores it (hosts dedupe by the CID); an answer is routed once.
-        if (rt.peers.emit != null) for (try rt.store.resting(a)) |t| rt.reoffer(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
         try rt.store.commit();
         rt.flushOutbox();
-    }
-
-    /// Hand the host the messages its thread's tip emitted and still awaits (#70).
-    fn reoffer(rt: *Runtime, a: std.mem.Allocator, origin: []const u8) !void {
-        const tip = (try rt.tipOf(a, origin)) orelse return;
-        if (!stateIs(tip, "waiting")) return;
-        const emitted = tip.get("emitted") orelse return;
-        if (emitted != .array) return;
-        for (emitted.array) |x| {
-            const c = Value.cidOf(x) orelse continue;
-            const m = rt.store.getOpt(a, c) orelse continue;
-            if (isBroadcast(m)) {
-                // #65: a broadcast whose transaction the thread still awaits goes out again (a host
-                // keeps a queue; one that lost it posts it again, and Arcade answers a duplicate).
-                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m, try rt.placeOf(a, c, origin));
-                continue;
-            }
-            // #126: an event the thread awaits (a `deadline`, a `fetch`) goes out again: the host
-            // that kept it may be gone (a restart), its timers with it; a host that still has it
-            // ignores it (hosts dedupe by the record's CID). #119: any other event is handed over
-            // once, after its step's commit; a host that needs it again reads it from the log.
-            if (isEvent(m)) {
-                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m, try rt.placeOf(a, c, origin));
-                continue;
-            }
-            if (!cidIn(tip.get("awaits"), c)) continue;
-            try rt.handOver(a, c, null);
-        }
     }
 
     /// A broadcast event (#65): {kind: "broadcast", tx: <cid>, beef?: bytes}.
@@ -462,7 +425,6 @@ pub const Runtime = struct {
 
     pub fn stop(rt: *Runtime) void {
         rt.stopped = true;
-        rt.live.clearRetainingCapacity();
     }
 
     /// Free the runtime (#158: `skein-kernel host` frees an instance the host closes). Stopped first;
@@ -471,7 +433,6 @@ pub const Runtime = struct {
         rt.stop();
         rt.flushOutbox();
         rt.outbox.deinit();
-        rt.live.deinit();
         rt.stepping.deinit();
         rt.life.deinit();
         rt.gpa.destroy(rt);
@@ -1573,19 +1534,6 @@ pub const Runtime = struct {
         return stateIs(tip, "finished") or stateIs(tip, "errored");
     }
 
-    /// When a wake-me message this instance sent the waker asked to be woken
-    /// (a log before #126, #70: the `deadline` import's then, or a program's
-    /// own emit in box `wake`): the `at` of its body, or null if the record is
-    /// not one. Kept so such a log replays as it was written; since #126 a
-    /// deadline is an event (deadlineEvent) answered by an entry.
-    fn wakeAt(rt: *Runtime, a: std.mem.Allocator, sent: []const u8) ?i128 {
-        const m = rt.store.getOpt(a, sent) orelse return null;
-        if (!logm.isMail(m) or !std.mem.eql(u8, Value.str(m.get("box")).?, "wake")) return null;
-        if (!std.mem.eql(u8, Value.bytesOf(m.get("sender")).?, rt.identity())) return null;
-        const b = rt.store.getOpt(a, Value.cidOf(m.get("body")).?) orelse return null;
-        return Value.intOf(b.get("at"));
-    }
-
     /// A message (#40): a reply to a message this instance sent — the thread
     /// awaiting that record steps with it; else routed by its box's route
     /// (#143: through the gate, its principal the sender — or, for a message
@@ -1612,16 +1560,6 @@ pub const Runtime = struct {
                     const t = try rt.awaiter(a, reply_to, sender);
                     if (t == null) {
                         rt.say("{s}: reply to {s}, which no thread awaits from this sender; recorded, nothing runs", .{ what, short(a, reply_to) });
-                        return;
-                    }
-                    if (rt.wakeAt(a, reply_to)) |due| {
-                        // #70, #69: the waker's answer to a wake-me — a step's deadline, or a shell's sleep, came.
-                        if (at < due) {
-                            rt.say("{s}: a wake for {s} before its time; recorded, nothing runs", .{ what, short(a, t.?) });
-                            return;
-                        }
-                        rt.say("{s}: wake → {s}", .{ what, short(a, t.?) });
-                        try rt.wakeThread(a, t.?, ctx);
                         return;
                     }
                     rt.say("{s}: reply to {s} → {s}", .{ what, short(a, reply_to), short(a, t.?) });
@@ -1963,7 +1901,7 @@ pub const Runtime = struct {
     fn isIntention(rec: Value) bool {
         if (!isEvent(rec)) return false;
         const name = Value.str(rec.get("event")).?;
-        return std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fetch");
+        return std.mem.eql(u8, name, "fetch");
     }
 
     /// The answer to an intention (#126): a signed message (the front door checked its signature)
@@ -1979,6 +1917,7 @@ pub const Runtime = struct {
     /// status, headers, body} | {replyTo, request, error}). Anything else is recorded and runs
     /// nothing.
     fn intentionAnswer(rt: *Runtime, a: std.mem.Allocator, what: []const u8, ctx: Ctx, mc: []const u8, m: Value, body: []const u8, ev: []const u8, rec: Value, sender: []const u8, at: i64) !void {
+        _ = at;
         const bv = rt.store.getOpt(a, body) orelse return;
         if (rt.requestProblem(a, bv.get("request"), ev, sender)) |why| {
             rt.say("{s}: an answer to {s} {s} whose request {s}; recorded, nothing runs", .{ what, Value.str(rec.get("event")).?, short(a, ev), why });
@@ -1996,15 +1935,6 @@ pub const Runtime = struct {
             rt.say("{s}: an answer to {s} {s}, which no thread awaits; recorded, nothing runs", .{ what, Value.str(rec.get("event")).?, short(a, ev) });
             return;
         };
-        if (std.mem.eql(u8, Value.str(rec.get("event")).?, "deadline")) {
-            const due = Value.intOf(rec.get("at")) orelse 0;
-            if (at < due) {
-                rt.say("{s}: a wake for {s} before its time; recorded, nothing runs", .{ what, short(a, th) });
-                return;
-            }
-            rt.say("{s}: wake → {s}", .{ what, short(a, th) });
-            return rt.wakeThread(a, th, ctx);
-        }
         rt.say("{s}: {s} answered → {s}", .{ what, Value.str(rec.get("event")).?, short(a, th) });
         var r = cbor.MapBuilder.init(a);
         try r.put("message", cbor.cidv(mc));
@@ -2069,31 +1999,19 @@ pub const Runtime = struct {
     /// Start a thread that has no updates yet, by its program's kind.
     fn run(rt: *Runtime, a: std.mem.Allocator, origin: []const u8) anyerror!void {
         const o = try rt.getOrNotFound(a, origin);
-        const p: ?Value = rt.programOf(a, o) catch null;
-        if (p != null and hasWasm(p.?)) {
-            const input = Value.cidOf(o.get("input")).?;
-            try rt.step(a, origin, .{ .cid = input, .e = try rt.getOrNotFound(a, input) }, null, null);
-        } else try rt.runShellThread(a, origin, null);
+        const input = Value.cidOf(o.get("input")).?;
+        try rt.step(a, origin, .{ .cid = input, .e = try rt.getOrNotFound(a, input) }, null, null);
     }
 
     fn resume_(rt: *Runtime, a: std.mem.Allocator, origin: []const u8) !void {
         const o = try rt.getOrNotFound(a, origin);
         const tip = try rt.tipOf(a, origin);
         if (tip != null and !stateIs(tip, "running") and !stateIs(tip, "waiting")) return;
-        const p: ?Value = rt.programOf(a, o) catch null;
-        if (p != null and hasWasm(p.?)) {
-            if (tip == null) {
-                rt.say("{s} {s}: stepping (interrupted before its first step ended)", .{ short(a, origin), Value.str(p.?.get("name")).? });
-                try rt.run(a, origin);
-            } else {
-                // A deadline is the runtime's to keep (#126): its event goes out again (reoffer), not a sleeper here.
-                try rt.maybeStep(a, origin, tip.?);
-            }
-            return;
-        }
-        if (rt.live.contains(origin)) return;
-        rt.say("{s} re-executing from its origin", .{short(a, origin)});
-        try rt.runShellThread(a, origin, null);
+        const p = rt.programOf(a, o) catch return;
+        if (tip == null) {
+            rt.say("{s} {s}: stepping (interrupted before its first step ended)", .{ short(a, origin), Value.str(p.get("name")).? });
+            try rt.run(a, origin);
+        } else try rt.maybeStep(a, origin, tip.?);
     }
 
     /// A program thread waiting on launched threads: when all are at rest, step it with their resolution.
@@ -2214,9 +2132,6 @@ pub const Runtime = struct {
         ons: std.array_list.Managed(OnCall),
         /// 0.5.4: the names the step's `on(name)` (no fn) calls rest the thread on, in order, once each.
         rests: std.array_list.Managed([]const u8),
-        /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
-        /// a `deadline` event recorded when the step ends (#126), which the step awaits.
-        until: ?i64 = null,
         /// For in-VM calls (#40): the step's host and services, and how deep the calls nest.
         host: ?*const program.Host = null,
         svc: ?*wasi.Services = null,
@@ -2428,11 +2343,9 @@ pub const Runtime = struct {
             .advance = hAdvance,
             .wallet = hWallet,
             .emit = hEmit,
-            .deadline = hDeadline,
             .call = hCall,
             .callAs = hCallAs,
             .edges = hEdges,
-            .authfetch = hAuthfetch,
             .events = hEvents,
             .on = hOn,
             .off = hOff,
@@ -2479,17 +2392,8 @@ pub const Runtime = struct {
                 try rests.append(r.value());
             }
         }
-        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null or rests.items.len > 0) "waiting" else "finished";
+        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or rests.items.len > 0) "waiting" else "finished";
         const errored = std.mem.eql(u8, state, "errored");
-        if (!errored) if (st.until) |until| {
-            // #126: the deadline is an intention — the event {kind: "event", event: "deadline", at,
-            // thread, step, app?} on the step, which the step awaits. The runtime keeps it as it is
-            // wired (the host's waker: a timer) and answers it with an entry at `at`; that answer
-            // steps the thread with `woke`.
-            const c = try rt.deadlineEvent(a, origin, n, until, st.progs.items[0]);
-            if (!st.emitted_at.contains(c)) try appendEmitted(&st, c);
-            try st.awaits.append(c);
-        };
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
         if (!errored) for (st.moves.items) |m| try head_updates.append(try heads.advanceHead(a, rt.store, m[0], m[1], .{ .thread = origin, .input = ctx.cid, .at = at }));
@@ -2508,7 +2412,6 @@ pub const Runtime = struct {
         try u.put("fuel", cbor.int(meter.used()));
         if (waiting) try u.put("waitingOn", try cbor.cidArray(a, st.launched.items));
         if (waiting) try u.put("awaits", try cbor.cidArray(a, st.awaits.items));
-        if (waiting) if (st.until) |t| try u.put("until", cbor.int(t));
         if (waiting and rests.items.len > 0) try u.put("restsOn", .{ .array = rests.items });
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         if (!errored) try u.put("emitted", try cbor.cidArray(a, st.emitted.items));
@@ -2956,17 +2859,6 @@ pub const Runtime = struct {
         return subsm.problem(a, kind, m, app, ps, now.items);
     }
 
-    /// A `deadline` event (#126): {kind: "event", event: "deadline", at: <ms>, thread: <origin>,
-    /// step: <n>, app?} — the thread's intention to rest until `at` at most, put. `thread` and
-    /// `step` make it this wait's own (two threads resting until the same time rest on two
-    /// records); `app` is the program's app when its record is installed (installedAs), as for any
-    /// event. The step (or the shell's waiting update) lists it and awaits it.
-    fn deadlineEvent(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, step_n: i64, until: i64, run_: Running) ![]const u8 {
-        const install = run_.install orelse try rt.installedAs(a, run_.cid, run_.record);
-        const app: ?[]const u8 = if (install == .none) null else Value.str(run_.record.get("app"));
-        return rt.store.put(a, try logm.deadlineRecord(a, until, origin, step_n, app));
-    }
-
     /// Put an event record and list it on the update (once per step).
     fn listEvent(st: *StepState, imp: *program.Imports, rec: Value) program.Err![]const u8 {
         const c = st.rt.store.put(st.a, rec) catch return imp.failWith("emit: the event is not IPLD, or a store error");
@@ -3022,34 +2914,11 @@ pub const Runtime = struct {
         var d: [32]u8 = undefined;
         h.final(&d);
         try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
-        // #126 step 4: no signature — the transport that carries the message proves its sender (the
-        // recipient's BRC-104 session, libp2p). A log written before signed every emit through the
-        // signer (a recorded call at this place in the step): replay serves that call when the
-        // witness holds it for this very record, and the record is the signed one it was.
-        if (try oldEnvelope(st, rec.value())) |frame| {
-            const res = try signerCall(st, imp, frame);
-            const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the signer did not sign the message");
-            try rec.put("signature", .{ .bytes = sig });
-        }
         st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
         try appendEmitted(st, c);
         return c;
     }
-    /// Replaying a log written before #126 step 4, whose emits were signed (BRC-169's way, [2,
-    /// "metanet handles envelope"], key "send", counterparty anyone, over the record without
-    /// `signature`): the signer frame of that signature when the witness holds it at this place in
-    /// the step for this very record — read, never written; null otherwise (a new log, a live step).
-    fn oldEnvelope(st: *StepState, unsigned: Value) program.Err!?[]const u8 {
-        const wi = st.rt.witness orelse return null;
-        const a = st.a;
-        const w = (wi.find(a, st.origin, st.n, st.calls.items.len) catch return null) orelse return null;
-        if (!logm.isSignerCall(w)) return null;
-        const pre = cbor.encode(a, unsigned) catch return error.OutOfMemory;
-        const frame = signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
-        return if (std.mem.eql(u8, Value.bytesOf(w.get("request")) orelse "", frame)) frame else null;
-    }
-
     /// The edges into a record (#42): the index, plus the links of the bitcoin blocks this step kept so far.
     fn hEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -3126,13 +2995,6 @@ pub const Runtime = struct {
         };
     }
 
-    fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
-        const st = stepOf(imp);
-        if (until <= st.at) return imp.failWith("deadline: not after the step's time");
-        // #126: an intention, recorded when the step ends waiting (stepBody: the `deadline` event).
-        st.until = if (st.until) |t| @min(t, until) else until;
-    }
-
     fn hexOf(a: std.mem.Allocator, b: []const u8) ![]const u8 {
         const out = try a.alloc(u8, b.len * 2);
         const digits = "0123456789abcdef";
@@ -3141,29 +3003,6 @@ pub const Runtime = struct {
             out[2 * i + 1] = digits[x & 15];
         }
         return out;
-    }
-
-    /// `authfetch` (#126) is gone (#157: a step never waits on the outside world; a mailbox
-    /// delivery is the `deliver` intention, the host carrying the BRC-104 exchange). The import
-    /// stays for the modules built against it: a log that made one replays it from its witness —
-    /// the record at (thread, step, i), {kind: "authfetch", thread, step, i, request: bytes,
-    /// answer?: bytes, error?: text, calls}, read, never written (a differing request is a
-    /// divergence). Anywhere else it fails, recording nothing.
-    fn hAuthfetch(imp: *program.Imports, req: []const u8) program.Err![]const u8 {
-        const st = stepOf(imp);
-        const rt = st.rt;
-        const a = st.a;
-        const i = st.calls.items.len;
-        const w: ?Value = if (rt.witness) |wi| (wi.find(a, st.origin, st.n, i) catch null) else null;
-        if (w) |x| {
-            if (!logm.isAuthfetchCall(x) or !std.mem.eql(u8, Value.bytesOf(x.get("request")) orelse "", req)) {
-                return imp.fatalWith(.diverged, try std.fmt.allocPrint(a, "{s} step {d} call {d}: the authfetch request differs from the recorded one", .{ short(a, st.origin), st.n, i }));
-            }
-            try st.calls.append(rt.store.put(a, x) catch return imp.failWith("store error"));
-            if (Value.bytesOf(x.get("answer"))) |ans| return ans;
-            return imp.failWith(Value.str(x.get("error")) orelse "authfetch: failed");
-        }
-        return imp.failWith("authfetch: gone (#157): a step reaches the outside world only by its emits (a mailbox delivery is the `deliver` intention)");
     }
 
     /// A signer call's answer, recorded (#67: the one call a step makes out
@@ -3422,11 +3261,9 @@ pub const Runtime = struct {
         .advance = cAdvance,
         .wallet = cWallet,
         .emit = cEmit,
-        .deadline = cDeadline,
         .call = cCall,
         .callAs = cCallAs,
         .edges = cEdges,
-        .authfetch = cAuthfetch,
         .events = cEvents,
         .on = cOn,
         .off = cOff,
@@ -3481,13 +3318,6 @@ pub const Runtime = struct {
     /// A kernel call sends nothing (#70): only a step emits.
     fn cEmit(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
         return imp.failWith("emit: a kernel call sends nothing (emit from a step)");
-    }
-    fn cDeadline(imp: *program.Imports, _: i64) program.Err!void {
-        return readOnly(imp, "deadline");
-    }
-    /// A kernel call talks to no one (#126): authfetch is a step's, recorded.
-    fn cAuthfetch(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
-        return imp.failWith("authfetch: a kernel call talks to no one (authfetch from a step)");
     }
     /// The edges into a record (#42), as the index holds them (a call keeps nothing).
     fn cEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
@@ -3560,320 +3390,7 @@ pub const Runtime = struct {
         return runCallee(imp, a, cs.rt, loaded, func, cs.host.?, cs.svc.?);
     }
 
-    // ------------------------------------------------------------ the shell
-
-    const ShellRun = struct {
-        rt: *Runtime,
-        a: std.mem.Allocator,
-        origin: []const u8,
-        o: Value,
-        history: []const []const u8,
-        pos: usize = 0,
-        ctx_input: []const u8 = "",
-        ctx_at: i64 = 0,
-        state: []const u8 = "new",
-        clock: syscalls.ThreadClock = .{},
-        random: syscalls.Entropy = undefined,
-        /// Re-executing because of the answer to its sleep (#69, #126): the sleep it reaches is woken by it.
-        wake: ?Ctx = null,
-        diverged: ?[]const u8 = null,
-        /// The fuel of the whole run (every instance of the shell and its
-        /// children); a segment per step: from a `running` update to the
-        /// `waiting`/`finished`/`errored` that ends it (issue #5).
-        meter: engine.Meter,
-
-        fn drive(t: *ShellRun, c: Ctx) void {
-            const s = logm.stampOf(c.e.get("time")).?;
-            t.ctx_input = c.cid;
-            t.ctx_at = s.ms();
-            t.clock.drive(s.ns());
-            t.random = syscalls.Entropy.seeded("", c.cid, t.origin);
-        }
-    };
-
-    /// Start (or re-execute) a shell thread and run it until it rests or ends.
-    fn runShellThread(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, wake: ?Ctx) anyerror!void {
-        if (wake == null and rt.live.contains(origin)) return;
-        const o = try rt.getOrNotFound(a, origin);
-        const history = (try rt.store.chainUpdates(a, origin)) orelse &.{};
-        const ic = Value.cidOf(o.get("input")) orelse return error.NotFound;
-        const launch = try rt.getOrNotFound(a, ic);
-        if (!logm.isLogEntry(launch)) return rt.failf(a, "thread {s}: input is not a log entry", .{short(a, origin)});
-        var t = ShellRun{ .rt = rt, .a = a, .origin = origin, .o = o, .history = history, .wake = wake, .meter = engine.Meter.init(fuelPerStep(rt.genesis)) };
-        t.clock.meter = &t.meter; // one clock for the shell and its children, on their fuel (issue #38)
-        t.drive(.{ .cid = ic, .e = launch });
-        if (!rt.live.contains(origin)) try rt.live.put(try rt.gpa.dupe(u8, origin), {});
-        try rt.shellBody(&t);
-    }
-
-    /// The answer to a thread's deadline came (#126; a log before it: the
-    /// waker's answer to a wake-me, #69): a program thread steps with `woke`;
-    /// a shell is re-executed from its origin and carries on past its sleep
-    /// under the answer's entry.
-    fn wakeThread(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, c: Ctx) !void {
-        const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, origin)) catch null;
-        if (p != null and hasWasm(p.?)) {
-            rt.step_extra = .{ .key = "woke", .value = .{ .bool = true } };
-            return rt.step(a, origin, c, null, null);
-        }
-        try rt.runShellThread(a, origin, c);
-    }
-
-    fn shellBody(rt: *Runtime, t: *ShellRun) anyerror!void {
-        const a = t.a;
-        var ended = false;
-        var parked = false;
-        body: {
-            rt.appendShell(t, "running", null) catch |err| {
-                if (err == error.Diverged) {
-                    rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), t.diverged.? });
-                    break :body;
-                }
-                return err;
-            };
-            const args = t.o.get("args");
-            if (!isShellArgs(args)) {
-                var em = cbor.MapBuilder.init(a);
-                try em.put("kind", cbor.string("cant-do"));
-                try em.put("message", cbor.string("shell wants {cmd, tree, cwd?, env?}"));
-                try rt.appendShellError(t, em.value(), &ended);
-                break :body;
-            }
-            var msg: []const u8 = "";
-            // #83: the thread's program record names the shell's modules (the shell app's install wrote it).
-            const pc = Value.cidOf(t.o.get("program")) orelse return error.NotFound;
-            const prog = rt.store.getOpt(a, pc) orelse {
-                try rt.shellErrored(t, "shell program: not a record in this store", &ended);
-                break :body;
-            };
-            const mods = shell.loadModules(rt.runner, rt.store, rt.life.allocator(), prog, pc, &msg) catch |err| {
-                try rt.shellErrored(t, if (msg.len > 0) msg else @errorName(err), &ended);
-                break :body;
-            };
-            var env = std.array_list.Managed([2][]const u8).init(a);
-            if (args.?.get("env")) |e| for (e.map) |kv| try env.append(.{ kv.key, kv.value.string });
-            var st = wasi.RunState{ .meter = &t.meter };
-            var cwd_msg: []const u8 = "";
-            const r = shell.runShell(a, rt.runner, rt.store, mods, .{
-                .tree = Value.cidOf(args.?.get("tree")).?,
-                .cmd = Value.str(args.?.get("cmd")).?,
-                .cwd = Value.str(args.?.get("cwd")),
-                .env = env.items,
-                .thread = .{ .ctx = t, .clock = shClock, .random = shRandom, .sleep = shSleep },
-            }, &st, &cwd_msg) catch |err| switch (err) {
-                error.Park => {
-                    parked = true;
-                    break :body;
-                },
-                error.CwdNotDir => {
-                    try rt.shellErrored(t, cwd_msg, &ended);
-                    break :body;
-                },
-                error.Fatal => {
-                    if (t.diverged) |d| {
-                        rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), d });
-                        break :body;
-                    }
-                    if (st.fatal) |f| if (f.kind == .fuel) {
-                        var em = cbor.MapBuilder.init(a);
-                        try em.put("kind", cbor.string("cant-do"));
-                        try em.put("message", cbor.string(runner.FUEL_EXHAUSTED));
-                        try rt.appendShellError(t, em.value(), &ended);
-                        break :body;
-                    };
-                    try rt.shellErrored(t, if (st.fatal) |f| f.message else "fatal", &ended);
-                    break :body;
-                },
-                else => return err,
-            };
-            var res = cbor.MapBuilder.init(a);
-            try res.put("exitCode", cbor.int(r.exit_code));
-            try res.put("stdout", .{ .bytes = r.stdout });
-            try res.put("stderr", .{ .bytes = r.stderr });
-            try res.put("tree", cbor.cidv(r.tree));
-            rt.appendShell(t, "finished", res.value()) catch |err| {
-                if (err == error.Diverged) {
-                    rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), t.diverged.? });
-                    break :body;
-                }
-                return err;
-            };
-            ended = true;
-        }
-        if (parked) return; // resting on its deadline (#69, #126): stays live until it is answered
-        if (rt.live.fetchRemove(t.origin)) |kv| rt.gpa.free(kv.key);
-        if (ended and !rt.stopped) rt.rested(a, t.origin) catch |err| rt.say("{s}: {s}", .{ short(a, t.origin), @errorName(err) });
-    }
-
-    fn shellErrored(rt: *Runtime, t: *ShellRun, message: []const u8, ended: *bool) !void {
-        var em = cbor.MapBuilder.init(t.a);
-        try em.put("kind", cbor.string("blew-up"));
-        try em.put("message", cbor.string(message));
-        try rt.appendShellError(t, em.value(), ended);
-    }
-
-    fn appendShellError(rt: *Runtime, t: *ShellRun, err_value: Value, ended: *bool) !void {
-        rt.appendShellFull(t, "errored", null, err_value, null, &.{}) catch |err| {
-            if (err == error.Diverged) {
-                rt.say("{s}: {s}", .{ short(t.a, t.origin), t.diverged.? });
-                return;
-            }
-            return err;
-        };
-        ended.* = true;
-    }
-
-    fn appendShell(rt: *Runtime, t: *ShellRun, state: []const u8, result: ?Value) !void {
-        return rt.appendShellFull(t, state, result, null, null, &.{});
-    }
-
-    /// Append the thread's next update, or verify it against the chain when re-executing.
-    fn appendShellFull(rt: *Runtime, t: *ShellRun, state: []const u8, result: ?Value, err_value: ?Value, until: ?i64, extra: []const cbor.Entry) !void {
-        const a = t.a;
-        var m = cbor.MapBuilder.init(a);
-        try m.put("state", cbor.string(state));
-        // A step ends at waiting/finished/errored: its fuel; `running` starts the next one.
-        if (std.mem.eql(u8, state, "running")) t.meter.segment() else try m.put("fuel", cbor.int(t.meter.used()));
-        if (until) |u| try m.put("until", cbor.int(u));
-        for (extra) |x| try m.put(x.key, x.value);
-        try m.put("result", result);
-        try m.put("error", err_value);
-        try m.put("input", cbor.cidv(t.ctx_input));
-        try m.put("at", cbor.int(t.ctx_at));
-        const from = t.state;
-        t.state = state;
-        if (t.pos < t.history.len) {
-            const existing = t.history[t.pos];
-            // 0.8.0: re-executing, the update is the recorded one, its step number with it.
-            const ev = rt.store.getOpt(a, existing) orelse return error.NotFound;
-            try m.put("ord", ev.get("ord") orelse .null);
-            const prev = if (t.pos == 0) t.origin else t.history[t.pos - 1];
-            var full = cbor.MapBuilder.init(a);
-            for (m.list.items) |e| try full.put(e.key, e.value);
-            try full.put("origin", cbor.cidv(t.origin));
-            try full.put("prev", cbor.cidv(prev));
-            try full.put("seq", cbor.int(t.pos + 1));
-            const want = try cbor.cidOfValue(a, full.value());
-            if (!std.mem.eql(u8, want, existing)) {
-                t.diverged = try std.fmt.allocPrint(a, "update {d} of {s} recomputes to {s}, chain has {s}", .{ t.pos + 1, short(a, t.origin), short(a, want), short(a, existing) });
-                return error.Diverged;
-            }
-            t.pos += 1;
-            return;
-        }
-        // 0.8.0: a shell's update is a thread run's, numbered as a step's: the instance's next.
-        try m.put("ord", cbor.int((try rt.store.lastStep()) + 1));
-        const c = try rt.store.chainAppend(a, t.origin, m.value());
-        const hist = try a.alloc([]const u8, t.history.len + 1);
-        @memcpy(hist[0..t.history.len], t.history);
-        hist[t.history.len] = c;
-        t.history = hist;
-        t.pos += 1;
-        var line = std.array_list.Managed(u8).init(a);
-        const w = &line;
-        try w.print("{s} shell {s} → {s}", .{ short(a, t.origin), from, state });
-        var bits = std.array_list.Managed([]const u8).init(a);
-        if (until) |u| try bits.append(try std.fmt.allocPrint(a, "until {d}", .{u}));
-        if (result) |r| try bits.append(try std.fmt.allocPrint(a, "exit {d}", .{Value.intOf(r.get("exitCode")) orelse 0}));
-        if (err_value) |e| try bits.append(try std.fmt.allocPrint(a, "{s}: {s}", .{ Value.str(e.get("kind")).?, Value.str(e.get("message")).? }));
-        if (bits.items.len > 0) {
-            try w.appendSlice(" (");
-            for (bits.items, 0..) |b, i| try w.print("{s}{s}", .{ if (i > 0) ", " else "", b });
-            try w.appendSlice(")");
-        }
-        rt.say("{s}", .{line.items});
-    }
-
-    fn shClock(ctx: *anyopaque, _: u32) u64 {
-        const t: *ShellRun = @ptrCast(@alignCast(ctx));
-        return @intCast(t.clock.read());
-    }
-    fn shRandom(ctx: *anyopaque, out: []u8) void {
-        const t: *ShellRun = @ptrCast(@alignCast(ctx));
-        t.random.fill(out);
-    }
-
-    /// A sleep: at once if not after "now"; else rest `waiting` until it. The
-    /// wait is an intention (#126, as a step's `deadline` is): the `deadline`
-    /// event, listed on the waiting update (`emitted`) and awaited (`awaits`).
-    /// The runtime's answer at `until` re-executes the shell from its origin,
-    /// and it carries on past the sleep under that answer's entry.
-    /// Re-executing, the waiting update is the one recorded (its event with
-    /// it; a log before #126: its signed wake-me to the waker).
-    fn shSleep(ctx: *anyopaque, clocks: []const wasi.Clock) wasi.Stop!void {
-        const t: *ShellRun = @ptrCast(@alignCast(ctx));
-        const rt = t.rt;
-        const now = t.clock.peek();
-        var deadline: ?i128 = null;
-        for (clocks) |c| {
-            const d: i128 = if (c.absolute) c.timeout else now + c.timeout;
-            if (deadline == null or d < deadline.?) deadline = d;
-        }
-        if (deadline == null or deadline.? <= now) return;
-        const until: i64 = @intCast(@divFloor(deadline.? + 999_999, 1_000_000));
-        var sent: ?[]const u8 = null;
-        if (t.pos < t.history.len) {
-            // Re-executing: the waiting update is recorded, and its event (or wake-me) with it.
-            const u = (rt.store.get(t.a, t.history[t.pos]) catch null) orelse return shStop(t, error.NotFound);
-            var kept: [3]cbor.Entry = undefined;
-            var k: usize = 0;
-            for ([_][]const u8{ "calls", "emitted", "awaits" }) |name| if (u.get(name)) |v| {
-                kept[k] = .{ .key = name, .value = v };
-                k += 1;
-            };
-            rt.appendShellFull(t, "waiting", null, null, until, kept[0..k]) catch |err| return shStop(t, err);
-        } else {
-            // #126: the sleep is an intention, the `deadline` event, listed and awaited.
-            const pc = Value.cidOf(t.o.get("program")) orelse return shStop(t, error.NotFound);
-            const prog = rt.store.getOpt(t.a, pc) orelse return shStop(t, error.NotFound);
-            const ev = rt.deadlineEvent(t.a, t.origin, @intCast(t.pos + 1), until, .{ .record = prog, .cid = pc }) catch |err| return shStop(t, err);
-            const extra = [_]cbor.Entry{
-                .{ .key = "emitted", .value = (cbor.cidArray(t.a, &.{ev}) catch return error.OutOfMemory).? },
-                .{ .key = "awaits", .value = (cbor.cidArray(t.a, &.{ev}) catch return error.OutOfMemory).? },
-            };
-            rt.appendShellFull(t, "waiting", null, null, until, &extra) catch |err| return shStop(t, err);
-            sent = ev;
-        }
-        // Re-executing: the chain may already record the wake.
-        if (t.pos < t.history.len) {
-            const u = (rt.store.get(t.a, t.history[t.pos]) catch null) orelse return shStop(t, error.NotFound);
-            const ic = Value.cidOf(u.get("input")).?;
-            const e = (rt.store.get(t.a, ic) catch null) orelse return shStop(t, error.NotFound);
-            t.drive(.{ .cid = ic, .e = e });
-            rt.appendShell(t, "running", null) catch |err| return shStop(t, err);
-            return;
-        }
-        if (t.wake) |w| {
-            // This run is the waker's answer's: carry on past the sleep under it.
-            t.wake = null;
-            t.drive(w);
-            rt.appendShell(t, "running", null) catch |err| return shStop(t, err);
-            return;
-        }
-        // Resting on its deadline: the event goes to the host once this is committed (a start hands it over again).
-        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m, rt.placeOf(t.a, c, t.origin) catch |err| return shStop(t, err)) catch |err| return shStop(t, err);
-        return error.Park;
-    }
-
-    fn shStop(t: *ShellRun, err: anyerror) wasi.Stop {
-        if (err == error.OutOfMemory) return error.OutOfMemory;
-        if (err == error.Diverged) return error.Fatal; // t.diverged holds the message
-        t.diverged = null;
-        return error.Fatal;
-    }
 };
-
-fn isShellArgs(x: ?Value) bool {
-    const a = x orelse return false;
-    if (a != .map) return false;
-    if (Value.str(a.get("cmd")) == null or Value.cidOf(a.get("tree")) == null) return false;
-    if (a.get("cwd")) |c| if (c != .string) return false;
-    if (a.get("env")) |e| {
-        if (e != .map) return false;
-        for (e.map) |kv| if (kv.value != .string) return false;
-    }
-    return true;
-}
 
 fn hasJsSpace(s: []const u8) bool {
     var it = std.unicode.Utf8View.initUnchecked(s).iterator();

@@ -29,7 +29,6 @@
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
 //   resting   ord ‖ origin               → null                (threads not finished: what start resumes, 0.8.0: in
 //                                                              the order of their tips' step numbers; 0: no update yet)
-//   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
 //   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject;
 //             name ‖ 0 ‖ s ‖ origin                            0.5.4: and threads resting on an event name, `restsOn`,
 //                                                              0.8.0: s the step number of the update that began the rest)
@@ -100,7 +99,7 @@ pub const Backend = struct {
     };
 };
 
-pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleepers, awaits, edges, heads, events, on };
+pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, awaits, edges, heads, events, on };
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
@@ -132,8 +131,13 @@ pub const STATE_KIND = "skein-state";
 /// 11 = the instance's step number (0.8.0): every thread update the scheduler appends carries `ord`, the
 /// next one (the state record's `steps` the greatest so far); an event's place is {s: that ord, i, thread},
 /// the event index keyed name ‖ 0 ‖ s ‖ i ‖ thread; `resting` by the tip's ord, `restsOn` by the ord that
-/// began the rest. A store in format 10 is refused: no migration (re-genesis).
-pub const FORMAT: i64 = 11;
+/// began the rest. A store in format 10 is refused: no migration (re-genesis);
+/// 12 = skein next (2026-11-13): no `deadline` (no `sleepers` map, no `until` on an update), no
+/// address book, no mail; a request entry {request, door: {principal?, scheme?, row, checks,
+/// blocks?, request?}} written at COMMIT, an event entry {event, name, door}; rows {kind, path |
+/// name, role, checks?, recheck?, handler}; the genesis's `routes` and `grants`. A store in format 11
+/// is refused: no migration (re-genesis).
+pub const FORMAT: i64 = 12;
 
 /// Whether a store's open logs its refusal (format_test.zig turns it off: the zig test runner fails
 /// a test that logs an error, and that test asserts the refusal itself).
@@ -143,6 +147,7 @@ pub var log_refusals = true;
 /// since, and what to do (every backend says the same, sqlite_store.zig and rocksdb_store.zig).
 pub fn formatRefusal(loaded: i64) []const u8 {
     return switch (loaded) {
+        11 => "a store written in format 11, before format 12 (skein next: requests checked then committed, rows with roles, no mail, no address book, no deadline): refused, no migration — start a fresh home (re-genesis)",
         10 => "a store written in format 10, before format 11 (skein 0.8.0: events placed by the instance's step number — every thread update carries `ord`, an event's place is {s, i, thread}, its id <s>.<i>.<thread>): refused, no migration — start a fresh home (re-genesis)",
         9 => "a store written before format 10 (issue #146: the BEEF envelope beside the pointer record, not in it; Subject BEEF): refused (start a new store: re-genesis)",
         8 => "a store written before format 9 (issue #143: routes without senders, filters before anything is recorded, roles and the grants head, root instead of an owner): refused (start a new store: re-genesis)",
@@ -573,22 +578,17 @@ pub const Index = struct {
         return std.mem.eql(u8, Value.str(v.get("kind")) orelse return false, k);
     }
 
-    /// The keys a thread holds in resting/sleepers/awaits, given its origin and tip (null: no updates).
-    const ThreadKeys = struct { resting: ?[]u8, sleeper: ?[]u8, awaits: [][]u8 };
+    /// The keys a thread holds in resting/awaits, given its origin and tip (null: no updates).
+    const ThreadKeys = struct { resting: ?[]u8, awaits: [][]u8 };
 
     fn threadKeys(a: std.mem.Allocator, origin: []const u8, o: Value, t: ?Value) !ThreadKeys {
         const at = numOf(o.get("at"));
         const state: ?[]const u8 = if (t) |x| Value.str(x.get("state")) else null;
         const finished = state != null and std.mem.eql(u8, state.?, "finished");
-        var keys = ThreadKeys{ .resting = null, .sleeper = null, .awaits = &.{} };
+        var keys = ThreadKeys{ .resting = null, .awaits = &.{} };
         // 0.8.0: by the tip's step number (what start resumes, in the order they came to rest).
         if (!finished) keys.resting = try cat(a, .{ if (t) |x| ordOf(x) else @as(i64, 0), origin });
         if (t) |x| {
-            if (state != null and std.mem.eql(u8, state.?, "waiting")) {
-                if (x.get("until")) |u| if (u == .int or u == .float) {
-                    keys.sleeper = try cat(a, .{ numOf(u), origin });
-                };
-            }
             var list = std.array_list.Managed([]u8).init(a);
             if (x.get("awaits")) |aw| if (aw == .array) {
                 for (aw.array) |c| if (c == .cid) try list.append(try cat(a, .{ c.cid, at, origin }));
@@ -624,15 +624,11 @@ pub const Index = struct {
     /// A thread's keys from its tip `old` to its tip `new` (null: the origin);
     /// `fresh`: it held none before (registered just now).
     fn moveThread(ix: *Index, a: std.mem.Allocator, origin: []const u8, o: Value, fresh: bool, old: ?Value, new: ?Value) !void {
-        const was: ThreadKeys = if (fresh) .{ .resting = null, .sleeper = null, .awaits = &.{} } else try threadKeys(a, origin, o, old);
+        const was: ThreadKeys = if (fresh) .{ .resting = null, .awaits = &.{} } else try threadKeys(a, origin, o, old);
         const now = try threadKeys(a, origin, o, new);
         if (!optEq(was.resting, now.resting)) {
             if (was.resting) |k| try ix.mapDel(.resting, k);
             if (now.resting) |k| try ix.mapPut(.resting, k, .null);
-        }
-        if (!optEq(was.sleeper, now.sleeper)) {
-            if (was.sleeper) |k| try ix.mapDel(.sleepers, k);
-            if (now.sleeper) |k| try ix.mapPut(.sleepers, k, .null);
         }
         for (was.awaits) |k| if (!inList(now.awaits, k)) try ix.mapDel(.awaits, k);
         for (now.awaits) |k| if (!inList(was.awaits, k)) try ix.mapPut(.awaits, k, .null);

@@ -110,16 +110,14 @@ test "index: maps follow chains; commits write new nodes only; import = incremen
     const aw = try s.awaiting(a, env);
     try std.testing.expectEqual(@as(usize, 1), aw.len);
     try std.testing.expectEqualSlices(u8, t2, aw[0]);
-    try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .sleepers)).len);
     try std.testing.expectEqual(@as(usize, 2), (try s.chainUpdates(a, t1)).?.len);
     try std.testing.expectError(error.NotFound, s.chainAppend(a, env, try upd(a, "x", 1, null, null)));
     try std.testing.expectError(error.NoAt, s.chainAppend(a, t1, .{ .map = &.{} }));
 
     try s.cursorSet(1);
     const puts0 = mem.puts;
-    // a wake: t1 runs on; its sleeper goes, t2's await stays
+    // t1 runs on; t2's await stays
     const u = try s.chainAppend(a, t1, try upd(a, "running", 600, null, null));
-    try std.testing.expectEqual(@as(usize, 0), (try ix.all(a, .sleepers)).len);
     try std.testing.expectEqualSlices(u8, u, (try s.chainTip(a, t1)).?);
     try s.cursorSet(2);
     const written = mem.puts - puts0; // the update, the new nodes, the state record

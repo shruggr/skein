@@ -35,12 +35,12 @@ fn tmpPath(a: std.mem.Allocator, tag: []const u8) ![]u8 {
     return std.fmt.allocPrint(a, "{s}/skein-format-test-{s}-{d}", .{ dir, tag, std.c.getpid() });
 }
 
-test "format 11 (0.8.0): a format-10 store is refused for writing — SQLite and RocksDB alike, nothing rewritten; read-only it is held and says so" {
+test "format 12 (skein next): a format-11 store is refused for writing — SQLite and RocksDB alike, nothing rewritten; read-only it is held and says so" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expect(std.mem.indexOf(u8, index.formatRefusal(10), "format 11") != null);
-    try testing.expect(std.mem.indexOf(u8, index.formatRefusal(10), "fresh home") != null);
+    try testing.expect(std.mem.indexOf(u8, index.formatRefusal(11), "format 12") != null);
+    try testing.expect(std.mem.indexOf(u8, index.formatRefusal(11), "fresh home") != null);
     index.log_refusals = false;
     defer index.log_refusals = true;
 
@@ -53,14 +53,14 @@ test "format 11 (0.8.0): a format-10 store is refused for writing — SQLite and
         const s = try SqliteStore.open(testing.allocator, testing.io, path);
         defer s.close();
         try s.store().commit(); // its own state record first: the close then writes nothing over ours
-        old = try writeOldState(a, s.backend(), 10);
+        old = try writeOldState(a, s.backend(), 11);
     }
     try testing.expectError(error.PredatesFuel, SqliteStore.open(testing.allocator, testing.io, path));
     {
         const s = try SqliteStore.openReadOnly(testing.allocator, path);
         defer s.close();
         try testing.expect(s.predatesFuel());
-        try testing.expectEqual(@as(i64, 10), s.ix.loaded_format);
+        try testing.expectEqual(@as(i64, 11), s.ix.loaded_format);
         try testing.expectEqualSlices(u8, old, (try s.store().state(a)).?);
     }
 
@@ -72,14 +72,14 @@ test "format 11 (0.8.0): a format-10 store is refused for writing — SQLite and
         const s = try RocksStore.open(testing.allocator, testing.io, dir, "ix");
         defer s.close();
         try s.store().commit(); // its own state record first: the close then writes nothing over ours
-        old = try writeOldState(a, s.backend(), 10);
+        old = try writeOldState(a, s.backend(), 11);
     }
     try testing.expectError(error.PredatesFuel, RocksStore.open(testing.allocator, testing.io, dir, "ix"));
     {
         const s = try RocksStore.openReadOnly(testing.allocator, testing.io, dir, "ix");
         defer s.close();
         try testing.expect(s.predatesFuel());
-        try testing.expectEqual(@as(i64, 10), s.ix.loaded_format);
+        try testing.expectEqual(@as(i64, 11), s.ix.loaded_format);
         try testing.expectEqualSlices(u8, old, (try s.store().state(a)).?);
     }
     // A store in this format opens.

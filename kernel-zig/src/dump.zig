@@ -6,7 +6,7 @@
 //   {state, roots: {map: cid|null}, cursor, log,
 //    entries: [[n, cid, unique|null]], chains: [[origin, tip, seq, kind|null]],
 //    updates: [[origin, seq, cid, fuel|null]], threads: [origin] (at, origin),
-//    resting: [origin] (0.8.0: the tip's step number, origin), sleepers: [[until, origin]],
+//    resting: [origin] (0.8.0: the tip's step number, origin),
 //    awaits: [[envelope, origin]], edges: [[from, seq, ord, to, rel, locator|null]],
 //    heads: [[name, tree, owner]], events: [[name, s, i, thread, record]] (0.5.0; 0.8.0: the place {s, i, thread}), fuel: {total, threads: [[origin, fuel, steps]]}
 //    (issue #5: each update's `fuel`, summed per thread in thread order),
@@ -155,15 +155,6 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
             try w.sep(i);
             try w.cid(kv.key[8..]);
         }
-    }
-    try w.raw("],\"sleepers\":[");
-    for (try ix.all(a, .sleepers), 0..) |kv, i| {
-        try w.sep(i);
-        try w.raw("[");
-        try w.int(num(kv.key));
-        try w.raw(",");
-        try w.cid(kv.key[8..]);
-        try w.raw("]");
     }
     try w.raw("],\"awaits\":[");
     for (try ix.all(a, .awaits), 0..) |kv, i| {

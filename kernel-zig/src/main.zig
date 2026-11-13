@@ -1,18 +1,16 @@
 // skein-kernel: the kernel in Zig (issue #32).
 //
-//   skein-kernel serve                         the runtime process the router spawns (serve.zig)
 //   skein-kernel host                          every instance of the host in one process, a worker pool, RocksDB (host.zig, #158)
 //   skein-kernel replay <source.db> <out.db>   replay a store's log into a fresh store, no wallet (replay.zig)
-//   skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (host-go's format) and print results as JSON
 //   skein-kernel dump <store.db>               the derived state read through the index, as JSON (dump.zig)
 //   skein-kernel fuel <store.db> [--since n]   fuel per thread and in total, from the updates (fuel.zig, issue #5)
 //   skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>   a store into a set of a RocksDB database (migrate.zig, #158)
 // A store is a SQLite file's path or rocksdb:<db dir>#<set> (any_store.zig, #158);
-// `serve` takes SKEIN_DB; `host` opens SKEIN_STORE_ROCKSDB (default $SKEIN_HOME/store-rocksdb).
+// `host` opens SKEIN_STORE_ROCKSDB (default $SKEIN_HOME/store-rocksdb). skein next: the one-process-
+// per-instance `serve` mode is gone (the wasm kernel in Node and `host` stay); the shell runner moved
+// to extras/shell-runner/.
 const std = @import("std");
-const shellcmd = @import("cmd_shell.zig");
 const replay = @import("replay.zig");
-const serve = @import("serve.zig");
 
 pub fn main(init: std.process.Init) !void {
     // The debug allocator in Debug builds, libc's malloc otherwise (std's choice when libc is linked).
@@ -21,7 +19,6 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) return usage();
     const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "shell") and (args.len == 3 or args.len == 4)) return shellcmd.main(gpa, io, args[2], if (args.len == 4) args[3] else null);
     if (std.mem.eql(u8, cmd, "replay") and args.len == 4) return std.process.exit(try replay.main(gpa, io, args[2], args[3]));
     if (std.mem.eql(u8, cmd, "dump") and args.len == 3) return std.process.exit(try @import("dump.zig").main(gpa, io, args[2]));
     if (std.mem.eql(u8, cmd, "fuel") and (args.len == 3 or (args.len == 5 and std.mem.eql(u8, args[3], "--since")))) {
@@ -39,7 +36,6 @@ pub fn main(init: std.process.Init) !void {
         if (from == null or into == null or set == null) return usage();
         return std.process.exit(try @import("migrate.zig").main(gpa, io, from.?, into.?, set.?));
     }
-    if (std.mem.eql(u8, cmd, "serve")) return serve.main(gpa, io);
     if (std.mem.eql(u8, cmd, "host") and args.len == 2) return @import("host.zig").main(gpa, io);
     return usage();
 }
@@ -47,14 +43,12 @@ pub fn main(init: std.process.Init) !void {
 fn usage() void {
     std.debug.print(
         \\usage:
-        \\  skein-kernel serve                         the runtime process (the router spawns it)
         \\  skein-kernel host                          every instance of the host, one process (SKEIN_STORE_ROCKSDB, SKEIN_WORKERS)
         \\  skein-kernel replay <source.db> <out.db>   replay a log into a fresh store with no wallet
-        \\  skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (the shell app's shell, or <program>), print results
         \\  skein-kernel dump <store.db>               the derived state (the index) as JSON
         \\  skein-kernel fuel <store.db> [--since n]   fuel per thread and in total (steps from log entry n on)
         \\  skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>   a store into a set of a RocksDB database
-        \\a store is a SQLite file's path or rocksdb:<db dir>#<set>; serve takes SKEIN_DB=<file>
+        \\a store is a SQLite file's path or rocksdb:<db dir>#<set>
         \\
     , .{});
     std.process.exit(2);

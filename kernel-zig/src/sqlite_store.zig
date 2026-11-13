@@ -1,7 +1,7 @@
 // The store as one SQLite file, and only as a key→bytes map (issue #30): the
 // `blocks` table (the same as src/runtime/sqlite.ts's) and a `pointers` table
 // holding one row, the CID of the state record (index.zig). The index — the
-// log by n, chains, thread states, sleepers, awaits, edges, heads — is blocks
+// log by n, chains, thread states, awaits, edges, heads — is blocks
 // like any other record; nothing about it is a schema.
 //
 // A file the kernel before #30 (or the deleted TypeScript runtime) wrote has the log

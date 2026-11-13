@@ -1,13 +1,10 @@
 // Running WASI modules: the engine, compiled modules by CID (cached for the
 // life of the process, as programs.ts loadModule does), and runModule
 // (shell.ts runModule): instantiate, run to exit, map traps as V8 reports them.
-// A module's bytes may be a preview1 core module or a WASI 0.2 component
-// (issue #34, component.zig): the kernel tells them apart by their preamble
-// and runs either, with the same process (tree, stdio, clock, random, skein).
+// A module is a preview1 core module (skein next: the WASI 0.2 component runner moved out of the
+// kernel, to extras/component-runner/).
 const std = @import("std");
 const engine = @import("engine.zig");
-// Components run on wasmtime's component API; the browser build runs preview1 modules only (issue #35).
-const component = if (engine.web) @import("component_web.zig") else @import("component.zig");
 const wasi = @import("wasi.zig");
 const cidm = @import("cid");
 const vfsm = @import("vfs.zig");
@@ -18,11 +15,8 @@ const Store = @import("store.zig").Store;
 pub const FUEL_EXHAUSTED = "fuel exhausted";
 
 pub const Compiled = struct {
-    /// A preview1 core module, or
-    mod: ?*engine.Module = null,
-    /// a WASI 0.2 component (its imports are bound by name in its own linker).
-    comp: ?*component.Component = null,
-    shell_bindings: []wasi.Fn = &.{},
+    /// A preview1 core module.
+    mod: *engine.Module,
     prog_bindings: []wasi.Fn = &.{},
 };
 
@@ -47,23 +41,13 @@ pub const Runner = struct {
     }
 
     pub fn compile(r: *Runner, bytes: []const u8, err_msg: *[]const u8) !*Compiled {
-        if (component.isComponent(bytes)) {
-            const comp = try component.Component.compile(&r.eng, r.gpa, bytes, err_msg);
-            const c = try r.gpa.create(Compiled);
-            c.* = .{ .comp = comp };
-            return c;
-        }
         const mod = try engine.Module.compile(&r.eng, r.gpa, bytes, err_msg);
         const c = try r.gpa.create(Compiled);
         c.* = .{
             .mod = mod,
-            .shell_bindings = try r.gpa.alloc(wasi.Fn, mod.imports.len),
             .prog_bindings = try r.gpa.alloc(wasi.Fn, mod.imports.len),
         };
-        for (mod.imports, 0..) |imp, i| {
-            c.shell_bindings[i] = wasi.bind(imp.module, imp.name, false);
-            c.prog_bindings[i] = wasi.bind(imp.module, imp.name, true);
-        }
+        for (mod.imports, 0..) |imp, i| c.prog_bindings[i] = wasi.bind(imp.module, imp.name, true);
         return c;
     }
 
@@ -114,17 +98,14 @@ pub const Runner = struct {
         return r.keep(k, c);
     }
 
-    /// Instantiate and run a WASI command to exit (shell.ts runModule). Exit
-    /// code, or Fatal/Park with the reason in svc.state.
-    pub fn runModule(r: *Runner, alloc: std.mem.Allocator, c: *Compiled, v: *vfsm.Vfs, args: []const []const u8, env: []const []const u8, stdio: [3]*wasi.Desc, svc: *wasi.Services, prog: ?*program.Imports) wasi.Stop!i32 {
+    /// Instantiate and run a program (a WASI command with the skein imports) to exit. Exit
+    /// code, or Fatal with the reason in svc.state.
+    pub fn runModule(r: *Runner, alloc: std.mem.Allocator, c: *Compiled, v: *vfsm.Vfs, args: []const []const u8, env: []const []const u8, stdio: [3]*wasi.Desc, svc: *wasi.Services, prog: *program.Imports) wasi.Stop!i32 {
         const p = try wasi.Process.init(alloc, v, args, env, stdio, svc);
         p.prog = prog;
-        p.bindings = if (prog != null) c.prog_bindings else c.shell_bindings;
+        p.bindings = c.prog_bindings;
         var em: []const u8 = "";
-        const outcome = (if (c.comp) |comp|
-            comp.run(&r.eng, p, &em, alloc, svc.state.meter)
-        else
-            c.mod.?.run(&r.eng, p, wasi.Process.call, &em, alloc, svc.state.meter)) catch {
+        const outcome = c.mod.run(&r.eng, p, wasi.Process.call, &em, alloc, svc.state.meter) catch {
             return p.fail(em);
         };
         switch (outcome) {
