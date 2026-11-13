@@ -396,8 +396,13 @@ export class Router {
           const st = openStoreFile(storeSpec(row), { readOnly: true });
           try { return await chainHeader(st, height); } finally { st.close(); }
         },
-        // The peer's overlay's read rows, asked over the one request protocol (SPEC 7 [P]): a frame is a request record.
-        request: (h, peer, body) => p2pHost.request(h, peer, REQUEST_PROTOCOL, body),
+        // The peer's overlay's sync read row (/<app>/syncFrame), asked over the one request protocol (SPEC 7 [P]).
+        request: async (h, peer, app, frame) => {
+          const rec: RequestRecord = { kind: "request", payload: { method: "POST", path: syncFramePath(app), query: "", headers: { "content-type": "application/cbor" }, body: frame } };
+          const a = dagCbor.decode(await p2pHost.request(h, peer, REQUEST_PROTOCOL, dagCbor.encode(rec))) as { status?: number; body?: Uint8Array };
+          if (a.status !== 200 || !(a.body instanceof Uint8Array)) throw new Error(`${peer}: ${syncFramePath(app)}: ${String(a.status)}${a.body instanceof Uint8Array ? ` ${new TextDecoder().decode(a.body).slice(0, 200)}` : ""}`);
+          return a.body;
+        },
         beats: (h, liveTopic) => p2pHost.live.live(h, liveTopic),
         self: (h) => p2pHost.peerId(h),
         log: (s, l) => this.say(s, l),
@@ -1852,13 +1857,15 @@ export const CHAIN_EVENT = DEFAULT_BOX;
 /** A merkle proof event's name: the chain app's proof row (SPEC 6: `chain.proof` checks it). */
 export const PROOF_EVENT = "chain/proof";
 /** The code the chain app's proof check refuses an EARLY proof with (its header not held yet): offered again after the next header. */
-export const EARLY_PROOF_CODE = "ERR_HEADER_UNKNOWN";
+export const EARLY_PROOF_CODE = "ERR_EARLY_PROOF";
 /** The chain app's rejected row (SPEC 6 [D]: `/chain/rejected`, role `chain.status`). */
 export const REJECTED_PATH = "/chain/rejected";
 /** The role the host's status service key is granted at birth (imageConfig). */
 export const STATUS_ROLE = "chain.status";
 /** An overlay app's sync row: what the host hands a BEEF it fetched from a peer (SPEC 7: `/overlay/sync`, under the app's name). */
 export const syncPath = (app: string): string => `/${app}/sync`;
+/** An overlay app's sync read row: one sync frame in the body, its answer frame the answer (build C: `/overlay/syncFrame`). */
+export const syncFramePath = (app: string): string => `/${app}/syncFrame`;
 
 const proofKey = (p: Record<string, unknown>): string => `${String(p.txid ?? "")} ${p.path instanceof Uint8Array ? Buffer.from(p.path).toString("hex").slice(0, 64) : ""}`;
 const jsonBytes = (v: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(v));

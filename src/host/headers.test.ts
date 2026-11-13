@@ -7,20 +7,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { CID } from "multiformats/cid";
-import { sendPlan } from "../testapps.ts";
 import { mineHeader, REGTEST_GENESIS } from "./fake-teranode.ts";
 import type { KernelSurface } from "./kernel.ts";
-import { imageTree, testHost, until } from "./testhost.ts";
+import { imageTree, NEXT_APP, testHost, until } from "./testhost.ts";
 import { KERNEL_WASM, WasmHost } from "./wasm-kernel.ts";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const EVENT_DEMO = join(ROOT, "programs/test/event-demo/bin/event-demo.wasm");
-const skip = (!existsSync(KERNEL_WASM) && "the wasm kernel not built") || (!existsSync(EVENT_DEMO) && "no event-demo.wasm");
+const skip = !existsSync(KERNEL_WASM) && "the wasm kernel not built";
 const regtest = { genesis: { defaults: { walletNetwork: "regtest" } } };
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 
@@ -31,20 +27,20 @@ function chainOf(n: number): Uint8Array[] {
   return out;
 }
 
-/** The default image with event-demo taking events in box `chain` and box `x`. */
+/** The default image with the test app, and root's rows taking the events `chain` and `x` (its handler `event`). */
 const chainTree = (dir: string) => imageTree(dir, {
-  bin: { "event-demo.wasm": readFileSync(EVENT_DEMO) },
-  dispatch: [{ transport: "event", address: "chain", program: "event-demo" }, { transport: "event", address: "x", program: "event-demo" }],
+  apps: [NEXT_APP],
+  appRoutes: [{ kind: "event", name: "chain", handler: "next.main.event" }, { kind: "event", name: "x", handler: "next.main.event" }],
 });
 
 /** The instance's log after the genesis: each entry's box (an event's) or "request", and a chain event's height. */
 async function logOf(k: KernelSurface): Promise<Array<{ box: string; height?: number }>> {
   const out: Array<{ box: string; height?: number }> = [];
   for (let c = await k.store.log.tip(); c;) {
-    const e = await k.store.get(c) as unknown as { prev?: CID; genesis?: CID; box?: string; event?: CID };
+    const e = await k.store.get(c) as unknown as { prev?: CID; genesis?: CID; name?: string; event?: CID };
     if (!e.genesis) {
       const ev = e.event ? await k.store.get(e.event) as unknown as { kind?: string; height?: number } : undefined;
-      out.unshift({ box: e.box ?? "request", ...(ev?.kind === "chain" ? { height: ev.height } : {}) });
+      out.unshift({ box: e.name ?? "request", ...(ev?.kind === "chain" ? { height: ev.height } : {}) });
     }
     c = e.prev;
   }
@@ -105,15 +101,14 @@ test("headers (SPEC 8): the first pointer event is in the log inside the load â€
 
 test("headers (SPEC 8): an app taking `chain` installed into a running instance gets the pointer event at once", { skip, timeout: 180_000 }, async (t) => {
   const h = await testHost(t, { sqlite: true, ...regtest });
-  const id = await h.instance("d");
+  await h.instance("d", await imageTree(join(h.home, "img"), { apps: [NEXT_APP] }));
   await h.router.start();
   await h.router.takeHeaders(chainOf(2), 0);
   await h.router.settled();
   const k = (await h.router.hydrate("d")).kernel;
   assert.deepEqual(await chainEvents(k), [], "no row takes `chain` yet");
-  // The owner's dispatch message (`skein routes`): an event route at box `chain`, its handler a program the genesis names.
-  const programs = ((await k.genesis()) as { programs: Record<string, CID> }).programs;
-  await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "d", { prompt: [], recipient: id, messages: [{ box: "dispatch", body: { op: "add", row: { transport: "event", address: "chain", program: programs.mail! } } }] });
+  // Root's row (`skein routes add`): an event row taking `chain`, its handler the installed app's.
+  await h.request("d", "POST", "/kernel/route", { op: "add", row: { kind: "event", name: "chain", handler: "next.main.event" } });
   await until("the install event", async () => { await h.router.settled(); return (await chainEvents(k)).length === 1 || undefined; });
   assert.deepEqual(await chainEvents(k), [{ box: "chain", height: 1 }]);
 });

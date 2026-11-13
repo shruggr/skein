@@ -245,37 +245,28 @@ test("arc: the queue — a broadcast event posted under the host's token, Arcade
   await until("given up", () => gone.b.queued().length === 0 || undefined);
 });
 
-test("arc: with a router — no broadcast route; a host with no Arcade drops a broadcast event; the status provider in the address book", async (t) => {
+test("arc: with a router — no broadcast route; a host with no Arcade drops a broadcast event; the status service's key holds chain.status in every genesis the host writes", async (t) => {
   const db = new HostDb(join(home(t), "host.db"));
   t.after(() => db.close());
   const arcade = await FakeArcade.start();
   t.after(() => arcade.close());
   const lines: string[] = [];
-  const owner = PrivateKey.fromRandom().toPublicKey().toString();
-  const router = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: (s, l) => lines.push(`[${s}] ${l}`) });
+  const router = new Router({ db, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: (s, l) => lines.push(`[${s}] ${l}`) });
   t.after(() => router.stop());
-  assert.deepEqual(router.addressSeed().map((e) => e.address), ["fetch", "waker", "status"], "a new genesis names the status provider (#65): this host has an Arcade");
   const { beef } = await spend(7);
   const post = async (r: Router, path: string) => (await r.dispatch({ method: "POST", url: `http://127.0.0.1:1${path}`, headers: {}, body: beef })).status;
   assert.equal(await post(router, "/arc/v1/tx"), 404, "the broadcast route is gone (#65): a broadcast is an event");
   assert.equal(await post(router, "/arc/callback"), 401, "Arcade's webhook stays (the host token as bearer)");
-  const none = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, log: (s, l) => lines.push(`[${s}] ${l}`) });
+  const none = new Router({ db, walletFor: () => { throw new Error("none"); }, log: (s, l) => lines.push(`[${s}] ${l}`) });
   t.after(() => none.stop());
-  assert.deepEqual(none.addressSeed().map((e) => e.address), ["fetch", "waker"], "no Arcade: no status provider");
   assert.equal(await post(none, "/arc/callback"), 404);
-  none.providers.deliver("x", { message: { kind: "broadcast", tx: txCid("ab".repeat(32)) } as never, body: new Uint8Array(), transport: "event", address: "broadcast" });
+  none.emits.deliver("x", { message: { kind: "broadcast", tx: txCid("ab".repeat(32)) } as never, body: new Uint8Array(), transport: "event", address: "broadcast" });
   assert.ok(lines.some((l) => l === "[x] broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"));
-
-  // #143: a box's route names no sender — the status provider's box is a route like any other, on any host.
   const me = PrivateKey.fromRandom().toPublicKey().toString();
-  const handler = txCid("cd".repeat(32));
-  const specs = [{ address: "status", program: "watcher" }];
-  const programs = { watcher: handler };
-  const boxRows = (s: { dispatch: Array<{ transport: string; address: string; program?: unknown }> }) => s.dispatch.filter((r) => r.transport === "mailbox" && r.program !== "kernel").map((r) => r.address);
-  assert.deepEqual(boxRows(resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
-  assert.deepEqual(boxRows(resolveSystem({ ...none.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
-  assert.throws(() => resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me) }, programs, {}, undefined, [{ address: "status", sender: "$status", program: "watcher" }]), /`sender` is gone \(#143/);
-  assert.throws(() => resolveSystem({ identity: me, root: [owner], handle: "w", domain: "localhost" }, programs, { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
+  const c = router.imageConfig({ handle: "w", domain: "localhost" }, me);
+  assert.deepEqual(c.grants, { "chain.status": [router.statusKey()] }, "the status service's key (its own, not root) holds chain.status");
+  assert.notEqual(router.statusKey(), me);
+  void resolveSystem;
 });
 
 test("arc: into the instances holding the transaction go only proofs (events) and REJECTED (the status provider's messages); every other status is the host's; the holders from the host's map, no kernel asked; a redelivery writes nothing", async (t) => {
@@ -495,8 +486,7 @@ test("arc: a stream frame's answer (Router.heldAnswer, rule 10) — one carrying
   t.after(() => db.close());
   const arcade = await FakeArcade.start();
   t.after(() => arcade.close());
-  const owner = PrivateKey.fromRandom().toPublicKey().toString();
-  const router = new Router({ db, owner, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: () => {} });
+  const router = new Router({ db, walletFor: () => { throw new Error("none"); }, arc: { url: arcade.url, token: TOKEN, events: arcade.eventsUrl }, log: () => {} });
   t.after(() => router.stop());
   const { encode, decode } = await import("@ipld/dag-cbor");
 

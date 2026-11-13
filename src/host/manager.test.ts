@@ -1,152 +1,17 @@
-// The instance manager (#90) with the real kernel, driven by signed messages
-// as the host skein's onboarding app sends them: the host skein is created
-// from the host image (#142: owned by the operator at birth, the onboarding
-// app installed) with the manager in its address book (no other instance's
-// book names it); `create` boots a child from the default image,
-// forwards its owner's own signed claim (#127: no recipient, signed before
-// the child existed) as its first entry after the genesis, then publishes
-// it — a create with no claim, another key's claim or a forged one is
-// refused and nothing is published; a second `create` of the handle is refused (an answer); a
-// message from any other instance is not acted on and not answered; `stop`
-// and `start` are no messages (skein next, SPEC 8): the host's own
-// Router.stopInstance / startInstance (their own test below). #113: `create` records the domain it
-// is given. GET /skeins?key=
-// lists a key's skeins on the host from their grants. (kernel-zig/
-// equiv/host.ts runs the whole flow through the onboarding app.)
+// The host's own actions on its instances (skein next, SPEC 8): start and stop; a create born owned or
+// claimed (SPEC 3: the claim row, kernel.claim) or the router's own label; /.well-known/skein and /skeins.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import type { CID } from "multiformats/cid";
-import { encode } from "../runtime/cid.ts";
-import { RawBox, signClaim, signMessage } from "../client/raw.ts";
+import { signClaim } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
-import { storeSpec } from "../runtime/index-store.ts";
-import { openStoreFile } from "./stores.ts";
-import { KERNEL_BIN } from "./kernel.ts";
-import type { MailRecord } from "./providers.ts";
 import { testHost } from "./testhost.ts";
+import { DoorAnswered } from "./door-answer.ts";
 
-const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
+const skip = false;
 const hex = (b: unknown) => b instanceof Uint8Array ? Buffer.from(b).toString("hex") : String(b);
-
-test("the instance manager: create (the owner's claim forwarded before published), refusals, the host skein's only; stop and start are no messages", { skip, timeout: 180_000 }, async (t) => {
-  const h = await testHost(t);
-  const answers: Array<{ handle: string; box: string; body: Record<string, unknown> }> = [];
-  const append = h.router.providers.o.append;
-  (h.router.providers.o as { append: typeof append }).append = async (handle, pkg) => {
-    answers.push({ handle, box: pkg.message.box, body: dagCbor.decode(pkg.body) as Record<string, unknown> });
-    return await append(handle, pkg);
-  };
-  const manager = h.router.providers.key("manager");
-
-  // The host skein (#142): the host image, its genesis naming the operator, the manager in its book; no claim.
-  await assert.rejects(h.router.createInstance("host", h.ownerId, { host: true, claim: await signClaim(h.owner) }), /born owned/);
-  const host = await h.router.createInstance("host", h.ownerId, { host: true });
-  assert.equal(h.db.hostSkein()?.handle, "host");
-  assert.equal(h.db.get("host")!.status, "enabled");
-  const hostRows = ((await (await h.router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>);
-  assert.deepEqual(hostRows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "the admin routes at birth, no claim route");
-  const hk = (await h.router.hydrate("host")).kernel;
-  const grants = await hk.store.get(await hk.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
-  assert.deepEqual(grants.roles.root!.map((k) => hex(k)), [h.ownerId], "#143: the operator is root, from the genesis");
-  assert.ok(hostRows.some((r) => r.address === "/explore" && r.fn === "explore"), "the explorer route (root's)");
-  assert.deepEqual([...new Set(hostRows.filter((r) => r.app).map((r) => r.app))], ["onboard", "messagebox"], "#152: the onboarding app and the messagebox app, the apps installed at birth");
-  const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
-  assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
-
-  /** A message from `from` (its key) to the instance manager, carried as the kernel hands it over. */
-  const send = async (from: string, box: string, body: Record<string, unknown>) => {
-    const key = h.keyOf(from);
-    const bytes = dagCbor.encode(body);
-    // #126 step 4: an emit is unsigned; the host carries what its own kernel hands it.
-    const message: MailRecord = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(key.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(manager, "hex")), box, body: encode(dagCbor.decode(bytes)).cid, nonce: Uint8Array.from(randomBytes(16)) };
-    const n = answers.length;
-    h.router.providers.deliver(from, { message, body: bytes, transport: "local", address: "manager" });
-    await h.router.providers.idle();
-    await h.router.settled();
-    return answers.slice(n).filter((a) => a.box === box && a.handle === from);
-  };
-
-  const clientKey = PrivateKey.fromRandom(), client = clientKey.toPublicKey().toString();
-  const claim = await signClaim(ephemeralWallet(clientKey));
-  // #127: no claim, another key's claim, a forged claim: refused, nothing published.
-  let a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")) });
-  assert.match(String(a[0]?.body.error), /claim: the owner's signed claim/, "a create with no claim is refused");
-  assert.equal(h.db.get("alice"), undefined);
-  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim: await signClaim(ephemeralWallet(PrivateKey.fromRandom())) });
-  assert.match(String(a[0]?.body.error), /its sender is not the owner/, "another key's claim is refused");
-  const forged = { message: claim.message, body: dagCbor.encode({ messagebox: "https://evil.example" }) };
-  a = await send("host", "create", { handle: "eve", owner: Uint8Array.from(Buffer.from(client, "hex")), claim: forged });
-  assert.match(String(a[0]?.body.error), /the claim .* was refused/, "a claim whose body is not the one it signs is refused at the front door");
-  assert.equal(h.db.get("eve")!.status, "disabled", "and the instance is left unpublished");
-  const eveRows = ((await (await h.router.hydrate("eve")).kernel.dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.program === "kernel");
-  assert.deepEqual(eveRows.map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant", "claim"], "unclaimed: the claim route stands");
-
-  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
-  assert.equal(a.length, 1, "one answer");
-  assert.equal(a[0]!.body.handle, "alice");
-  assert.equal(a[0]!.body.url, h.origin("alice"));
-  assert.equal(hex(a[0]!.body.identity), h.keyOf("alice").toPublicKey().toString(), "the child's identity, derived");
-  const alice = h.db.get("alice")!;
-  assert.equal(alice.status, "enabled", "published");
-  const k = (await h.router.hydrate("alice")).kernel;
-  const rows = (await k.dispatch()).rows as Array<Record<string, unknown>>;
-  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "claimed: the claim route gone");
-  const ag = await k.store.get(await k.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
-  assert.deepEqual(ag.roles.root!.map((x) => hex(x)), [client], "#143: the claim granted root to the client's own key");
-  const first: Array<Record<string, unknown>> = [];
-  const s = openStoreFile(storeSpec(alice), { readOnly: true });
-  try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
-  assert.equal(first[0]!.transport, "local", "the claim is the first entry after the genesis: nothing reached it before");
-  const fwd = await (await h.router.hydrate("alice")).kernel.store.get((first[0] as { request: CID }).request) as { message?: { sender?: unknown; recipient?: unknown; box?: string } };
-  assert.ok(fwd.message?.box === "claim" && hex(fwd.message.sender) === client && fwd.message.recipient === undefined, "the forwarded message is the client's own, naming no recipient (#127)");
-  assert.ok(!(await roles("alice")).includes("manager"), "the child's address book has no instance manager");
-  // #125: an image serves nothing at `/` of its own; the explorer route (kernel.brc104, root's) answers, wanting a session.
-  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 401, "it answers at its origin");
-
-  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
-  assert.match(String(a[0]?.body.error), /handle alice is taken/, "a second create of the handle is refused, as an answer");
-  a = await send("host", "create", { handle: "Bad_Name", owner: Uint8Array.from(Buffer.from(client, "hex")) });
-  assert.match(String(a[0]?.body.error), /hostname label/);
-  a = await send("host", "create", { handle: "carol", owner: "nope" });
-  assert.match(String(a[0]?.body.error), /owner: not an identity key/);
-  a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /this host has the default image/);
-  assert.equal(h.db.get("carol"), undefined);
-  a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
-  assert.match(String(a[0]?.body.error), /domain .*a host name/);
-
-  // #113: the domain asked is the row's.
-  a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test", claim: await signClaim(ephemeralWallet(clientKey)) });
-  assert.equal(h.db.get("dora")!.domain, "skein.test");
-
-  // GET /skeins?key= at the host's origin: the skeins whose `grants` name the key root (#143), from the host.
-  const held = async (key: string) => { const r = await fetch(`${h.base}/skeins?key=${key}`); return { status: r.status, body: await r.json() as Array<{ handle: string; identity: string; url: string }> }; };
-  assert.deepEqual((await held(client)).body, ["alice", "dora"].map((x) => ({ handle: x, identity: h.keyOf(x).toPublicKey().toString(), url: h.origin(x) })), "the client's two claimed skeins");
-  assert.deepEqual((await held(h.ownerId)).body.map((x) => x.handle), ["host"], "the operator's: the host skein");
-  assert.equal((await held("nope")).status, 400);
-
-  // Another instance (its own key, from its own handle) is not acted on, and not answered.
-  await h.instance("other");
-  await h.router.hydrate("other");
-  const lines = h.lines.length;
-  a = await send("other", "create", { handle: "bob", owner: client });
-  assert.equal(a.length, 0, "no answer");
-  assert.equal(h.db.get("bob"), undefined, "nothing created");
-  assert.ok(h.lines.slice(lines).some((l) => /the instance manager takes messages from the host skein only: not acted on/.test(l)));
-
-  // stop and start are the host's own actions now (skein next, SPEC 8): as messages, refused.
-  a = await send("host", "stop", { handle: "alice" });
-  assert.match(String(a[0]?.body.error), /the instance manager takes create: not stop/);
-  assert.equal(h.db.get("alice")!.status, "enabled", "nothing stopped");
-  a = await send("host", "start", { handle: "alice" });
-  assert.match(String(a[0]?.body.error), /the instance manager takes create: not start/);
-  void host;
-});
 
 test("skein next (SPEC 8): Router.stopInstance / startInstance — the host's own actions: unpublished, the kernel stopped, its event streams closed; published again, the topics replaced", { skip, timeout: 120_000 }, async (t) => {
   const h = await testHost(t);
@@ -181,63 +46,66 @@ test("skein next (SPEC 8): Router.stopInstance / startInstance — the host's ow
   await assert.rejects(h.router.startInstance("alice", { topics: ["a", "a"] }), /topics:/);
 });
 
-test("#164: an owned create — an image instance born owned: root its owner's from the genesis, no claim and no claim route; root's admin message runs, another key's does not", { skip, timeout: 120_000 }, async (t) => {
+test("#164: an owned create — born owned: root its owner's from the genesis, no claim and no claim row; root's request runs, another key's is refused with nothing written", { skip, timeout: 120_000 }, async (t) => {
   const h = await testHost(t);
-  const ownerKey = PrivateKey.fromRandom(), owner = ownerKey.toPublicKey().toString();
-  await assert.rejects(h.router.createInstance("tok", owner, { owned: true, claim: await signClaim(ephemeralWallet(ownerKey)) }), /born owned/, "an owned create takes no claim");
+  const owner = h.ownerId;
+  await assert.rejects(h.router.createInstance("tok", owner, { owned: true, claim: await signClaim(h.owner, key0()) }), /born owned/, "an owned create takes no claim");
   await assert.rejects(h.router.createInstance("tok", owner, { owned: true, needsClaim: true }), /born owned/);
   const c = await h.router.createInstance("tok", owner, { owned: true });
-  assert.equal(c.handle, "tok");
   assert.equal(h.db.get("tok")!.status, "enabled", "published");
-  assert.notEqual(h.db.hostSkein()?.handle, "tok", "not the host skein");
   const k = (await h.router.hydrate("tok")).kernel;
-  const g = await k.genesis() as { root?: unknown[]; addressBook?: Array<{ address?: string }> };
-  assert.deepEqual(g.root?.map((x) => hex(x)), [owner], "its genesis names root");
-  assert.ok(!(g.addressBook ?? []).some((e) => e.address === "manager" || e.address === "certifier"), "no instance manager or certifier in its address book");
-  const grants = await k.store.get(await k.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
-  assert.deepEqual(grants.roles.root!.map((x) => hex(x)), [owner], "the owner holds root (the head grants), from the genesis");
-  const rows = (await k.dispatch()).rows as Array<Record<string, unknown>>;
-  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "the admin routes, no claim route");
-  // The log: the genesis, and nothing forwarded (no claim entry).
-  assert.equal(await h.entries("tok"), 1, "no claim entry: the genesis only");
-
-  // A root-gated call (the kernel's `dispatch` operation): another key's message is recorded and does nothing; the owner's runs.
-  const explore = rows.find((r) => r.transport === "http" && r.address === "/explore")!;
-  const send = async (key: PrivateKey) => {
-    const m = await signMessage(ephemeralWallet(key), { recipient: c.identity, box: "dispatch", body: dagCbor.encode({ op: "remove", row: explore }) });
-    await h.router.messageLocal("tok", dagCbor.encode(m.message), m.body);
-    await h.router.settled();
-    await k.idle();
-    return ((await k.dispatch()).rows as Array<Record<string, unknown>>).some((r) => r.transport === "http" && r.address === "/explore");
-  };
-  assert.equal(await send(PrivateKey.fromRandom()), true, "another key's dispatch message: refused by the gate (root's), the route stands");
-  assert.equal(await send(ownerKey), false, "the owner's: it runs, the route removed");
+  const g = await k.genesis() as { grants?: Record<string, unknown[]> };
+  assert.deepEqual(g.grants?.root?.map((x) => hex(x)), [owner], "its genesis grants root");
+  assert.deepEqual(g.grants?.["chain.status"]?.map((x) => hex(x)), [h.router.statusKey()], "and chain.status to the host's status service key");
+  const rows = (await k.routes()).rows as Array<Record<string, unknown>>;
+  assert.deepEqual(rows.map((r) => r.handler), ["kernel.objects", "kernel.head", "kernel.route", "kernel.grant"], "the kernel rows, no claim row");
+  assert.equal(await h.entries("tok"), 1, "the genesis only");
+  // A root request (the kernel's route operation): another key's is refused (nothing written); the owner's runs and returns data.
+  const row = { kind: "request", path: "/x", role: "user", handler: "x.main.f" };
+  const stranger = PrivateKey.fromRandom();
+  await assert.rejects(h.request("tok", "POST", "/kernel/route", { op: "add", row }, stranger), (e) => e instanceof DoorAnswered && e.answer.status === 403, "the gate: root's row");
+  assert.equal(await h.entries("tok"), 1, "nothing written");
+  const r = await h.request("tok", "POST", "/kernel/route", { op: "add", row });
+  assert.deepEqual(dagCbor.decode(r.answer.body), { done: { op: "add", changed: true } }, "a kernel operation returns data");
+  assert.ok(((await k.routes()).rows as Array<Record<string, unknown>>).some((x) => x.path === "/x"));
+  void c;
 });
 
-test("GET /.well-known/skein: an unclaimed image instance answers claimed:false; the first wallet's claim (its own message, box `claim`) makes it root — claimed:true, /skeins?key= lists it; a second claim is refused", { skip, timeout: 120_000 }, async (t) => {
+test("GET /.well-known/skein: an unclaimed image instance answers claimed:false; the first claim (a request to /kernel/claim) makes its sender root — claimed:true, /skeins?key= lists it; a second claim is refused", { skip, timeout: 120_000 }, async (t) => {
   const h = await testHost(t);
   const creator = PrivateKey.fromRandom().toPublicKey().toString();
   const c = await h.router.createInstance("ex", creator, {});
   const card = async (path = `${h.base}/@ex/.well-known/skein`) => { const r = await fetch(path); return { status: r.status, body: await r.json() as Record<string, unknown> }; };
-  assert.deepEqual(await card(), { status: 200, body: { handle: "ex", identity: c.identity, origin: h.origin("ex"), claimed: false } }, "unclaimed: nobody holds root (the creator's key is only the row's)");
-  assert.equal((await card(`${h.base}/@nobody/.well-known/skein`)).status, 404, "no instance: 404");
+  assert.deepEqual(await card(), { status: 200, body: { handle: "ex", identity: c.identity, origin: h.origin("ex"), claimed: false } });
+  assert.equal((await card(`${h.base}/@nobody/.well-known/skein`)).status, 404);
   const held = async (key: string) => (await (await fetch(`${h.base}/skeins?key=${key}`)).json()) as Array<{ handle: string }>;
-  assert.deepEqual(await held(creator), [], "the creator holds nothing");
+  assert.deepEqual(await held(creator), []);
 
   const firstKey = PrivateKey.fromRandom(), first = firstKey.toPublicKey().toString();
-  await new RawBox(ephemeralWallet(firstKey), `${h.base}/@ex`).send(c.identity, "claim", {});
-  await h.router.settled();
-  await (await h.router.hydrate("ex")).kernel.idle();
-  assert.equal((await card()).body.claimed, true, "claimed after the first wallet's claim");
-  assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"], "/skeins?key=<the claimant> lists it");
+  const a = await h.router.messageLocal("ex", await signClaim(ephemeralWallet(firstKey), c.identity));
+  assert.equal(hex((dagCbor.decode(a.answer.body) as { done: { root: Uint8Array } }).done.root), first, "the claim returns its root");
+  assert.equal((await card()).body.claimed, true);
+  assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"]);
+  const k = (await h.router.hydrate("ex")).kernel;
+  assert.ok(!((await k.routes()).rows as Array<Record<string, unknown>>).some((r) => r.handler === "kernel.claim"), "the claim row removed in the same step");
 
   const secondKey = PrivateKey.fromRandom(), second = secondKey.toPublicKey().toString();
-  await new RawBox(ephemeralWallet(secondKey), `${h.base}/@ex`).send(c.identity, "claim", {}).catch(() => undefined);
-  await h.router.settled();
-  await (await h.router.hydrate("ex")).kernel.idle();
-  assert.deepEqual(await held(second), [], "a second claim is refused: root unchanged");
-  assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"]);
+  await assert.rejects(h.router.messageLocal("ex", await signClaim(ephemeralWallet(secondKey), c.identity)), (e) => e instanceof DoorAnswered && e.answer.status === 404, "no claim row: refused at CHECK");
+  assert.deepEqual(await held(second), []);
 });
+
+test("createInstance with a forwarded claim (the owner's signed request): claimed before it is published; another key's claim refused", { skip, timeout: 120_000 }, async (t) => {
+  const h = await testHost(t);
+  // The instance's identity is the signer's (the host derives it): the test host's key for the handle.
+  const id = h.keyOf("bob").toPublicKey().toString();
+  await assert.rejects(h.router.createInstance("bob", h.ownerId, { claim: await signClaim(ephemeralWallet(PrivateKey.fromRandom()), id) }), /its sender is not the owner/);
+  const c = await h.router.createInstance("bob2", h.ownerId, { claim: await signClaim(h.owner, h.keyOf("bob2").toPublicKey().toString()) });
+  assert.equal(h.db.get("bob2")!.status, "enabled");
+  assert.deepEqual((await (await fetch(`${h.base}/skeins?key=${h.ownerId}`)).json() as Array<{ handle: string }>).map((x) => x.handle), ["bob2"]);
+  void c;
+});
+
+const key0 = () => PrivateKey.fromRandom().toPublicKey().toString();
 
 test("skein next (planner's call): createInstance of the router's own first label succeeds for the root instance (Open Exchange's swap at swap.skein.nexus, SKEIN_ROOT_INSTANCE=swap), and is refused for any other", { skip, timeout: 120_000 }, async (t) => {
   const h = await testHost(t);

@@ -25,11 +25,10 @@ const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 async function scratch(t: { after(f: () => unknown): void }) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-close-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
+  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), PATH: process.env.PATH };
   const out: string[] = [], err: string[] = [];
   const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
-  assert.equal(await main(["system", join(home, "system")], env), 0, err.join("\n"));
-  return { home, vars, env, out, err, system: join(home, "system") };
+  return { home, vars, env, out, err, system: join(dirname(fileURLToPath(import.meta.url)), "../../images/default") };
 }
 
 /** Timers, child processes and sockets: what would keep a process alive. */
@@ -69,14 +68,14 @@ test("router.close(): the kernels it hydrated, its servers and timers — once, 
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   t.after(() => db.close());
-  db.add("m", { store: join(home, "m.db") });
+  db.add("m", { store: `sqlite:${join(home, "store.sqlite")}` });
   const key = PrivateKey.fromRandom();
   // One loader (SPEC 8): the store booted from a tree (the default image) before its first hydration.
-  const boot = new Router({ db, walletFor: () => ephemeralWallet(key), owner: PrivateKey.fromRandom().toPublicKey().toString(), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  const boot = new Router({ db, walletFor: () => ephemeralWallet(key), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
   await boot.bootRow("m", await imageSource());
   await boot.close();
   const before = live();
-  const r = new Router({ db, walletFor: () => ephemeralWallet(key), owner: PrivateKey.fromRandom().toPublicKey().toString(), home, idleMs: 60_000, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } } });
+  const r = new Router({ db, walletFor: () => ephemeralWallet(key), home, idleMs: 60_000, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } } });
   await r.listen(0);
   const k = (await r.hydrate("m")).kernel;
   assert.ok(live().length > before.length);

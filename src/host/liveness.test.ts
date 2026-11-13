@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import * as dagCbor from "@ipld/dag-cbor";
 import { PrivateKey } from "@bsv/sdk";
 import { Signer } from "./signer.ts";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "../client/raw.ts";
 import { beaconFrame } from "./p2p.ts";
 import { HostDb } from "./instances.ts";
 import { foldLiveness, livenessEvent, Liveness, type LivenessEvent } from "./liveness.ts";

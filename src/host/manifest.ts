@@ -10,23 +10,19 @@
 //   programs    role → "bin/<x>.wasm" | "bin/<x>.cid" (a file in the tree)
 //   roles       {<role>: "<what it may do>"}: DECLARES the app's role names (granted as
 //               `<app>.<role>`); the rows name who may send (SPEC 3: roles live on the row)
-//   routes[]    the rows the app asks for, each as the kernel takes it (SPEC 3) but relative to the
-//               app:
+//   routes[]    the rows the app asks for, each exactly as the kernel takes it (SPEC 3), under the
+//               app's own name (an app writes only under its own name):
 //                 {kind: "request" | "read", path, prefix?: true, role, checks?, recheck?, handler, …settings}
 //                 {kind: "event", name, checks?, recheck?, handler, …settings}
-//               `path` relative to /<name>/ (a leading "/" too: "/submit" → "/<name>/submit", "/" →
-//               "/<name>/"; a "." or ".." segment, an encoded dot or slash, a backslash, a NUL or a
-//               URL is refused); `name` relative to the app ("" or the app's name → `<name>`, "x" →
-//               `<name>/x`); `role` (request and read rows, required: nothing is open by omission)
-//               "anyone" (no proven sender: a request row naming it names at least one check),
-//               "user" (any proven sender), "root", one of this app's declared roles (→
-//               `<name>.<role>`) or another app's `<app>.<role>`; `checks` / `recheck` function
-//               references as the kernel names them, "<app>.<fn>" (an app with one program) or
-//               "<app>.<role>.<fn>" — this app's or an installed app's (chain.beef, chain.unspent);
-//               `handler` "<role>.<fn>" of one of `programs`, or "<fn>" for an app with one program
-//               (→ "<name>.<role>.<fn>"); a read row has no checks; anything else a handler setting
-//               (the row is handed to the handler as `row`). The same key (a path and prefix, or an
-//               event name) twice is refused.
+//               `path` /<name> or under /<name>/ (a "." or ".." segment, an encoded dot or slash, a
+//               backslash, a NUL or a URL is refused); `name` <name> or under <name>/; `role` (request
+//               and read rows, required: nothing is open by omission) "anyone" (no proven sender: a
+//               request row naming it names at least one check), "user", "root", `<name>.<role>` of a
+//               role this app declares, or another app's `<app>.<role>`; `checks` / `recheck` "<app>.<fn>"
+//               (an app with one program) or "<app>.<role>.<fn>" — this app's or an installed app's
+//               (chain.beef, chain.unspent); `handler` this app's "<name>.<fn>" or "<name>.<role>.<fn>";
+//               a read row has no checks; anything else a handler setting (handed to it as `row`).
+//               The same key (a path and prefix, or an event name) twice is refused.
 //   provides[]  {interface: "<name>/<major>", functions: {<fn>: {writes: bool, args?, answer?}}}
 //   requires[]  "<name>/<major>"
 //   calls       {<callee>: [<name> …] | "*"} (call permissions): each a grant at install
@@ -160,23 +156,23 @@ const NOT_ROW_FIELDS: Record<string, string> = {
   address: "gone (skein next): name `path` (request, read) or `name` (event)",
   filters: "gone (skein next): name `checks` (\"<app>.<fn>\")",
   filter: "gone: name `checks`",
-  program: "name the handler: \"<role>.<fn>\"",
-  fn: "name the handler: \"<role>.<fn>\"",
+  program: "name the handler: \"<app>.<fn>\"",
+  fn: "name the handler: \"<app>.<fn>\"",
   sender: "gone: a row names its `role`",
-  app: "the app is its handler's: set by the install",
+  app: "the app is its handler's",
 };
 
-/**
- * A manifest row as the kernel takes it (the install's): the path under /<app>/ or the name under
- * the app's, the role resolved, the handler "<app>.<role>.<fn>", checks and settings as written.
- */
-export function rowOf(app: string, r: RouteIn, roles: string[], declared: string[]): DispatchRow {
-  const { kind, path, name, prefix, role, checks, recheck, handler, ...settings } = r;
-  const h = handlerOf(handler, roles)!;
-  const row: DispatchRow = kind === "event"
-    ? { kind, name: appName(app, name ?? ""), ...(checks?.length ? { checks } : {}), ...(recheck ? { recheck } : {}), handler: `${app}.${h.role}.${h.fn}`, ...settings }
-    : { kind, path: appPath(app, path ?? "/"), ...(prefix ? { prefix: true } : {}), role: roleOf(app, role, declared)!, ...(checks?.length ? { checks } : {}), ...(recheck ? { recheck } : {}), handler: `${app}.${h.role}.${h.fn}`, ...settings };
-  return row;
+/** A manifest row as the kernel takes it: the row as written (the install hands it over unchanged). */
+export function rowOf(_app: string, r: RouteIn, _roles?: string[], _declared?: string[]): DispatchRow {
+  return { ...r } as DispatchRow;
+}
+
+/** Whether `ref` ("<app>.<fn>" | "<app>.<role>.<fn>") names a program of this app (its roles), when it is this app's. */
+function ownRefProblem(app: string, ref: string, roles: string[]): string | undefined {
+  const parts = ref.split(".");
+  if (parts[0] !== app) return undefined;
+  if (parts.length === 3 ? !roles.includes(parts[1]!) : roles.length !== 1) return `${ref}: not a function of this app's programs (${parts.length === 3 ? `no role ${parts[1]}` : "an app with several programs names <app>.<role>.<fn>"})`;
+  return undefined;
 }
 
 /** Why a manifest row is not one (checked against the programs' roles, the declared roles and the app's name), or undefined. */
@@ -185,26 +181,21 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: string
   for (const [k, why] of Object.entries(NOT_ROW_FIELDS)) if (r[k] !== undefined) return `${k}: ${why}`;
   if (r.kind !== "request" && r.kind !== "read" && r.kind !== "event") return `kind ${JSON.stringify(r.kind)}: want request, read or event`;
   if (r.kind === "event") {
-    if (r.path !== undefined || r.prefix !== undefined || r.role !== undefined) return "an event row names its `name` only: no path, prefix or role (an event has no principal)";
-    try { appName(app, typeof r.name === "string" ? r.name : ""); } catch (e) { return (e as Error).message; }
+    if (typeof r.name !== "string" || (r.name !== app && !r.name.startsWith(`${app}/`))) return `name ${JSON.stringify(r.name)}: an app's event row takes a name under its own (${app} or ${app}/…)`;
+    try { appName(app, r.name === app ? "" : r.name.slice(app.length + 1)); } catch (e) { return (e as Error).message; }
   } else {
-    if (r.name !== undefined) return `a ${r.kind} row names its \`path\`, not a name`;
-    if (typeof r.path !== "string") return `a ${r.kind} row names its path (relative to /${app}/)`;
-    try { appPath(app, r.path); } catch (e) { return (e as Error).message; }
-    if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
-    if (r.role === undefined) return "role: every request and read row names its role (anyone, user, root, or a role the app declares): nothing is open by omission";
-    if (!roleOf(app, r.role, declared)) return `role ${JSON.stringify(r.role)}: anyone, user, root, one of this app's declared roles (${declared.join(", ") || "none"}) or <app>.<role>`;
+    if (typeof r.path !== "string" || (r.path !== `/${app}` && !r.path.startsWith(`/${app}/`))) return `path ${JSON.stringify(r.path)}: an app's row takes a path under its own (/${app} or /${app}/…)`;
+    try { if (appPath(app, r.path.slice(app.length + 1) || "/") !== (r.path === `/${app}` ? `/${app}/` : r.path)) return `path ${JSON.stringify(r.path)}: not in its plain form (no doubled /)`; } catch (e) { return (e as Error).message; }
+    if (typeof r.role === "string" && r.role.startsWith(`${app}.`) && !declared.includes(r.role.slice(app.length + 1))) return `role ${r.role}: not one of this app's declared roles (${declared.join(", ") || "none"})`;
   }
-  if (r.checks !== undefined && (!Array.isArray(r.checks) || !r.checks.every(isFnRef))) return "checks: a list of \"<app>.<fn>\" or \"<app>.<role>.<fn>\"";
-  if (r.recheck !== undefined && !isFnRef(r.recheck)) return "recheck: \"<app>.<fn>\" or \"<app>.<role>.<fn>\"";
-  for (const c of [...((r.checks as string[] | undefined) ?? []), ...(r.recheck ? [r.recheck as string] : [])]) {
-    const parts = c.split(".");
-    if (parts[0] !== app) continue;
-    if (parts.length === 3 ? !roles.includes(parts[1]!) : roles.length !== 1) return `${c}: not a function of this app's programs (${parts.length === 3 ? `no role ${parts[1]}` : "an app with several programs names <app>.<role>.<fn>"})`;
+  if (typeof r.handler !== "string" || r.handler.split(".")[0] !== app || r.handler.startsWith("kernel.")) return `handler ${JSON.stringify(r.handler)}: one of this app's functions ("${app}.<fn>" or "${app}.<role>.<fn>")`;
+  const why = rowProblem(r);
+  if (why) return why;
+  for (const ref of [r.handler as string, ...((r.checks as string[] | undefined) ?? []), ...(r.recheck ? [r.recheck as string] : [])]) {
+    const p = ownRefProblem(app, ref, roles);
+    if (p) return p;
   }
-  if (!handlerOf(r.handler, roles)) return `handler ${JSON.stringify(r.handler)} is not "<role>.<fn>" of a role in programs${roles.length === 1 ? ", or a function of the app's one program" : ""}`;
-  const why = rowProblem(rowOf(app, r as RouteIn, roles, declared));
-  return why;
+  return undefined;
 }
 
 /** Check and normalise a manifest. `has(path)`: whether the tree has a file at the path. */

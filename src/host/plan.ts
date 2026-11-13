@@ -159,11 +159,9 @@ async function fnProblem(ref: string, self: AppRecord, view: InstanceView): Prom
 /** The rows an app record asks for, as the kernel takes them (manifest.ts rowOf); each check must name an installed app's program. */
 export async function wiring(record: AppRecord, view: InstanceView): Promise<RowOp[]> {
   const out: RowOp[] = [];
-  const roles = Object.keys(record.programs);
-  const declared = Object.keys(record.roles ?? {});
   for (const r of record.routes as RouteIn[]) {
-    const row = rowOf(record.name, r, roles, declared);
-    for (const c of [...(row.checks ?? []), ...(row.recheck ? [row.recheck] : [])]) {
+    const row = rowOf(record.name, r);
+    for (const c of [row.handler, ...(row.checks ?? []), ...(row.recheck ? [row.recheck] : [])]) {
       const why = await fnProblem(c, record, view);
       if (why) throw new Error(`row ${rowKey(row)}: ${why}`);
     }

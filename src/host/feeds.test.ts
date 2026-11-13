@@ -15,12 +15,13 @@ test("feeds: Arcade's status record", () => {
   assert.equal(statusOf({ txStatus: "MINED" }), "no txid");
 });
 
-test("feeds (skein next, SPEC 8): an instance declares no header source — a system's etc/config.json `feeds` is refused, a genesis carries none; the session default", async () => {
+test("feeds (skein next, SPEC 8): an instance declares no header source — a system's etc/config.json `feeds` is refused, a genesis carries none; no session default", async () => {
   const { resolveSystem, genesisRecord } = await import("./genesis.ts");
   const k = "02" + "11".repeat(32);
-  const c = { identity: k, root: [k], handle: "w", domain: "localhost" };
-  assert.throws(() => resolveSystem(c, {}, { feeds: [{ kind: "headers", url: "http://ct.test/sse" }] } as never), /`feeds` are gone/);
-  const g = genesisRecord(c, resolveSystem(c, {}));
+  const { checkConfig } = await import("./genesis.ts");
+  const c = { identity: k, handle: "w", domain: "localhost" };
+  assert.throws(() => checkConfig({ feeds: [{ kind: "headers", url: "http://ct.test/sse" }] }), /`feeds` gone/);
+  const g = genesisRecord(c, resolveSystem(c, {}, []));
   assert.equal(g.feeds, undefined);
-  assert.equal((g.defaults as Record<string, string>).sessionTtlMs, "86400000");
+  assert.equal((g.defaults as Record<string, string>).sessionTtlMs, undefined, "no session settings (SPEC 3)");
 });

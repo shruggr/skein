@@ -104,7 +104,6 @@ test("the host's domain (H4): from its origin when no onboarding app names one",
   const router = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://id.example.test", idleMs: 0, ledgerMs: 60_000 });
   t.after(async () => { await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true }); });
   assert.equal(router.domain(), "id.example.test");
-  assert.equal(await router.handleDomain(), "id.example.test", "no host skein: the origin's host name, not localhost");
   assert.equal(hostDomain("http://127.0.0.1:{port}"), "localhost");
   const r = await router.dispatch({ method: "GET", url: "https://id.example.test/.well-known/skein-host", headers: {}, body: new Uint8Array() });
   assert.deepEqual(JSON.parse(new TextDecoder().decode(r.body)), { origin: "https://id.example.test", domain: "id.example.test" });
@@ -147,10 +146,6 @@ test("overlay requests by topic (#137, #161): a token's names to its path-only i
   assert.ok(db.setTopics("other", ["tm_other"]));
   assert.deepEqual(submit("tm_twice"), { handle: "discovery" }, "after other's topics are replaced, tm_twice is discovery's alone");
   assert.deepEqual(submit("tm_other"), { handle: "other" });
-  // The manager's create refuses malformed `topics` before it makes anything.
-  const manage = (router as unknown as { manage: (box: string, b: Record<string, unknown>) => Promise<unknown> }).manage.bind(router);
-  for (const bad of ["tm_color", [""], ["tm_color", "tm_color"], [1]]) {
-    await assert.rejects(manage("create", { handle: "newone", owner: "02" + "1".repeat(64), topics: bad }), /topics:/, JSON.stringify(bad));
-  }
-  assert.equal(db.get("newone"), undefined);
+  // A start refuses malformed `topics` before it changes anything.
+  for (const bad of [[""], ["tm_color", "tm_color"]]) await assert.rejects(router.startInstance("other", { topics: bad }), /topics:/, JSON.stringify(bad));
 });

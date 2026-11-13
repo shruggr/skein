@@ -98,9 +98,8 @@ export interface SyncOptions {
    */
   local(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown>;
   /**
-   * One fetched BEEF submitted to `handle`'s overlay `app` (skein 0.6.1, D10): the submit message
-   * `{fn: "submit", args: {beef, topics: [topic]}}` in `<app>/submit`, signed as the instance itself,
-   * naming the ONE topic it was fetched for (the TaggedBEEF rule). → the front door's verdict.
+   * One fetched BEEF handed to `handle`'s overlay `app`'s sync row (SPEC 7, 8: `/<app>/sync`, plain BEEF,
+   * no signature, no topics: the instance serves what it serves). → the verdict (accept: committed).
    */
   submit(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer>;
   /** Whether `handle`'s chain state holds `txid` (the chain app's `txs`). */
@@ -112,8 +111,11 @@ export interface SyncOptions {
   proof(handle: string, txid: string, path: Uint8Array): Promise<void>;
   /** The chain state's header at `height`: its hash and merkle root (display hex). */
   header(handle: string, height: number): Promise<{ hash: string; root: string } | undefined>;
-  /** One request frame to `peer` on the sync protocol: its answer frame. */
-  request(handle: string, peer: string, body: Uint8Array): Promise<Uint8Array>;
+  /**
+   * One sync frame to `peer`'s overlay `app` (SPEC 7 [P]: the sync protocol's read is a read row,
+   * `/<app>/syncFrame`, asked over the one request protocol): its answer frame.
+   */
+  request(handle: string, peer: string, app: string, frame: Uint8Array): Promise<Uint8Array>;
   /** The live beats on a liveness topic at `handle` (the liveness tool's: the latest per sender). */
   beats(handle: string, liveTopic: string): LiveBeat[];
   /** Our own beacon's body on a liveness topic (what our overlay declared last), if any. */
@@ -298,7 +300,9 @@ export class OverlaySync {
   }
 
   private async ask(handle: string, peer: string, req: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const a = dagCbor.decode(await this.o.request(handle, peer, dagCbor.encode(req))) as Record<string, unknown>;
+    const app = this.o.overlayOf(handle, `${String(req.topic)}${LIVE}`);
+    if (!app) throw new Error(`${String(req.topic)}: no overlay beats on it here`);
+    const a = dagCbor.decode(await this.o.request(handle, peer, app, dagCbor.encode(req))) as Record<string, unknown>;
     if (a.kind === "error") throw new Error(`${peer}: ${String(a.message)}`);
     if (a.kind !== req.kind) throw new Error(`${peer}: answered ${String(a.kind)} to ${String(req.kind)}`);
     return a;

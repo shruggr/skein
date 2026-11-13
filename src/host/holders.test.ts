@@ -27,7 +27,7 @@ async function host(t: { after(f: () => unknown): void }, o: { p2p?: boolean } =
   const home = await fs.mkdtemp(join(tmpdir(), "skein-holders-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
-  for (const h of ["a", "b", "c"]) db.add(h, { store: join(home, `${h}.db`) });
+  for (const h of ["a", "b", "c"]) db.add(h, { store: `sqlite:${join(home, "store.sqlite")}` });
   const signer = new Signer(PrivateKey.fromRandom());
   const r = new Router({
     db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, idleMs: 0, ledgerMs: 60_000,
@@ -38,7 +38,7 @@ async function host(t: { after(f: () => unknown): void }, o: { p2p?: boolean } =
   /** A fact from `handle`, handed over as its kernel's emit notice is (after its step's commit). */
   const fact = (handle: string, rec: Record<string, unknown>) => {
     const message = { kind: "event", ...rec };
-    r.providers.deliver(handle, { message: message as never, body: new Uint8Array(), transport: "event", address: String(rec.event), place: { s: ++s, i: 0, thread: THREAD } });
+    r.emits.deliver(handle, { message: message as never, body: new Uint8Array(), transport: "event", address: String(rec.event), place: { s: ++s, i: 0, thread: THREAD } });
   };
   return { r, db, fact };
 }

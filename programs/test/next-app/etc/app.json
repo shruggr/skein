@@ -2,18 +2,77 @@
   "kind": "app",
   "name": "next",
   "version": "0.1.0",
-  "description": "The host's test app: the kernel's test program (kernel-zig/test/call/next.zig, its next.wasm copied here) as an app — checks pass, reject, store, principal, unspent; a read; a handler that answers, awaits a fact, emits one.",
-  "programs": { "main": "bin/next.wasm" },
-  "roles": { "admin": "the test's own role (granted by root)" },
+  "description": "The host's test app: the kernel's test program (kernel-zig/test/call/next.zig, its next.wasm copied here) as an app \u2014 checks pass, reject, store, principal, unspent; a read; a handler that answers, awaits a fact, emits one.",
+  "programs": {
+    "main": "bin/next.wasm"
+  },
+  "roles": {
+    "admin": "the test's own role (granted by root)"
+  },
   "routes": [
-    { "kind": "request", "path": "/user", "role": "user", "handler": "main.handle" },
-    { "kind": "request", "path": "/root", "role": "root", "handler": "main.handle" },
-    { "kind": "request", "path": "/admin", "role": "admin", "handler": "main.handle" },
-    { "kind": "request", "path": "/proven", "role": "anyone", "checks": ["next.main.pass"], "handler": "main.handle" },
-    { "kind": "request", "path": "/refused", "role": "anyone", "checks": ["next.main.pass", "next.main.reject"], "handler": "main.handle" },
-    { "kind": "request", "path": "/vouched", "role": "anyone", "checks": ["next.main.principal"], "handler": "main.handle" },
-    { "kind": "read", "path": "/read/", "prefix": true, "role": "anyone", "handler": "main.read" },
-    { "kind": "request", "path": "/awaitname", "role": "user", "handler": "main.awaitname" },
-    { "kind": "event", "name": "event", "handler": "main.event" }
+    {
+      "kind": "request",
+      "path": "/next/user",
+      "role": "user",
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "request",
+      "path": "/next/root",
+      "role": "root",
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "request",
+      "path": "/next/admin",
+      "role": "next.admin",
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "request",
+      "path": "/next/proven",
+      "role": "anyone",
+      "checks": [
+        "next.main.pass"
+      ],
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "request",
+      "path": "/next/refused",
+      "role": "anyone",
+      "checks": [
+        "next.main.pass",
+        "next.main.reject"
+      ],
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "request",
+      "path": "/next/vouched",
+      "role": "anyone",
+      "checks": [
+        "next.main.principal"
+      ],
+      "handler": "next.main.handle"
+    },
+    {
+      "kind": "read",
+      "path": "/next/read/",
+      "prefix": true,
+      "role": "anyone",
+      "handler": "next.main.read"
+    },
+    {
+      "kind": "request",
+      "path": "/next/awaitname",
+      "role": "user",
+      "handler": "next.main.awaitname"
+    },
+    {
+      "kind": "event",
+      "name": "next/event",
+      "handler": "next.main.event"
+    }
   ]
 }

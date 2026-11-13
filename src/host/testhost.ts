@@ -53,7 +53,7 @@ export const until = async <T>(what: string, f: () => Promise<T | undefined> | T
 };
 
 /** A host with instances, each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; arcFetch?: Router["o"]["arcFetch"]; teranode?: Router["o"]["teranode"]; headersUrl?: string; rocks?: boolean; libp2p?: boolean; network?: string; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; arcFetch?: Router["o"]["arcFetch"]; teranode?: Router["o"]["teranode"]; headersUrl?: string; rocks?: boolean; sqlite?: boolean; libp2p?: boolean; network?: string; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   const storeOf = () => (o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : `sqlite:${join(home, "store.sqlite")}`);

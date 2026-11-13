@@ -1,6 +1,5 @@
-// The system tree (#4, docs/BOOTSTRAP.md) as the loader reads it, and the
-// genesis it resolves to — without a kernel (kernel-zig/equiv/boot.ts runs
-// the loader end to end through the router).
+// The system tree (#4, docs/BOOTSTRAP.md; skein next, SPEC 3 and 8) as the loader reads it, and the
+// genesis it resolves to — without a kernel where it can; through the router where the kernel matters.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -8,25 +7,25 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
-import { CID } from "multiformats/cid";
+import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import * as dagCbor from "@ipld/dag-cbor";
-import { hostNetwork, main } from "./cli.ts";
-import { HostDb } from "./instances.ts";
-import { KERNEL_BIN } from "./kernel.ts";
-import { Router } from "./router.ts";
-import { Signer } from "./signer.ts";
-import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, isOverlayImage, MemBlocks, mergeImages, namedImageSource, overlayImage, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
+import { hostNetwork, main } from "./cli.ts";
+import { HostDb } from "./instances.ts";
+import { Router } from "./router.ts";
+import { Signer } from "./signer.ts";
+import { checkImageApps, dirSource, imageSource, installAtBirth, isOverlayImage, namedImageSource, readSystemTree } from "./boot.ts";
 import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
-import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
+import { genesisRecord, resolveSystem } from "./genesis.ts";
+import { rowKey } from "../runtime/dispatch.ts";
+import { NEXT_APP } from "./testhost.ts";
 
-const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
 const key = () => PrivateKey.fromRandom().toPublicKey().toString();
+const DEFAULT = join(import.meta.dirname, "../../images/default");
 
 async function tree(t: { after(f: () => unknown): void }, files: Record<string, string | Uint8Array>) {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-system-"));
@@ -38,101 +37,67 @@ async function tree(t: { after(f: () => unknown): void }, files: Record<string, 
   return dirSource(dir);
 }
 
-test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and routes resolve into a genesis — the admin routes first, root named, no sender (#143)", async (t) => {
-  const pinned = CID.parse("bafkreif57vlek2v7lbfa5y43txx7svtlseanithrjxjldqveknwvt3vfwm");
-  const infer = key();
+test("system tree (SPEC 3): etc/routes.json rows and etc/config.json {defaults, grants} resolve into a genesis — identity, handle, domain, routes, grants, defaults, tree; no programs, scopes, roles, peers", async (t) => {
+  const g0 = key();
   const { root, objects } = await tree(t, {
-    "bin/echo.wasm": MODULE,
-    "bin/echo.json": JSON.stringify({ services: ["outcomes"], description: "echoes" }),
-    "bin/run-handler.cid": `${pinned}\n`,
-    "etc/config.json": JSON.stringify({ defaults: { model: "m", fuelPerStep: "5" }, peers: { infer: "$infer" }, collect: ["x"], roles: { root: ["echo.private"] } }),
-    "etc/dispatch.json": JSON.stringify([{ address: "run", program: "run-handler" }, { address: "chat", program: "echo", fn: "chat" }, { transport: "event", address: "feed", program: "echo" }]),
+    "etc/routes.json": JSON.stringify([{ kind: "request", path: "/kernel/route", role: "root", handler: "kernel.route" }, { kind: "request", path: "/kernel/claim", role: "user", handler: "kernel.claim" }]),
+    "etc/config.json": JSON.stringify({ defaults: { fuelPerStep: "5" }, grants: { "x.y": [g0] } }),
     "SOUL.md": "hi\n",
   });
   const s = await readSystemTree(objects, root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["echo", "run-handler"]);
-  assert.ok(s.modules.find((m) => m.name === "echo")!.cid.equals(rawCid(MODULE)));
-  assert.equal(s.modules.find((m) => m.name === "run-handler")!.bytes, undefined, "a .cid module's bytes come from the kernel or the packet");
-  assert.deepEqual(s.programs[0]!.record.services, ["outcomes"]);
-  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
-  const rootKey = key();
-  const c = { identity: key(), root: [rootKey], handle: "a", domain: "localhost", infer, defaults: { fuelPerStep: "9" } };
-  const g = genesisRecord(c, resolveSystem(c, programs, s.config, root, s.dispatch)) as Record<string, any>;
+  const owner = key();
+  const c = { identity: key(), handle: "a", domain: "localhost", grants: { root: [owner] }, defaults: { fuelPerStep: "9" } };
+  const g = genesisRecord(c, resolveSystem(c, s.config, s.routes, root)) as Record<string, any>;
   assert.ok(g.tree.equals(root));
-  assert.deepEqual(g.defaults.model, "m");
   assert.equal(g.defaults.fuelPerStep, "5", "the tree's config wins over the host's defaults");
   const warned: string[] = [];
   const o = { ...c, overrides: { fuelPerStep: "7" }, warn: (l: string) => warned.push(l) };
-  assert.equal((genesisRecord(o, resolveSystem(o, programs, s.config, root, s.dispatch)) as Record<string, any>).defaults.fuelPerStep, "7", "an explicit override wins");
+  assert.equal((genesisRecord(o, resolveSystem(o, s.config, s.routes, root)) as Record<string, any>).defaults.fuelPerStep, "7", "an explicit override wins");
   assert.match(warned[0]!, /replaces the system tree's fuelPerStep = 5/);
-  const fill = { ...c, defaults: { walletNetwork: "test" } };
-  assert.equal((genesisRecord(fill, resolveSystem(fill, programs, s.config, root, s.dispatch)) as Record<string, any>).defaults.walletNetwork, "test", "the host fills what the tree leaves unset");
-  assert.equal(keyHex(g.peers.infer), infer);
-  assert.deepEqual(g.root.map(keyHex), [rootKey], "#143: root, the initial root holders");
-  assert.equal(g.owner, undefined, "#143: no owner");
-  assert.deepEqual(g.roles, { root: ["frontdoor.explore", "echo.private"] }, "the tree's roles beside the stock ones");
-  const boxes = g.dispatch.filter((r: { transport: string; program: unknown }) => r.transport !== "http" && r.program !== "kernel");
-  assert.deepEqual(boxes.map((r: { transport: string; address: string; fn?: string }) => [r.transport, r.address, r.fn]), [["mailbox", "run", undefined], ["mailbox", "chat", "chat"], ["event", "feed", undefined]]);
-  assert.ok(boxes[1].program.equals(programs.echo));
-  assert.ok(g.dispatch.every((r: Record<string, unknown>) => r.sender === undefined), "#143: no route names a sender");
-  assert.deepEqual(g.dispatch.slice(0, 5).map((r: { address: string; program: unknown; fn?: string }) => [r.address, r.program, r.fn]), [["objects", "kernel", "objects"], ["head", "kernel", "head"], ["dispatch", "kernel", "dispatch"], ["peers", "kernel", "peers"], ["grant", "kernel", "grant"]], "the admin routes first (#77, #143: grant among them; root's)");
-  assert.deepEqual(g.scopes.frontdoor, ["frontdoor/"], "the stock scopes");
-  assert.deepEqual(g.collect, ["x"]);
+  assert.deepEqual(Object.keys(g.grants).sort(), ["root", "x.y"]);
+  assert.equal(Buffer.from(g.grants.root[0]).toString("hex"), owner);
+  assert.equal(Buffer.from(g.grants["x.y"][0]).toString("hex"), g0);
+  assert.deepEqual(g.routes.map(rowKey), ["path /kernel/route", "path /kernel/claim"]);
+  for (const k of ["programs", "scopes", "roles", "peers", "names", "collect", "dispatch", "addressBook", "root", "owner"]) assert.equal(g[k], undefined, `no ${k}`);
 });
 
-test("an image (#89): the default image resolves into a genesis with no root, the admin routes, the claim route; the explorer root's", async (t) => {
-  void t;
-  const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
-  const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail"], "0.7.0: the image's programs, no genesis wallet (a wallet is an app)");
-  assert.equal(s.apps, undefined, "#152: no etc/apps.json — the image carries no apps");
-  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
-  const c = { identity: key(), handle: "a", domain: "localhost" };
-  const g = genesisRecord(c, resolveSystem(c, programs, s.config, root, s.dispatch)) as Record<string, any>;
-  assert.equal(g.root, undefined, "no root in it");
-  assert.deepEqual(g.dispatch.filter((r: { program: unknown }) => r.program === "kernel").map((r: { address: string }) => r.address), ["objects", "head", "dispatch", "peers", "grant", "claim"], "the admin routes (root's: none holds it yet) and the claim route");
-  assert.deepEqual(g.names, [], "no names");
-  assert.equal(g.reads, undefined, "#143: no reads");
-  assert.deepEqual(g.roles, { root: ["frontdoor.explore"] }, "the explorer is root's");
-  const explorer = g.dispatch.find((r: { address: string }) => r.address === "/explore");
-  assert.deepEqual([explorer.prefix, explorer.filters, explorer.fn], [true, ["kernel.brc104"], "explore"], "the explorer route: behind kernel.brc104, gated by root");
-  const http = (g.dispatch as Array<{ transport: string; address: string }>).filter((r) => r.transport === "http").map((r) => r.address);
-  assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image's own routes (${http.join(", ")})`);
-  assert.deepEqual(http.sort(), ["/.well-known/auth", "/explore", "/sendMessage"], "the image's http routes: the handshake, the skein's own /sendMessage and the explorer — no /listMessages, /acknowledgeMessage, nothing under /messagebox/ (the messagebox app's)");
-  // The image names the kernel's pinned front door and mail program: the tree's .cid files are the wasm/ modules'.
-  for (const n of ["frontdoor", "mail"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
+test("the default image: the kernel's operation rows (root's) and the claim row (user); no apps", async () => {
+  const src = await imageSource(DEFAULT);
+  const s = await readSystemTree(src.objects, src.root);
+  assert.equal(s.apps, undefined, "no etc/apps.json");
+  assert.deepEqual(s.routes.map((r) => [r.path, r.role, r.handler]), [
+    ["/kernel/objects", "root", "kernel.objects"], ["/kernel/head", "root", "kernel.head"], ["/kernel/route", "root", "kernel.route"],
+    ["/kernel/grant", "root", "kernel.grant"], ["/kernel/claim", "user", "kernel.claim"],
+  ]);
+  assert.equal(isOverlayImage(DEFAULT), false, "etc/routes.json: a complete image");
 });
 
-test("system tree: refusals — no routes, the forms before #77/#115, a sender, a bad .cid, a handler that is no program, $infer on a host without one, $owner", async (t) => {
-  const none = await tree(t, { "bin/x.wasm": MODULE });
-  await assert.rejects(readSystemTree(none.objects, none.root), /dispatch\.json: missing/);
-  const old = await tree(t, { "bin/x.wasm": MODULE, "etc/subscriptions.json": "[]" });
-  await assert.rejects(readSystemTree(old.objects, old.root), /the form before #77\/#115 is gone \(#143/);
-  const bad = await tree(t, { "bin/x.cid": "nope", "etc/dispatch.json": "[]" });
-  await assert.rejects(readSystemTree(bad.objects, bad.root), /not a CID/);
-  const notWasm = await tree(t, { "bin/x.wasm": "text", "etc/dispatch.json": "[]" });
-  await assert.rejects(readSystemTree(notWasm.objects, notWasm.root), /not a wasm module/);
-  const component = Uint8Array.from([0, 0x61, 0x73, 0x6d, 0x0d, 0, 1, 0]);
-  const comp = await tree(t, { "bin/c.wasm": component, "etc/dispatch.json": "[]" });
-  assert.ok((await readSystemTree(comp.objects, comp.root)).modules[0]!.cid.equals(rawCid(component)), "a component in bin/ is a module like any other");
-  const c = { identity: key(), root: [key()], handle: "a", domain: "localhost" };
-  assert.throws(() => resolveSystem(c, {}, {}, undefined, [{ address: "run", sender: "*", program: "x" }]), /`sender` is gone \(#143/);
-  assert.throws(() => resolveSystem(c, {}, {}, undefined, [{ transport: "mailbox", address: "x", filters: ["site.get"] }]), /only an http or libp2p protocol \(\/…\) read route/);
-  assert.throws(() => resolveSystem(c, {}, { peers: { infer: "$infer" } }), /no inference peer/);
-  assert.throws(() => resolveSystem(c, {}, { peers: { me: "$owner" } }), /\$owner: gone \(#143/);
-  // A route to a program the system lacks is left out.
-  assert.equal(resolveSystem(c, {}, {}, undefined, [{ address: "run", program: "missing" }]).dispatch.filter((r) => r.address === "run").length, 0);
+test("system tree: refusals — no rows, bin/ (programs come in apps), the old row form, a bad row, a config field gone", async (t) => {
+  const none = await tree(t, { "SOUL.md": "x" });
+  await assert.rejects(readSystemTree(none.objects, none.root), /routes\.json: missing/);
+  const bin = await tree(t, { "bin/x.wasm": "x", "etc/routes.json": "[]" });
+  await assert.rejects(readSystemTree(bin.objects, bin.root), /bin\/: gone/);
+  const old = await tree(t, { "etc/dispatch.json": "[]", "etc/routes.json": "[]" });
+  await assert.rejects(readSystemTree(old.objects, old.root), /etc\/dispatch\.json: the old form is gone/);
+  const bad = await tree(t, { "etc/routes.json": JSON.stringify([{ kind: "request", path: "/x", handler: "a.f" }]) });
+  await assert.rejects(readSystemTree(bad.objects, bad.root), /role: every request and read row names its role/);
+  for (const k of ["feeds", "peers", "libp2p", "roles", "scopes"]) {
+    const c = await tree(t, { "etc/routes.json": "[]", "etc/config.json": JSON.stringify({ [k]: {} }) });
+    await assert.rejects(readSystemTree(c.objects, c.root), new RegExp(`\`${k}\``), k);
+  }
 });
 
-/** A copy of the test app (programs/test/app-demo) named `name`, at `dir`, with no start or stop message. */
-async function demoApp(dir: string, name: string): Promise<void> {
-  await fs.cp(join(import.meta.dirname, "../../programs/test/app-demo"), dir, { recursive: true, filter: (p) => !/(zig-out|\.zig-cache|zig-pkg)$/.test(p) });
-  const m = JSON.parse(await fs.readFile(join(dir, "etc/app.json"), "utf8")) as Record<string, unknown>;
-  delete m.start; delete m.stop;
+/** A copy of the test app (programs/test/next-app) named `name`, at `dir`. */
+async function nextApp(dir: string, name: string): Promise<void> {
+  await fs.cp(NEXT_APP, dir, { recursive: true });
+  const m = JSON.parse(await fs.readFile(join(dir, "etc/app.json"), "utf8")) as { routes: Array<Record<string, unknown>> } & Record<string, unknown>;
+  // The rows under the app's own name.
+  const re = (x: unknown) => typeof x === "string" ? x.replace(/^(\/?)next([./]|$)/, `$1${name}$2`) : x;
+  m.routes = m.routes.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Array.isArray(v) ? v.map(re) : re(v)])));
   await fs.writeFile(join(dir, "etc/app.json"), `${JSON.stringify({ ...m, name }, null, 2)}\n`);
 }
 
-test("#152: an image's apps — a directory of the image, a directory beside it, a tarball by {url, hash} — each a directory install: its objects put, the app record and routes a message install writes, root's own route", async (t) => {
+test("#152: an image's apps — a directory of the image, one beside it, a tarball by {url, hash} — each installed at birth as the install's requests would: its objects put, its record, rows and head; root's own row", async (t) => {
   const work = await fs.mkdtemp(join(tmpdir(), "skein-img-"));
   const server = createServer(async (req, res) => {
     try { res.end(await fs.readFile(join(work, req.url!.slice(1)))); } catch { res.statusCode = 404; res.end(); }
@@ -141,24 +106,24 @@ test("#152: an image's apps — a directory of the image, a directory beside it,
   t.after(async () => { server.close(); await fs.rm(work, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const image = join(work, "image");
-  await fs.cp(join(import.meta.dirname, "../../images/default"), image, { recursive: true });
-  await demoApp(join(image, "apps/one"), "one");
-  await demoApp(join(work, "two"), "two");
-  await demoApp(join(work, "three"), "three");
+  await fs.cp(DEFAULT, image, { recursive: true });
+  await nextApp(join(image, "apps/one"), "one");
+  await nextApp(join(work, "two"), "two");
+  await nextApp(join(work, "three"), "three");
   assert.equal(spawnSync("tar", ["-czf", join(work, "three.tgz"), "-C", work, "three"]).status, 0);
   const three = (await dirSource(join(work, "three"), { ignore: appIgnore })).root;
   const hash = Buffer.from(three.multihash.digest).toString("hex");
   const tarball = { url: `${base}/three.tgz`, hash };
-  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: ["apps/one", "../two", tarball], routes: [{ transport: "http", address: "/", prefix: true, filters: ["kernel.brc104"], program: "one.demo", fn: "call" }] }));
+  const own = { kind: "request", path: "/ping", role: "user", handler: "one.main.handle" };
+  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: ["apps/one", "../two", tarball], routes: [own] }));
 
   const src = await imageSource(image);
   assert.deepEqual(Object.keys(src.apps ?? {}), ["../two"], "the directory beside the image is read with it");
   const s = await readSystemTree(src.objects, src.root);
-  assert.deepEqual(Object.keys(s.appTrees ?? {}), ["apps/one"], "the directory of the image is in its tree");
-  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
+  assert.deepEqual(Object.keys(s.appTrees ?? {}), ["apps/one"]);
   const identity = key();
   const c = { identity, handle: "a", domain: "localhost" };
-  const sys = resolveSystem(c, programs, s.config, src.root, s.dispatch);
+  const sys = resolveSystem(c, s.config, s.routes, src.root);
   const kept = new Map<string, Uint8Array>();
   const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
   const born = await installAtBirth(target, src.objects, s, sys, c, src.apps);
@@ -166,191 +131,98 @@ test("#152: an image's apps — a directory of the image, a directory beside it,
   assert.deepEqual(Object.keys(born.heads).sort(), ["one/app", "three/app", "two/app"]);
   const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
   assert.ok(get(born.heads["three/app"]!).tree.equals(three), "the tarball's app record names its tree, the hash");
-  for (const n of ["two", "three"]) assert.ok(kept.has(get(born.heads[`${n}/app`]!).tree.toString()), `${n}'s tree is put (it is not in the image's)`);
-  const rows = born.rows as Array<Record<string, any>>;
-  assert.deepEqual(rows.filter((r) => r.app === "three").map(showRow), ["three mailbox three", "three mailbox three/tick", "three http /three/call [kernel.brc104] .call"]);
-  assert.deepEqual(rows.filter((r) => r.app === undefined).map(showRow), ["root http / prefix [kernel.brc104] .call"], "root's own route after the apps");
-  // The same app record as `skein install <dir>` over the instance: the same CID, the same routes byte for byte.
-  const view = { store: { has: async () => false, get: async () => { throw new Error("none"); }, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} } as never, identity, programs: sys.programs, addressBook: [], heads: [], dispatch: [...sys.dispatch] };
-  const viaMessages = await planInstall(await readApp(join(image, "apps/one")), view, { modules: src.objects });
-  assert.ok(viaMessages.recordCid.equals(born.heads["one/app"]!), "the image's one/app is the message install's app record");
-  assert.deepEqual(viaMessages.rows.map((r) => encode(r.row as never).cid.toString()), rows.filter((r) => r.app === "one").map((r) => encode(r as never).cid.toString()), "the same routes, byte for byte");
-  const g = genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>;
-  assert.ok(g.heads["three/app"].equals(born.heads["three/app"]), "the genesis carries the heads");
+  const keys = born.rows.map(rowKey);
+  assert.ok(keys.includes("path /three/user") && keys.includes("event three/event"), keys.join(", "));
+  assert.equal(born.rows.at(-1)!.path, "/ping", "root's own row after the apps");
+  assert.equal(born.rows.find((r) => r.path === "/two/admin")!.role, "two.admin", "a declared role → <app>.<role>");
+  // The same app record as an install by requests over the instance: the same CID, the same rows byte for byte.
+  const view = { store: { has: async () => false, get: async () => { throw new Error("none"); }, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} } as never, identity, heads: [], dispatch: [...sys.routes] };
+  const viaRequests = await planInstall(await readApp(join(image, "apps/one")), view, { modules: src.objects });
+  assert.ok(viaRequests.recordCid.equals(born.heads["one/app"]!));
+  assert.deepEqual(viaRequests.rows.map((r) => encode(r.row as never).cid.toString()), born.rows.filter((r) => r.handler.startsWith("one.") && r.path !== "/ping").map((r) => encode(r as never).cid.toString()));
 
   // Refusals.
   const fresh = { hasBlock: async () => false, putBlock: async () => {} };
   const wrong = { ...s, apps: { install: [{ url: tarball.url, hash: "00".repeat(20) }] } };
-  await assert.rejects(installAtBirth(fresh, src.objects, wrong, sys, c), /three\.tgz: its tree is [0-9a-f]{40}, not 0{40}/, "a tarball whose tree is not its hash");
+  await assert.rejects(installAtBirth(fresh, src.objects, wrong, sys, c), /three\.tgz: its tree is [0-9a-f]{40}, not 0{40}/);
   const gone = { ...s, apps: { install: [{ url: `${base}/none.tgz`, hash }] } };
   await assert.rejects(installAtBirth(fresh, src.objects, gone, sys, c), /none\.tgz: 404/);
-  const scanned = await dirSource(image);
-  await assert.rejects(installAtBirth(fresh, scanned.objects, await readSystemTree(anyOf(scanned.objects, src.objects), scanned.root), sys, c), /\.\.\/two is not a directory of the image/, "a directory beside an image read from its tree alone");
-  await demoApp(join(work, "four"), "four");
-  await fs.writeFile(join(work, "four/etc/app.json"), (await fs.readFile(join(work, "four/etc/app.json"), "utf8")).replace('"name"', '"start": {"body": {"kind": "go"}}, "name"'));
-  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: ["../four"] }));
-  const withStart = await imageSource(image);
-  await assert.rejects(installAtBirth(fresh, withStart.objects, await readSystemTree(withStart.objects, withStart.root), sys, c, withStart.apps), /four: its start message is root's/);
+  const taken = { ...s, apps: { install: ["apps/one"], routes: [{ kind: "request", path: "/one/user", role: "user", handler: "one.main.handle" }] } };
+  await assert.rejects(installAtBirth(fresh, src.objects, taken as never, sys, c, src.apps), /another row has it/);
   assert.throws(() => checkImageApps({ install: [{ url: tarball.url } as never] }), /want \{install:/);
   assert.throws(() => checkImageApps({ install: ["apps/one", "apps/one/"] }), /apps\/one listed twice/);
 });
 
+test("#152: an image directory with no etc/routes.json (an app repository's image/) is merged over the default image; one with it is complete", async (t) => {
+  const work = await fs.mkdtemp(join(tmpdir(), "skein-overlay-"));
+  t.after(() => fs.rm(work, { recursive: true, force: true }));
+  const repo = join(work, "one");
+  await nextApp(repo, "one");
+  const image = join(repo, "image");
+  await fs.mkdir(join(image, "etc"), { recursive: true });
+  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: [".."] }));
+  assert.equal(isOverlayImage(image), true);
+  const src = await namedImageSource({ overlay: image });
+  const s = await readSystemTree(src.objects, src.root);
+  const def = await imageSource(DEFAULT);
+  assert.deepEqual(s.routes, (await readSystemTree(def.objects, def.root)).routes, "the default image's rows, the claim row among them");
+  assert.deepEqual(s.apps, { install: [".."] });
+  const conf = join(work, "conf");
+  await fs.mkdir(join(conf, "etc"), { recursive: true });
+  await fs.writeFile(join(conf, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest" } }));
+  await assert.rejects(namedImageSource({ overlay: conf }), /images: etc\/config\.json is in both images/);
+});
+
 test("SKEIN_NETWORK: the whole host's network, every genesis's defaults.walletNetwork (default main) under a tree's own; any other value refuses to start", async (t) => {
-  assert.equal(hostNetwork({}), "main", "unset: main");
+  assert.equal(hostNetwork({}), "main");
   assert.equal(hostNetwork({ SKEIN_NETWORK: "test" }), "test");
   assert.throws(() => hostNetwork({ SKEIN_NETWORK: "testnet" }), /SKEIN_NETWORK is main, test or regtest/);
   const home = await fs.mkdtemp(join(tmpdir(), "skein-net-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const err: string[] = [];
-  assert.equal(await main(["list"], { vars: { HOME: home, SKEIN_HOME: home, SKEIN_NETWORK: "testnet" }, out: () => {}, err: (l) => err.push(l) }), 2, "skein-host refuses to start");
+  assert.equal(await main(["list"], { vars: { HOME: home, SKEIN_HOME: home, SKEIN_NETWORK: "testnet" }, out: () => {}, err: (l) => err.push(l) }), 2);
   assert.deepEqual(err, ['skein-host: SKEIN_NETWORK is main, test or regtest (default main), not "testnet"']);
-
-  const { root, objects } = await tree(t, { "bin/echo.wasm": MODULE, "etc/dispatch.json": JSON.stringify([{ address: "chat", program: "echo" }]) });
-  const own = await tree(t, { "bin/echo.wasm": MODULE, "etc/config.json": JSON.stringify({ defaults: { walletNetwork: "regtest" } }), "etc/dispatch.json": JSON.stringify([{ address: "chat", program: "echo" }]) });
-  const plain = await readSystemTree(objects, root), pinned = await readSystemTree(own.objects, own.root);
-  const programs = Object.fromEntries(plain.programs.map((p) => [p.name, encode(p.record).cid]));
+  const plain = await tree(t, { "etc/routes.json": "[]" });
+  const own = await tree(t, { "etc/routes.json": "[]", "etc/config.json": JSON.stringify({ defaults: { walletNetwork: "regtest" } }) });
+  const ps = await readSystemTree(plain.objects, plain.root), os = await readSystemTree(own.objects, own.root);
   const db = new HostDb(join(home, "net.db"));
   const signer = new Signer(PrivateKey.fromRandom());
   const routers: Router[] = [];
   t.after(async () => { for (const r of routers) await r.close(); db.close(); });
-  const router = (vars: Record<string, string>) => {
-    const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, network: hostNetwork(vars) });
-    routers.push(r);
-    return r;
-  };
+  const router = (vars: Record<string, string>) => { const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), home, idleMs: 0, network: hostNetwork(vars) }); routers.push(r); return r; };
   const row = { handle: "a", domain: "localhost" };
-  const net = (c: Parameters<typeof resolveSystem>[0], s = plain, r = root) => (genesisRecord(c, resolveSystem(c, programs, s.config, r, s.dispatch)) as Record<string, any>).defaults.walletNetwork;
-  const main_ = router({});
-  assert.equal(net(main_.genesisConfig(row, key())), "main", "unset: main in the genesis record");
+  const net = (c: Parameters<typeof resolveSystem>[0], s = ps) => (genesisRecord(c, resolveSystem(c, s.config, s.routes)) as Record<string, any>).defaults.walletNetwork;
+  assert.equal(net(router({}).imageConfig(row, key())), "main");
   const test_ = router({ SKEIN_NETWORK: "test" });
-  assert.equal(net(test_.genesisConfig(row, key())), "test", "an agent's genesis");
-  assert.equal(net(test_.imageConfig(row, key())), "test", "an image's genesis (the host skein, an instance the manager makes)");
-  assert.equal(net(test_.imageConfig(row, key()), pinned, own.root), "regtest", "a tree's defaults.walletNetwork wins over the host's network");
-  const warned: string[] = [];
-  assert.equal(net({ ...test_.imageConfig(row, key()), overrides: { walletNetwork: "main" }, warn: (l) => warned.push(l) }, pinned, own.root), "main", "an explicit override wins over the tree");
-  assert.match(warned[0]!, /replaces the system tree's walletNetwork = regtest/);
+  assert.equal(net(test_.imageConfig(row, key())), "test");
+  assert.equal(net(test_.imageConfig(row, key()), os), "regtest", "a tree's defaults.walletNetwork wins over the host's network");
+  // The host's grants: its status service key holds chain.status; an owner at birth holds root.
+  const c = test_.imageConfig(row, key(), key());
+  assert.deepEqual(Object.keys(c.grants!).sort(), ["chain.status", "root"]);
+  assert.equal(c.grants!["chain.status"]![0], test_.statusKey());
 });
 
-test("#142, #152: the host image (images/host over images/default) names skein-onboard and skein-messagebox by tarball, and nothing else", async () => {
-  const base = await imageSource(join(import.meta.dirname, "../../images/default"));
-  const own = await imageSource(join(import.meta.dirname, "../../images/host"));
-  const merged = new MemBlocks();
-  const src = anyOf(merged, base.objects, own.objects);
-  const s = await readSystemTree(src, await mergeImages(src, base.root, own.root, merged));
-  assert.deepEqual(s.apps?.install, [
-    { url: "https://github.com/shruggr/skein-onboard/archive/refs/tags/v0.5.0.tar.gz", hash: "7f0c8010df4b57f319689f44d6b8b7f0cc23627c" },
-    { url: "https://github.com/shruggr/skein-messagebox/archive/refs/tags/v0.1.0.tar.gz", hash: "a309121acb9a050a0d7c61ab7d65df24f2d1ab26" },
-  ]);
-  assert.equal(s.apps?.routes, undefined, "no root route");
-});
-
-test("#152: an image directory with no bin/ (an app repository's image/, etc/apps.json alone) is merged over the default image, as the host image is; one with bin/ is complete; the merge's refusals stand", async (t) => {
-  const work = await fs.mkdtemp(join(tmpdir(), "skein-overlay-"));
-  t.after(() => fs.rm(work, { recursive: true, force: true }));
-  const DEFAULT = join(import.meta.dirname, "../../images/default");
-  const route = { transport: "http", address: "/", prefix: true, filters: ["kernel.brc104"], program: "one.demo", fn: "call" };
-  // An app repository whose image/ holds only etc/apps.json: install `..` and one root route.
-  const repo = join(work, "one");
-  await demoApp(repo, "one");
-  const image = join(repo, "image");
-  await fs.mkdir(join(image, "etc"), { recursive: true });
-  await fs.writeFile(join(image, "etc/apps.json"), JSON.stringify({ install: [".."], routes: [route] }));
-  assert.equal(isOverlayImage(image), true, "no bin/: an overlay");
-  assert.equal(isOverlayImage(DEFAULT), false, "the default image is complete");
-  await assert.rejects(imageSource(image).then((x) => readSystemTree(x.objects, x.root)), /etc\/dispatch\.json: missing/, "alone it is no system tree");
-
-  // The loader's path (skein-host add --image <dir>): the host's image source, merged over the default image.
-  const src = await namedImageSource({ overlay: image });
-  assert.equal(src.kind, "tree");
-  if (src.kind !== "tree") return;
-  assert.deepEqual(Object.keys(src.apps ?? {}), [".."], "the app beside the image is read with it");
-  const s = await readSystemTree(src.objects, src.root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "mail"], "the default image's programs");
-  const def = await imageSource(DEFAULT);
-  assert.deepEqual(s.dispatch, (await readSystemTree(def.objects, def.root)).dispatch, "the default image's routes, the claim route among them");
-  assert.ok(s.dispatch.some((r) => r.program === "kernel" && r.address === "claim"), "the claim route");
-  assert.deepEqual(s.apps, { install: [".."], routes: [route] });
-  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
-  const c = { identity: key(), handle: "a", domain: "localhost" };
-  const sys = resolveSystem(c, programs, s.config, src.root, s.dispatch);
-  const kept = new Map<string, Uint8Array>();
-  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
-  const born = await installAtBirth(target, src.objects, s, sys, c, src.apps);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["one 0.1.0"], "the app installed at birth");
-  assert.deepEqual((born.rows as Array<Record<string, any>>).filter((r) => r.app === undefined).map(showRow), ["root http / prefix [kernel.brc104] .call"], "root's own route");
-  assert.ok((genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>).dispatch.some((r: { program: unknown; address: unknown }) => r.program === "kernel" && r.address === "claim"), "the genesis keeps the claim route");
-  assert.ok((await namedImageSource({ overlay: image }) as { root: CID }).root.equals(src.root), "the same tree again");
-
-  // A directory with bin/ is a complete image: not merged.
-  const whole = join(work, "whole");
-  await fs.mkdir(join(whole, "bin"), { recursive: true });
-  await fs.mkdir(join(whole, "etc"), { recursive: true });
-  await fs.writeFile(join(whole, "bin/echo.wasm"), MODULE);
-  await fs.writeFile(join(whole, "etc/dispatch.json"), JSON.stringify([{ address: "chat", program: "echo" }]));
-  assert.equal(isOverlayImage(whole), false);
-  const w = await imageSource(whole);
-  const ws = await readSystemTree(w.objects, w.root);
-  assert.deepEqual([ws.programs.map((p) => p.name), ws.dispatch.length], [["echo"], 1], "its own programs and routes alone");
-
-  // Refusals: an app in both lists; any other path in both, unless the same blob (etc/config.json included).
-  const base = await overlayImage(await imageDir_(DEFAULT), image);
-  const again = join(work, "again");
-  await fs.mkdir(join(again, "etc"), { recursive: true });
-  await fs.writeFile(join(again, "etc/apps.json"), JSON.stringify({ install: [".."] }));
-  await assert.rejects(overlayImage(base, again), /etc\/apps\.json: \.\. installed by both images/);
-  const conf = join(work, "conf");
-  await fs.mkdir(join(conf, "etc"), { recursive: true });
-  await fs.writeFile(join(conf, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest" } }));
-  await assert.rejects(namedImageSource({ overlay: conf }), /images: etc\/config\.json is in both images/, "the default image's config is not replaced");
-  await fs.copyFile(join(DEFAULT, "etc/config.json"), join(conf, "etc/config.json"));
-  assert.ok(await namedImageSource({ overlay: join(work, "conf/") }), "the same blob is no collision");
-});
-
-/** imageSource's static part, as overlayImage takes it. */
-const imageDir_ = async (dir: string) => { const x = await imageSource(dir); return { root: x.root, objects: x.objects, apps: x.apps ?? {} }; };
-
-const showRow = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
-
-test("#152: skein-host add <handle> --image takes default, host or a directory — host boots unclaimed with the onboarding app and the messagebox app; another name is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
-  const home = await fs.mkdtemp(join(tmpdir(), "skein-img-"));
-  t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
-  const out: string[] = [], err: string[] = [];
-  const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
-  assert.equal(await main(["add", "ox", "--image", "open-exchange"], env), 1, "open-exchange is no image name here");
-  assert.equal(await main(["add", "plain", "--image", "default"], env), 0, err.join("\n"));
-  assert.equal(await main(["add", "hosted", "--image", "host"], env), 0, err.join("\n"));
-  assert.match(out.join("\n"), /hosted: booted from the image .* no owner: claim it/);
-  const db = new HostDb(join(home, "host.db"));
-  const signer = new Signer(PrivateKey.fromHex(vars.SKEIN_MASTER_KEY));
-  const router = new Router({ db, walletFor: (row) => signer.wallet(row.handle), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
-  t.after(async () => { await router.close(); db.close(); });
-  const plain = (await (await router.hydrate("plain")).kernel.dispatch()).rows as Array<Record<string, any>>;
-  assert.deepEqual(plain.filter((r) => r.app), [], "#152: the default image installs no app");
-  const k = (await router.hydrate("hosted")).kernel;
-  const rows = (await k.dispatch()).rows as Array<Record<string, any>>;
-  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["onboard", "messagebox"], "the onboarding app and the messagebox app, installed at birth");
-  assert.ok(rows.some((r) => r.program === "kernel" && r.address === "claim"), "unclaimed: the claim route");
-  assert.equal((await k.store.get(await k.call("head", "onboard/app") as CID) as unknown as { version: string }).version, "0.5.0");
-  assert.equal((await k.store.get(await k.call("head", "messagebox/app") as CID) as unknown as { version: string }).version, "0.1.0");
-});
-
-test("skein next (SPEC 8, one loader): an empty store is no instance — its hydration is refused; `skein-host add` of a new row with no tree is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("skein next (SPEC 8, one loader): an empty store is no instance; skein-host add of a new row with no tree is refused; add --image boots an unclaimed instance", async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-one-loader-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const signer = new Signer(PrivateKey.fromRandom());
-  const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), home, idleMs: 0, sqliteStore: join(home, "store.sqlite"), kernel: { env: { SKEIN_HOME: home } } });
   t.after(async () => { await r.close(); db.close(); });
-  db.add("empty", { store: join(home, "instances/empty/runtime.db") });
+  db.add("empty", { store: `sqlite:${join(home, "store.sqlite")}` });
   await assert.rejects(r.hydrate("empty"), /its store is empty: an instance starts from a tree/);
-  assert.equal(r.loaded.size, 0, "nothing loaded");
-  // The same row booted from a tree (the default image) starts.
+  assert.equal(r.loaded.size, 0);
   await r.bootRow("empty", await imageSource());
   assert.ok((await r.hydrate("empty")).identity);
+  db.add("file", { store: join(home, "instances/file/runtime.db") });
+  await assert.rejects(r.hydrate("file"), /serve mode .* is gone/, "SPEC 5: no store file per instance");
 
-  const err: string[] = [];
-  const env = { vars: { HOME: home, SKEIN_HOME: join(home, "cli"), SKEIN_MASTER_KEY: "33".repeat(32) }, out: () => {}, err: (l: string) => err.push(l) };
+  const cli = join(home, "cli");
+  const err: string[] = [], out: string[] = [];
+  const env = { vars: { HOME: home, SKEIN_HOME: cli, SKEIN_MASTER_KEY: "33".repeat(32) }, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
   assert.equal(await main(["add", "bare"], env), 2);
   assert.match(err.at(-1)!, /a new instance starts from a tree: give --image, --boot or --packet/);
+  assert.equal(await main(["add", "ox", "--image", "open-exchange"], env), 1, "no such image");
+  assert.equal(await main(["add", "plain", "--image", "default"], env), 0, err.join("\n"));
+  assert.match(out.join("\n"), /plain: booted from the image .* no owner: claim it/);
 });

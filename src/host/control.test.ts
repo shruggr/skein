@@ -5,12 +5,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { main, runHost } from "./cli.ts";
 import { CONTROL_SOCKET, controlRequest, listenControl } from "./control.ts";
@@ -23,13 +22,9 @@ const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 test("the control socket while the router runs: the owner's only, one router, `message` only; gone at close", { skip, timeout: 120_000 }, async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-ctl-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const tree = join(home, "tree");
-  await fs.mkdir(join(tree, "bin"), { recursive: true });
-  await fs.mkdir(join(tree, "etc"));
-  await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(ROOT, "programs/test/cron-demo/cron-demo.wasm")));
-  await fs.writeFile(join(tree, "etc/dispatch.json"), JSON.stringify([{ address: "tick", program: "cron-demo" }]));
+  const tree = join(ROOT, "images/default");
   const vars: Record<string, string | undefined> = {
-    HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "77".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(),
+    HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "77".repeat(32),
     SKEIN_ROUTER_PORT: "0", SKEIN_HOST_PORT: "0", PATH: process.env.PATH,
   };
   const out: string[] = [], err: string[] = [];
@@ -46,15 +41,19 @@ test("the control socket while the router runs: the owner's only, one router, `m
   assert.ok(existsSync(sock), "the running router listens on $SKEIN_HOME/host.sock");
   assert.ok(statSync(sock).isSocket());
   assert.equal(statSync(sock).mode & 0o777, 0o600);
-  await assert.rejects(listenControl(sock, { message: async () => "" }), /another router answers on it/, "a second router cannot take it");
+  await assert.rejects(listenControl(sock, { message: async () => ({ entry: "", status: 0, body: new Uint8Array() }) }), /another router answers on it/, "a second router cannot take it");
 
   // The `event` op is gone with the cron provider; the claim never came through here (#127).
-  const want = { ok: false, error: "want {op: \"message\", handle, message, body}" };
+  const want = { ok: false, error: "want {op: \"message\", handle, request}" };
   assert.deepEqual(await controlRequest(sock, { op: "event", handle: "evt", box: "tick", event: {} } as never), want);
   assert.deepEqual(await controlRequest(sock, { op: "claim", handle: "evt", owner: "02" + "ab".repeat(32) } as never), want);
-  // #142: a `message` is a signed one; anything else is refused before it reaches an instance.
-  assert.deepEqual(await controlRequest(sock, { op: "message", handle: "evt", message: Buffer.from(dagCbor.encode({ kind: "mail" })).toString("base64"), body: "" }), { ok: false, error: "not a signed message (a mail record with its signature)" });
-  assert.deepEqual(await controlRequest(sock, { op: "message", handle: "nope", message: "", body: "" }), { ok: false, error: "no instance nope" });
+  // A `message` carries a request record; anything else is refused before it reaches an instance.
+  assert.deepEqual(await controlRequest(sock, { op: "message", handle: "evt", request: Buffer.from(dagCbor.encode({ kind: "mail" })).toString("base64") }), { ok: false, error: "not a request record ({kind: \"request\", payload, signature?})" });
+  assert.deepEqual(await controlRequest(sock, { op: "message", handle: "nope", request: "" }), { ok: false, error: "no instance nope" });
+  // An unsigned request at a root row: refused by the kernel (no sender proven), nothing written.
+  const r = await controlRequest(sock, { op: "message", handle: "evt", request: Buffer.from(dagCbor.encode({ kind: "request", payload: { method: "POST", path: "/kernel/grant", query: "", headers: {}, body: new Uint8Array() } })).toString("base64") });
+  assert.equal(r?.ok, false);
+  assert.match((r as { error: string }).error, /refused: 40[13]/);
 
   await host.stop();
   stopped = true;
