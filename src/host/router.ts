@@ -130,7 +130,7 @@ import { appHead } from "./plan.ts";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { bootStore, imageSource, isOverlayImage, namedImageSource, type BootSource, type Booted } from "./boot.ts";
-import { admitOf, chainHeader, chainHolds, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
+import { admitBody, admitOf, chainHeader, chainHolds, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, keyHex, type AddressSeed, type Genesis2Config } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
@@ -506,8 +506,8 @@ export class Router {
           await this.providers.send(h, "status", keyBytes(id), "chain/status", body, subject);
         },
         now: () => stampMs(this.now()),
-        instances: () => ({ all: this.o.db.list("enabled").map((r) => r.handle), running: [...this.loaded].filter(([, l]) => !l.kernel.gone).map(([h]) => h) }),
-        holds: async (h, txid) => await (await this.hydrate(h)).kernel.hasBlock(txCid(txid)),
+        // SPEC 8: who holds a transaction is the host's holder map (followed from the `chain/tx/<txid>` facts): no kernel started to ask.
+        holders: (txid) => this.holdersOf(txid),
       });
     }
     // #156: the host's libp2p (one node per key; the host node among them) — for the instances, and for the tracker on its own.
@@ -572,7 +572,8 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
-      emitted: (h, rec, place) => this.events.emitted(h, rec, place),
+      // #148: every fact to the event streams; SPEC 8: the host follows `chain/tx/<txid>` (the holder map) and the overlay's `admitted` (the gossip admit).
+      emitted: (h, rec, place) => { this.events.emitted(h, rec, place); this.followFact(h, rec); },
       deliver: (h, id, rec) => this.deliver(h, id, rec),
       // #90: the instance manager acts for the host skein alone.
       manager: {
@@ -636,6 +637,8 @@ export class Router {
       await this.startTracker().catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
       if (this.tracker?.o.hub) await this.tracker.ready;
     }
+    // SPEC 8: the holder map, rebuilt from the instances' stores (their `chain/tx/` facts), no kernel started.
+    await this.rebuildHolders().catch((e) => this.say("router", `holders: not rebuilt: ${(e as Error).message}`));
     // #138: the stored liveness beats older than the longest window (a day) go before any instance reloads them.
     this.o.db.pruneBeats(stampMs(this.now()) - LIVENESS_MAX_MS);
     for (const row of this.o.db.list("enabled")) {
@@ -1126,6 +1129,100 @@ export class Router {
     const event = { kind: "chain", root: tip.root, height: tip.height };
     await kernel.admit({ box: DEFAULT_BOX, event: cidOf(event) } as never, { event }, this.now());
     this.sentChain.set(handle, tip.root.toString());
+  }
+
+  // ---------------------------------------------------------------- the holder map and the admit announcement (SPEC 8)
+
+  /**
+   * SPEC 8: the instances holding each UNSETTLED transaction, by txid — followed from each instance's
+   * `chain/tx/<txid>` facts (skein-chain shape.zig statusEvent `{event, status, height?, reason?, by?}`):
+   * `pending` or `seen` (un-mined by a reorg) → remembered; `mined` → forgotten. `rejected` changes nothing
+   * (SPEC 8 names three statuses; plan-host C8 is open). Rebuilt from the stores at a start (rebuildHolders).
+   */
+  readonly holding = new Map<string, Set<string>>();
+
+  /** One `chain/tx/<txid>` status for `handle` into the holder map. */
+  private holdingFact(handle: string, txid: string, status: unknown): void {
+    if (status === "pending" || status === "seen") {
+      let s = this.holding.get(txid);
+      if (!s) this.holding.set(txid, (s = new Set()));
+      s.add(handle);
+    } else if (status === "mined") {
+      const s = this.holding.get(txid);
+      if (!s) return;
+      s.delete(handle);
+      if (!s.size) this.holding.delete(txid);
+    }
+  }
+
+  /** The enabled instances the holder map names for `txid` (a txid in display hex). */
+  holdersOf(txid: string): string[] {
+    const s = this.holding.get(txid.toLowerCase());
+    return s ? [...s].filter((h) => this.o.db.get(h)?.status === "enabled") : [];
+  }
+
+  /**
+   * SPEC 8: the holder map after a restart — each enabled instance's latest `chain/tx/` fact per txid, read from
+   * its store's event index (events.ts: the store file read-only), no kernel started.
+   */
+  async rebuildHolders(): Promise<void> {
+    this.holding.clear();
+    let n = 0;
+    for (const row of this.o.db.list("enabled")) {
+      for (const d of await this.events.read(row.handle, { name: `${DEFAULT_BOX}/tx/`, prefix: true, latest: true })) {
+        const txid = d.event.slice(`${DEFAULT_BOX}/tx/`.length);
+        let status: unknown;
+        try { status = (JSON.parse(d.data) as { status?: unknown }).status; } catch { continue; } // a record that is no JSON object names no status
+        this.holdingFact(row.handle, txid, status);
+      }
+    }
+    for (const s of this.holding.values()) n += s.size;
+    if (n) this.say("router", `holders: ${this.holding.size} unsettled transaction${this.holding.size === 1 ? "" : "s"}, ${n} holder${n === 1 ? "" : "s"}, from the stores`);
+  }
+
+  /** The (handle, txid, topic) announcements published in this run: a fact handed over again publishes nothing. */
+  private announced = new Set<string>();
+
+  /**
+   * A fact from `handle` (after its step's commit): `chain/tx/<txid>` → the holder map; the overlay's
+   * `<app>/topic/tx/<txid>` with verdict `admitted` → the gossip `admit` (announceAdmitted).
+   */
+  private followFact(handle: string, rec: Record<string, unknown>): void {
+    const name = typeof rec.event === "string" ? rec.event : "";
+    const tx = /^chain\/tx\/([0-9a-f]{64})$/.exec(name);
+    if (tx) return this.holdingFact(handle, tx[1]!, rec.status);
+    const ov = /^([a-z0-9][a-z0-9-]*)\/topic\/tx\/([0-9a-f]{64})$/.exec(name);
+    if (ov && rec.verdict === "admitted") this.announceAdmitted(handle, ov[2]!, rec.topics);
+  }
+
+  /**
+   * SPEC 7/8: the host publishes the gossip `admit` when it sees the overlay's `admitted` fact — per topic the
+   * fact's `topics: {<topic>: {outputsToAdmit, coinsToRetain}}` names, `{kind: "admit", txid, topics: {<topic>:
+   * …}}` on `<topic>` from the instance's libp2p node (sync.ts admitBody), once per (instance, txid, topic) in
+   * this run. A fact with no `topics` publishes nothing here.
+   * WAITING ON build C: skein-overlay v0.28.1's fact carries no `topics`; until it does, its admission is
+   * published by the overlay itself through the libp2p provider's `publish` box (providers.ts, kept beside this:
+   * remove that path when the overlay stops asking for it).
+   */
+  private announceAdmitted(handle: string, txid: string, topics: unknown): void {
+    if (!topics || typeof topics !== "object" || Array.isArray(topics) || topics instanceof Uint8Array) return;
+    const p2p = this.p2p;
+    if (!p2p) { this.say(handle, `gossip: ${txid.slice(0, 8)} admitted: this host runs no libp2p: not announced`); return; }
+    const nums = (v: unknown): number[] | undefined => Array.isArray(v) && v.every((x) => (typeof x === "number" && Number.isInteger(x) && x >= 0) || typeof x === "bigint") ? v.map(Number) : undefined;
+    for (const [topic, e] of Object.entries(topics as Record<string, unknown>)) {
+      const steak = e as { outputsToAdmit?: unknown; coinsToRetain?: unknown } | null;
+      const outputsToAdmit = nums(steak?.outputsToAdmit), coinsToRetain = nums(steak?.coinsToRetain);
+      if (!topic || !outputsToAdmit || !coinsToRetain) { this.say(handle, `gossip: ${txid.slice(0, 8)} admitted on ${topic}: not {outputsToAdmit, coinsToRetain}: not announced`); continue; }
+      const k = `${handle} ${txid} ${topic}`;
+      if (this.announced.has(k)) continue;
+      this.announced.add(k);
+      if (this.announced.size > 100_000) this.announced.delete(this.announced.values().next().value!);
+      const p = p2p.publish(handle, topic, admitBody(txid, topic, { outputsToAdmit, coinsToRetain }))
+        .then((r) => this.say(handle, `gossip: ${txid.slice(0, 8)} admit published on ${topic} (${r.recipients} peer${r.recipients === 1 ? "" : "s"})`))
+        .catch((x) => { this.announced.delete(k); this.say(handle, `gossip: ${txid.slice(0, 8)} admit on ${topic} not published: ${(x as Error).message}`); });
+      this.syncing.add(p);
+      void p.finally(() => this.syncing.delete(p));
+    }
   }
 
   // ---------------------------------------------------------------- hydration

@@ -142,6 +142,15 @@ const HEX64 = /^[0-9a-f]{64}$/;
 export const peerOf = (mh: Uint8Array): string => peerIdFromMultihash(Digest.decode(mh)).toString();
 
 /**
+ * The `admit` announcement for `txid` on `<topic>` (skein-overlay gossip.zig admitBody: dag-cbor `{kind:
+ * "admit", txid (hex), topics: {<topic>: {outputsToAdmit: [vout], coinsToRetain: [input index]}}}`): what the
+ * HOST publishes (skein next, SPEC 8) when it sees the overlay's `admitted` fact.
+ */
+export function admitBody(txid: string, topic: string, steak: { outputsToAdmit: number[]; coinsToRetain: number[] }): Uint8Array {
+  return dagCbor.encode({ kind: "admit", txid, topics: { [topic]: { outputsToAdmit: steak.outputsToAdmit, coinsToRetain: steak.coinsToRetain } } });
+}
+
+/**
  * An `admit` announcement on `<topic>` (skein-overlay gossip.zig: dag-cbor `{kind: "admit", txid,
  * topics: {<topic>: {outputsToAdmit, coinsToRetain}}}`) → its txid, or undefined when the body is
  * not one naming `topic`.
