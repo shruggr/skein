@@ -725,6 +725,13 @@ pub const Runtime = struct {
         if (is_request and !logm.isRequest(rec)) return .{ .invalid = "commit: the record is not a request record" };
         if (!is_request and rec != .map) return .{ .invalid = "commit: an event record is a map" };
         const name: ?[]const u8 = if (is_request) null else Value.str(ready.get("name")) orelse return .{ .invalid = "commit: an event names itself" };
+        // KF2: the row is still in the table as it was at CHECK (the same row record); else refused.
+        const now_rows = (try dispatch.current(a, rt.store)) orelse &.{};
+        const row_bytes = try cbor.encode(a, row_v);
+        const same_row = for (now_rows) |x| {
+            if (dispatch.sameKey(x, row) and std.mem.eql(u8, try cbor.encode(a, x.value), row_bytes)) break true;
+        } else false;
+        if (!same_row) return .{ .refused = refusal(409, "ERR_ROUTE_CHANGED", try std.fmt.allocPrint(a, "the row for {s} changed or is gone since the check", .{row.key})) };
         const principal = Value.bytesOf(ready.get("principal"));
         const handed = ready.get(kind);
         const rc = try cbor.cidOfValue(a, rec);

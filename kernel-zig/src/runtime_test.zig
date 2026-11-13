@@ -582,6 +582,32 @@ test "skein next: CHECK then COMMIT with a recheck that refuses — the second s
     try testing.expectEqualSlices(u8, tip, try w.tip());
 }
 
+test "skein next (KF2): COMMIT refuses a READY whose row changed or went since CHECK, nothing written" {
+    const w = try world(true);
+    defer w.deinit();
+    const a = w.a();
+    const c = try w.check(try signedBy(a, kk().stranger, "/user", "", "kf2a"));
+    try testing.expect(c == .ready);
+    // Root removes the row between the check and the commit.
+    var body = cbor.MapBuilder.init(a);
+    try body.put("op", S("remove"));
+    try body.put("row", c.ready.get("row").?);
+    _ = try w.arrive(try signedBy(a, kk().root, "/kernel/route", try cbor.encode(a, body.value()), "kf2b"));
+    const tip = try w.tip();
+    const o = try w.commit(c.ready);
+    try testing.expect(o == .refused);
+    try testing.expectEqualStrings("ERR_ROUTE_CHANGED", o.refused.code.?);
+    try testing.expectEqualSlices(u8, tip, try w.tip());
+    // Changed in place (same key, another row record): refused too.
+    const c2 = try w.check(try signedBy(a, kk().admin, "/admin", "", "kf2c"));
+    var b2 = cbor.MapBuilder.init(a);
+    try b2.put("op", S("add"));
+    try b2.put("row", try row(a, &.{ .{ "kind", S("request") }, .{ "path", S("/admin") }, .{ "role", S("root") }, .{ "handler", S("next.main.handle") } }));
+    _ = try w.arrive(try signedBy(a, kk().root, "/kernel/route", try cbor.encode(a, b2.value()), "kf2d"));
+    const o2 = try w.commit(c2.ready);
+    try testing.expect(o2 == .refused and std.mem.eql(u8, o2.refused.code.?, "ERR_ROUTE_CHANGED"));
+}
+
 test "skein next: blocks a check names are carried in READY and written only at COMMIT; the handler sees the package as handed back" {
     const w = try world(true);
     defer w.deinit();
