@@ -10,12 +10,12 @@
 //   - a merkle proof as the event chain/proof (checked by chain.proof): taken; an EARLY one (its header not
 //     held yet) refused 425, kept, and offered again by the host when the header arrives;
 //   - a rejected status from the host's status service (its own key, role chain.status) → outcome rejected.
-// NOT here (no shipped topic manager answers MissingParents: tm_demo admits every token output): a sync
-// delivery left undecided and released by its parent.
+// The second test: the undecided flow (SPEC 7) over the demo topic tm_chain_demo (a root: its first output
+// tm_demo's marker; a non-root spending nothing admitted, with a source unreadable here: MissingParents).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { MerklePath, P2PKH, PrivateKey, Script, Transaction, UnlockingScript } from "@bsv/sdk";
@@ -46,25 +46,9 @@ function mine(prev: Uint8Array, merkleRoot: Uint8Array, time: number): Uint8Arra
   }
 }
 
-/**
- * The overlay app as build C wrote it, with its handlers and its own check named "<app>.<role>.<fn>":
- * its etc/app.json names "overlay.<fn>" for an app of three programs, which the kernel refuses to
- * resolve (kernel-zig on.zig handlerOf: "<app>.<fn>" only for an app with one program) — build H2's
- * BLOCKER 1, for build C to fix in skein-overlay. A copy: nothing in build C's tree is changed.
- */
-function overlayCopy(to: string): string {
-  cpSync(OVERLAY_DIR, to, { recursive: true, filter: (p) => !/\/(\.git|zig-out|\.zig-cache|zig-pkg|equiv|docs|src|test\.zig)$/.test(p) });
-  const p = join(to, "etc/app.json");
-  const m = JSON.parse(readFileSync(p, "utf8")) as { routes: Array<Record<string, unknown>> };
-  const q = (x: unknown) => typeof x === "string" && /^overlay\.[A-Za-z0-9_-]+$/.test(x) ? `overlay.overlay.${x.slice("overlay.".length)}` : x;
-  m.routes = m.routes.map((r) => ({ ...r, handler: q(r.handler), ...(Array.isArray(r.checks) ? { checks: r.checks.map(q) } : {}) }));
-  writeFileSync(p, JSON.stringify(m, null, 2));
-  return to;
-}
-
 test("the first cut: an instance with the chain app and the overlay, born from an image — public submit, a double spend refused at COMMIT, a sync delivery, proofs (one early, offered again), a rejection", { skip, timeout: 300_000 }, async (t) => {
   const h = await testHost(t, { network: "regtest", genesis: { defaults: { walletNetwork: "regtest" } } });
-  const img = await imageTree(join(h.home, "img"), { apps: [CHAIN_DIR, overlayCopy(join(h.home, "overlay"))] });
+  const img = await imageTree(join(h.home, "img"), { apps: [CHAIN_DIR, OVERLAY_DIR] });
   await h.instance("ov", img);
   // Regtest: the genesis, then F (a funding transaction with a stand-in input) mined at height 1.
   const alice = new PrivateKey("3333", 16);
@@ -152,4 +136,166 @@ test("the first cut: an instance with the chain app and the overlay, born from a
   // The rejected row takes no other key: the owner (root) is no chain.status holder.
   await assert.rejects(h.request("ov", "POST", "/chain/rejected", { txid: t4.id("hex"), txStatus: "REJECTED" }), (x) => x instanceof DoorAnswered && x.answer.status === 403);
   void dagCbor;
+});
+
+/** N for the long chain (HF1): SKEIN_UNDECIDED_N, default 300. */
+const N = Number(process.env.SKEIN_UNDECIDED_N ?? 300);
+
+test("the undecided flow (SPEC 7): children delivered before their root are undecided; a repeat changes nothing; the public row refuses one; the root releases them one per launched step; a long chain released with no step out of fuel", { skip, timeout: 1_800_000 }, async (t) => {
+  const h = await testHost(t, { network: "regtest", genesis: { defaults: { walletNetwork: "regtest" } } });
+  const img = await imageTree(join(h.home, "img"), { apps: [CHAIN_DIR, OVERLAY_DIR] });
+  await h.instance("ov", img);
+  await h.instance("fresh", img);
+  const alice = new PrivateKey("4444", 16);
+  const lock = () => new P2PKH().lock(alice.toPublicKey().toHash());
+  const marker = () => Script.fromBinary([0x07, ...Buffer.from("tm_demo"), 0x75, ...lock().toBinary()]);
+  const fund = new Transaction();
+  fund.addInput({ sourceTXID: "73".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
+  fund.addOutput({ lockingScript: lock(), satoshis: 10_000_000 });
+  fund.addOutput({ lockingScript: lock(), satoshis: 10_000_000 });
+  const headers: Uint8Array[] = [new Uint8Array(REGTEST_GENESIS)];
+  const mineAlone = (tx: Transaction) => {
+    const height = headers.length;
+    const cb = createHash("sha256").update(`cb ${height}`).digest("hex");
+    tx.merklePath = new MerklePath(height, [[{ offset: 0, hash: cb }, { offset: 1, hash: tx.id("hex"), txid: true }]]);
+    headers.push(mine(sha256d(headers.at(-1)!), sha256d(Buffer.concat([internal(cb), internal(tx.id("hex"))])), 1_790_300_000 + height * 600));
+  };
+  mineAlone(fund);
+  /** A transaction spending `src`:0, one output (`root`: tm_demo's marker first, so tm_chain_demo takes it as a root), mined alone. */
+  const spend = async (src: Transaction, vout: number, root = false) => {
+    const tx = new Transaction();
+    tx.addInput({ sourceTransaction: src, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
+    tx.addOutput({ lockingScript: root ? marker() : lock(), satoshis: src.outputs[vout]!.satoshis! - 10 });
+    await tx.sign();
+    mineAlone(tx);
+    return tx;
+  };
+  // A root R and its chain C1 → C2 (the scenario), and a second root R2 with a chain of N.
+  const R = await spend(fund, 0, true);
+  const C1 = await spend(R, 0);
+  const C2 = await spend(C1, 0);
+  const R2 = await spend(fund, 1, true);
+  const long: Transaction[] = [];
+  for (let i = 0, src = R2; i < N; i++) { src = await spend(src, 0); long.push(src); }
+  await h.router.start();
+  await h.router.takeHeaders(headers, 0);
+  await h.router.settled();
+
+  /** A delivery on its own: the transaction alone, proven by its BUMP (no ancestors). */
+  const beefOf = (tx: Transaction) => {
+    const alone = Transaction.fromHex(tx.toHex());
+    alone.merklePath = tx.merklePath;
+    return Uint8Array.from(alone.toBEEF());
+  };
+  const sync = async (tx: Transaction, handle = "ov") => {
+    const before = await h.entries(handle);
+    const v = await h.router.submitBeef(handle, "/overlay/sync", beefOf(tx));
+    await h.router.settled();
+    return { v, entries: (await h.entries(handle)) - before };
+  };
+  const facts = async (tx: Transaction) => (await h.router.events.read("ov", { name: `overlay/topic/tx/${tx.id("hex")}` })).map((d) => ({ id: d.id, verdict: (JSON.parse(d.data) as { verdict?: string }).verdict }));
+  const held = async (tx: Transaction) => (await h.router.events.read("ov", { name: `chain/tx/${tx.id("hex")}` })).length > 0;
+
+  // The ov store, read: the threads launched to re-judge (args {fn: "rejudge", txid}) and every update's fuel.
+  const { openStoreFile } = await import("./stores.ts");
+  const { storeSpec } = await import("../runtime/index-store.ts");
+  const rejudges = async () => {
+    const st = openStoreFile(storeSpec(h.db.get("ov")!), { readOnly: true });
+    const out: Array<{ thread: string; txid: string; fuel: number[] }> = [];
+    try {
+      for await (const th of st.edges.query({ kind: "thread" })) {
+        const o = await st.get(th) as unknown as { args?: unknown };
+        let args = o.args as Record<string, unknown> | undefined;
+        if (args && (args as { "/"?: unknown })["/"] === undefined && typeof (args as { toString?: unknown }).toString === "function" && "multihash" in (args as object)) args = await st.get(args as never) as unknown as Record<string, unknown>;
+        if (!args || args.fn !== "rejudge") continue;
+        const fuel: number[] = [];
+        for await (const u of st.chains.history(th)) { if (u.equals(th)) continue; const up = await st.get(u) as unknown as { fuel?: number | bigint }; if (up.fuel !== undefined) fuel.push(Number(up.fuel)); }
+        out.push({ thread: th.toString(), txid: String(args.txid), fuel });
+      }
+    } finally { await st.close(); }
+    return out;
+  };
+  const maxFuel = async () => {
+    const st = openStoreFile(storeSpec(h.db.get("ov")!), { readOnly: true });
+    let max = 0;
+    try {
+      for await (const th of st.edges.query({ kind: "thread" })) for await (const u of st.chains.history(th)) {
+        if (u.equals(th)) continue;
+        const up = await st.get(u) as unknown as { fuel?: number | bigint };
+        if (up.fuel !== undefined && Number(up.fuel) > max) max = Number(up.fuel);
+      }
+    } finally { await st.close(); }
+    return max;
+  };
+  const record: string[] = [];
+
+  // 1. A mined child before its parent: committed, recorded by the chain app, undecided, nothing admitted.
+  const s1 = await sync(C1);
+  assert.equal(s1.v.verdict, "accept", s1.v.reason ?? "");
+  assert.equal(s1.entries, 1, "one entry");
+  assert.ok(await held(C1), "the chain app recorded it (chain/tx fact)");
+  assert.deepEqual((await facts(C1)).map((f) => f.verdict), ["undecided"]);
+  record.push("1. C1 before R: committed (1 entry), chain/tx recorded, verdict undecided");
+
+  // 2. Its child next (its parent held but undecided): undecided too.
+  const s2 = await sync(C2);
+  assert.equal(s2.v.verdict, "accept", s2.v.reason ?? "");
+  assert.deepEqual((await facts(C2)).map((f) => f.verdict), ["undecided"]);
+  record.push("2. C2 (parent held, undecided): committed, verdict undecided");
+
+  // 3. C1 again: no new verdict fact, no re-judge.
+  const s3 = await sync(C1);
+  assert.equal(s3.v.verdict, "accept", s3.v.reason ?? "");
+  assert.deepEqual((await facts(C1)).map((f) => f.verdict), ["undecided"], "no new verdict fact");
+  assert.equal((await rejudges()).length, 0, "no re-judge");
+  record.push(`3. C1 again: ${s3.entries} entry, no new fact, no re-judge`);
+
+  // 4. C1 to the PUBLIC row of an instance lacking its parent: refused, nothing written.
+  const nf = await h.entries("fresh");
+  const pub = await fetch(`${h.base}/@fresh/overlay/submit`, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Buffer.from(beefOf(C1)) });
+  const pubText = await pub.text();
+  assert.equal(pub.status, 422, pubText);
+  assert.equal(await h.entries("fresh"), nf, "nothing written");
+  record.push(`4. C1 to /overlay/submit on a fresh instance: ${pub.status} ${pubText.slice(0, 120)}, nothing written`);
+
+  // 5. The root: admitted; C1 and C2 released, each in its own launched step.
+  const s5 = await sync(R);
+  assert.equal(s5.v.verdict, "accept", s5.v.reason ?? "");
+  await until("C1 and C2 admitted", async () => { await h.router.settled(); return ((await facts(C2)).at(-1)?.verdict === "admitted") || undefined; }, 60_000);
+  assert.equal((await facts(R)).at(-1)?.verdict, "admitted");
+  assert.equal((await facts(C1)).at(-1)?.verdict, "admitted");
+  const rj = await rejudges();
+  assert.deepEqual(rj.map((x) => x.txid).sort(), [C1.id("hex"), C2.id("hex")].sort(), "one re-judge thread per released transaction");
+  const placeThread = (id: string) => id.split(".")[2];
+  const rootThread = placeThread((await facts(R)).at(-1)!.id);
+  for (const tx of [C1, C2]) {
+    const th = placeThread((await facts(tx)).at(-1)!.id);
+    assert.notEqual(th, rootThread, "the root's own step did not judge it");
+    assert.equal(rj.find((x) => x.thread === th)?.txid, tx.id("hex"), "admitted in the re-judge step for it");
+  }
+  record.push(`5. R: admitted; C1, C2 admitted, each in its own launched re-judge thread (${rj.length} threads), not in R's step`);
+
+  // 6. A long chain: N children child-first (all undecided), then the root; released one per step.
+  const t0 = Date.now();
+  for (const tx of [...long].reverse()) {
+    const v = await h.router.submitBeef("ov", "/overlay/sync", beefOf(tx));
+    assert.equal(v.verdict, "accept", v.reason ?? "");
+  }
+  await h.router.settled();
+  const tDeliver = Date.now() - t0;
+  assert.equal((await facts(long[0]!)).at(-1)?.verdict, "undecided");
+  assert.equal((await facts(long.at(-1)!)).at(-1)?.verdict, "undecided");
+  const t1 = Date.now();
+  assert.equal((await h.router.submitBeef("ov", "/overlay/sync", beefOf(R2))).verdict, "accept");
+  await until(`all ${N} released`, async () => { await h.router.settled(); return ((await facts(long.at(-1)!)).at(-1)?.verdict === "admitted") || undefined; }, 1_500_000);
+  const tRelease = Date.now() - t1;
+  const all = await rejudges();
+  const longIds = new Set(long.map((x) => x.id("hex")));
+  const longRj = all.filter((x) => longIds.has(x.txid));
+  assert.equal(longRj.length, N, "one re-judge step per transaction");
+  for (const tx of long) assert.equal((await facts(tx)).at(-1)?.verdict, "admitted");
+  const rjFuel = Math.max(...longRj.flatMap((x) => x.fuel));
+  const stepMax = await maxFuel();
+  record.push(`6. N=${N}: delivered child-first in ${tDeliver} ms (all undecided), the root then released all in ${tRelease} ms, ${longRj.length} re-judge threads; the largest re-judge step's fuel ${rjFuel}, the largest step of any thread ${stepMax}, against fuelPerStep 1000000000000`);
+  for (const l of record) console.log(`HF1 ${l}`);
 });
