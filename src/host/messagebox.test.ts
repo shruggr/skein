@@ -64,7 +64,7 @@ test("hosted messagebox: two keys registered; a third session sends to each at t
 
 test("the stock mail program: a skein's own /sendMessage takes only its own mail (another key: 403); a plain skein answers /listMessages and /acknowledgeMessage 404, and has nothing under /messagebox/", { skip, timeout: 120_000 }, async (t) => {
   const h = await testHost(t);
-  const plain = h.instance("plain");
+  const plain = await h.instance("plain");
   await h.router.start();
   const box = new RawBox(h.owner, h.origin("plain"));
   await assert.rejects(box.send(PrivateKey.fromRandom().toPublicKey().toString(), "inbox", { text: "not for this skein" }), /HTTP 403 ERR_ACCOUNT_REQUIRED/);

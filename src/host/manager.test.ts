@@ -130,7 +130,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.equal((await held("nope")).status, 400);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
-  h.instance("other");
+  await h.instance("other");
   await h.router.hydrate("other");
   const lines = h.lines.length;
   a = await send("other", "create", { handle: "bob", owner: client });

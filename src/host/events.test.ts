@@ -77,7 +77,7 @@ function appTree(home: string, name: string): string {
 
 test("events: GET /events/<name path> — the index read from the store (name, prefix, after, limit, latest), the same as a stream then live, Last-Event-ID resumes; nothing logged", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
-  const alpha = h.instance("alpha");
+  const alpha = await h.instance("alpha");
   await h.router.start();
   await h.router.hydrate("alpha");
   const host = { home: h.home, port: h.router.port, owner: h.owner, settled: () => h.router.settled() };

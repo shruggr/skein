@@ -24,7 +24,7 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
     ownerKey: b.ownerKey,
     http: async (req) => { wire.push(`${req.method} ${req.url}`); return await fetchHttp(req); },
   });
-  const alpha = a.instance("alpha");
+  const alpha = await a.instance("alpha");
   await a.router.start();
   await b.router.start();
   await a.install("alpha", [SHELL_APP]); // #83: `run` is the shell app's

@@ -33,6 +33,8 @@ import { HostDb } from "./instances.ts";
 import { Signer } from "./signer.ts";
 import { keyOfPeerId, peerIdOf } from "./p2p.ts";
 import { Router } from "./router.ts";
+import { dirSource } from "./boot.ts";
+import { imageTree } from "./testhost.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -108,26 +110,28 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   const idA = peerIdOf(signer.peerKey("alpha")).toString(), idB = peerIdOf(signer.peerKey("beta")).toString();
   const lines: string[] = [];
 
-  const mk = (handle: string, listen: string, bootstrap: string, genesis: ConstructorParameters<typeof Router>[0]["genesis"]) => {
+  const mk = (handle: string, listen: string, bootstrap: string) => {
     const db = new HostDb(join(home, `${handle}-host.db`));
     db.add(handle, { store: join(home, handle, "runtime.db") });
     const r = new Router({
       db, walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (h) => signer.peerKey(h), providerKeyFor: (n) => signer.providerKey(n), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
       kernel: { command: kernel, env: { SKEIN_HOME: home } },
       libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
-      genesis,
       log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
     });
     return { db, r };
   };
-  const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`, {
-    subscriptions: [{ box: "p2p", handler: DEMO_CID }],
-    libp2p: { topics: [TOPIC] },
-  });
-  const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`, {
-    libp2p: { topics: [TOPIC], protocols: { [PROTOCOL]: { program: DEMO_CID.toString(), fn: "stream" } } },
-    dispatch: [{ transport: "libp2p", address: TOPIC, program: DEMO_CID.toString(), fn: "topic" }],
-  });
+  const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`);
+  const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`);
+  // Each booted from a system tree (one loader, SPEC 8): the default image with p2p-demo, its rows and its libp2p config.
+  const demoBin = { "p2p-demo.wasm": readFileSync(DEMO_WASM), "p2p-demo.json": JSON.stringify({ inputs: DEMO.inputs, services: DEMO.services, description: DEMO.description }) };
+  await A.r.bootRow("alpha", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-alpha"), {
+    bin: demoBin, config: { collect: [], libp2p: { topics: [TOPIC] } }, dispatch: [{ address: "p2p", program: "p2p-demo" }],
+  })) });
+  await B.r.bootRow("beta", { kind: "tree", ...await dirSource(await imageTree(join(home, "tree-beta"), {
+    bin: demoBin, config: { collect: [], libp2p: { topics: [TOPIC], protocols: { [PROTOCOL]: { program: "p2p-demo", fn: "stream" } } } },
+    dispatch: [{ transport: "libp2p", address: TOPIC, program: "p2p-demo", fn: "topic" }],
+  })) });
   let stopped = false;
   const stop = async () => { if (stopped) return; stopped = true; await Promise.all([A.r.stop(), B.r.stop()]); A.db.close(); B.db.close(); };
   t.after(stop);

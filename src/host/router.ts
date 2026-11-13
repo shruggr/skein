@@ -115,7 +115,7 @@ import { randomBytes } from "node:crypto";
 import { encode as encodeBlock } from "../runtime/cid.ts";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
-import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
+import { short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { BACKFILL_RUN, DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
@@ -129,11 +129,11 @@ import { OVERLAY_ROLE } from "./manifest.ts";
 import { appHead } from "./plan.ts";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { boot, bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
+import { bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
 import { chainHeader, chainHolds, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { admitOf, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
+import { keyBytes, keyHex, type AddressSeed, type Genesis2Config } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
 import { signClaim } from "../client/raw.ts";
 import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
@@ -159,8 +159,8 @@ export interface RouterOptions {
   ownerHandle?: Named;
   inferHandle?: Named;
   fuelPerStep?: string;
-  /** A new genesis's extra routes — boxes (a box and its handler) and routes of any transport (#143: no sender) — and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; dispatch?: DispatchSpec[] };
+  /** A new genesis's defaults: what a tree's config leaves unset (genesis.ts mergeDefaults). */
+  genesis?: { defaults?: Record<string, string>; feeds?: FeedSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
@@ -1238,11 +1238,8 @@ export class Router {
     const kernel: KernelSurface = sq ? await this.wasmHost(sq.db).open(ko) : rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
     let g: { identity?: unknown } | null;
     try {
-      if (!(await kernel.store.log.tip())) {
-        // No tree was loaded into this store (`skein-host add --boot/--packet` does that): the stock system, through the same loader.
-        const b = await boot(kernel, { kind: "code" }, this.genesisConfig(row, identity), this.now());
-        this.say(handle, `genesis ${b.entry}`);
-      }
+      // One loader (SPEC 8): an instance starts from a tree (an image, `skein-host add --boot/--packet`); an empty store is no instance.
+      if (!(await kernel.store.log.tip())) throw new Error("its store is empty: an instance starts from a tree (an image, or skein-host add --image/--boot/--packet), and none was loaded into it");
       g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
@@ -1292,7 +1289,7 @@ export class Router {
     if ((o.owner || o.appConfig) && !o.image) throw new Error("an owner and app config at birth are an image's (#142)");
     const identity = await rootIdentity(await this.o.walletFor(row));
     // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
-    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
+    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity);
     const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.kernelEnv(), log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -1513,28 +1510,17 @@ export class Router {
     return { handle, stopped: true };
   }
 
-  /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */
-  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
-    if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    const genesisDefaults = this.o.genesis?.defaults;
-    const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
-    const warn = (l: string) => this.say(row.handle, l);
+  /**
+   * What this host brings to the genesis of a system tree booted with an owner (`skein-host add --boot/--packet`,
+   * boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults — the tree's
+   * config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
+   */
+  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string): Genesis2Config {
+    if (!this.o.owner) throw new Error("a system tree booted with an owner needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(row.handle), providers: Object.fromEntries(this.addressSeed(row.handle).filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
-    if (!code) {
-      // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
-      return {
-        identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, network: this.o.network, ...facts,
-      };
-    }
     return {
       identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-      // Code genesis takes DEFAULTS under the host's.
-      defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
-      subscriptions: this.o.genesis?.subscriptions,
-      feeds: this.o.genesis?.feeds,
-      libp2p: this.o.genesis?.libp2p, dispatch: this.o.genesis?.dispatch,
-      network: this.o.network, ...facts,
+      feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn: (l) => this.say(row.handle, l), network: this.o.network, ...facts,
     };
   }
 

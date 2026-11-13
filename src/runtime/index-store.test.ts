@@ -1,6 +1,7 @@
 // The store format of issue #30 read from TypeScript (index-store.ts): the
 // Merkle search tree (canonical, ordered), and a whole instance written by
-// the Zig kernel through a router (testhost.ts chatWorld) read back through
+// the Zig kernel through a router (testhost.ts: an instance from the default
+// image, a directory imported by the owner's messages) read back through
 // the index: the maps derived here are the kernel's, root for root; the Store
 // questions answer; skein-dev reads the file; writes are refused.
 
@@ -14,7 +15,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { KERNEL_BIN } from "../host/kernel.ts";
-import { chatWorld } from "../host/testhost.ts";
+import { dirBundles } from "../client/client.ts";
+import { RawBox } from "../client/raw.ts";
+import { testHost } from "../host/testhost.ts";
 import { collect } from "../testkit.ts";
 import { fmt } from "./cid.ts";
 import { buildTree, cat, compare, be64, derive, MAPS, openStoreFile, Trees } from "./index-store.ts";
@@ -49,7 +52,17 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   await fs.mkdir(join(dir, "tree/src"), { recursive: true });
   await fs.writeFile(join(dir, "tree/src/a.txt"), "alpha\n");
   await fs.writeFile(join(dir, "tree/README"), "hello\n");
-  const w = await chatWorld(t, join(dir, "tree"), { sqlite: false }); // a store FILE: what skein-dev and SKEIN_DB read
+  // A store FILE (what skein-dev and SKEIN_DB read): an instance from the default image (one loader, SPEC 8),
+  // the directory imported by the owner's messages (objects, then head main) through its front door.
+  const h = await testHost(t, { sqlite: false });
+  const alpha = await h.instance("alpha");
+  await h.router.start();
+  const owner = new RawBox(h.owner, `${h.base}/@alpha`);
+  const { root, bundles } = await dirBundles(join(dir, "tree"));
+  for (const b of bundles) await owner.send(alpha, "objects", b);
+  await owner.send(alpha, "head", { name: "main", tree: root });
+  await h.router.settled();
+  const w = { store: h.db.get("alpha")!.store };
 
   const ix = openStoreFile(w.store, { readOnly: true }) as IndexStore;
   t.after(() => ix.close());
@@ -66,40 +79,26 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   // The Store questions.
   const log = await collect(ix.log.entries());
   assert.ok(log[0]!.entry.genesis, "entry 0 is the genesis");
-  // #68: every package a transport carried in is an entry — the handshakes, the import, the chat, the inference answers.
-  // #157: and a delivery's answer, the server's signed answer to a `deliver` intention: an event in box `deliver`.
-  assert.ok(log.slice(1).every((e) => ["http", "local"].includes(String((e.entry as unknown as { transport?: string }).transport)) || (e.entry as unknown as { box?: string }).box === "deliver"), "every other entry is a package as received: an HTTP request, a provider's answer (#70), or a delivery's signed answer (#157)");
-  assert.ok(log.length >= 7, `the handshakes, the import, the chat and the inference answers (${log.length})`);
+  // #68: every package a transport carried in is an entry — the handshake and the owner's messages, each an HTTP request.
+  assert.ok(log.slice(1).every((e) => String((e.entry as unknown as { transport?: string }).transport) === "http"), "every other entry is a package as received: an HTTP request");
+  assert.ok(log.length >= 4, `the genesis, the handshake, the import and the head (${log.length})`);
   assert.equal(fmt((await ix.log.tip())!), fmt(st.log!));
   assert.equal(fmt(log.at(-1)!.cid), fmt(st.log!));
   assert.equal(await ix.live.cursor.get(), log.length, "every entry processed");
   assert.deepEqual((await collect(ix.log.entries(3))).map((e) => fmt(e.cid)), log.slice(3).map((e) => fmt(e.cid)));
   const all = await collect(ix.edges.query({ kind: "thread" }));
   const isRequest = async (th: CID) => !!((await ix.get(th)) as { args?: { request?: unknown } }).args?.request;
-  // #70: each message to a mailbox recipient has its delivery thread (the messagebox, args {message, transport: "mailbox"}).
-  const isDelivery = async (th: CID) => ((await ix.get(th)) as { args?: { transport?: unknown } }).args?.transport === "mailbox";
   const requests = (await Promise.all(all.map(isRequest))).filter(Boolean).length;
-  const packages = log.slice(1).filter((e) => (e.entry as unknown as { box?: string }).box !== "deliver").length; // #157: a delivery's answer steps its thread, launches none
-  assert.equal(requests, packages, "one front-door thread per request");
-  const threads = (await Promise.all(all.map(async (th) => (await isRequest(th) || await isDelivery(th) ? undefined : th)))).filter((x): x is CID => !!x);
-  assert.ok((await Promise.all(all.map(isDelivery))).filter(Boolean).length >= 2, "the infer and the answer each delivered by a thread of its own");
-  const names = await Promise.all(threads.map(async (th) => ((await ix.get(((await ix.get(th)) as { program: CID }).program)) as unknown as { name: string }).name));
-  // #67: the inference peer's handle resolved by a thread of its own (the loop waited on it).
-  assert.deepEqual(names.sort(), ["loop", "resolve", "shell"], "loop, resolve, shell (#77: the objects box is a kernel operation, no thread)");
-  const waiting = await collect(ix.edges.query({ kind: "thread", state: ["waiting"] }));
-  assert.equal(waiting.length, 1, "the loop awaits the owner's reply");
-  assert.equal((await collect(ix.live.resting())).length, 1);
-  for (const th of threads) {
+  assert.equal(requests, log.length - 1, "one front-door thread per request");
+  for (const th of all) {
     const history = await collect(ix.chains.history(th));
     assert.ok(history[0]!.equals(th) && history.at(-1)!.equals(await ix.chains.tip(th)), "a chain runs from its origin to its tip");
     assert.ok((await ix.chains.originOf(history.at(-1)!)).equals(th));
   }
-  const loop = waiting[0]!;
-  const shell = (await ix.edges.refsTo(loop)).find((r) => r.rel === "launched-by" && threads.some((th) => th.equals(r.from)));
-  assert.ok(shell, "the shell's thread was launched by the loop");
-  assert.ok((await ix.edges.refsFrom(loop)).some((r) => r.rel === "depends-on" && shell.from.equals(r.to)), "the loop depended on it");
+  assert.equal((await collect(ix.edges.query({ kind: "thread", state: ["waiting"] }))).length, 0, "nothing waits");
   assert.ok((await ix.findByPrefix("")).length > 0);
-  await assert.rejects(ix.chains.append(threads[0]!, { at: 1 }), /readonly/);
+  await assert.rejects(ix.chains.append(all[0]!, { at: 1 }), /readonly/);
+  const one = all[0]!;
 
   // skein-dev over the file.
   const bin = fileURLToPath(new URL("../../bin/skein-dev", import.meta.url));
@@ -110,11 +109,10 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   const ls = dev("ls");
   assert.equal(ls.status, 0, ls.stderr);
   assert.equal(ls.stdout.trim().split("\n").length, Math.min(20, all.length), "every thread, the requests' too, up to the limit");
-  const show = dev("show", fmt(loop).slice(-12));
+  const show = dev("show", fmt(one).slice(-12));
   assert.equal(show.status, 0, show.stderr);
   assert.match(show.stdout, /"kind": "thread"/);
-  const refs = dev("refs", fmt(loop).slice(-12));
+  const refs = dev("refs", fmt(one).slice(-12));
   assert.equal(refs.status, 0, refs.stderr);
-  assert.match(refs.stdout, /launched/);
   assert.equal(dev("replay").status, 2, "no replay here: it is the kernel's (skein-kernel replay)");
 });

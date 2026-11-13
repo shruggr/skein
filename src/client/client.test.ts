@@ -98,7 +98,7 @@ test("parseCli", () => {
 test("bin/skein on a host (#40): run to the instance's front door, the result read from David's hosted mailbox, acknowledged", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
-  const alpha = h.instance("alpha");
+  const alpha = await h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [SHELL_APP]); // #83: `run` is the shell app's
   const cfg: ClientConfig = {

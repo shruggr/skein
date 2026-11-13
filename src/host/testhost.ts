@@ -19,9 +19,7 @@ import { AuthFetch, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import type { Store } from "../runtime/store.ts";
-import { dirBundles } from "../client/client.ts";
 import { RawBox, signClaim } from "../client/raw.ts";
-import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from "../testapps.ts";
 import { fakeDiscovery } from "./fake-discovery.ts";
@@ -31,6 +29,24 @@ import { fetchHttp, REGISTER_PROTOCOL, Router, type SignedClaim } from "./router
 import { Signer } from "./signer.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
+
+/**
+ * A system tree for a test (skein next, SPEC 8: an instance starts from a tree): the default image's bin/
+ * and etc/dispatch.json (images/default), with `bin` files added (name → bytes or text), `dispatch` rows
+ * added after the image's, and `config` as etc/config.json. Written under `dir`; boot it with
+ * `router.bootRow(handle, {kind: "tree", ...await dirSource(dir)})`.
+ */
+export async function imageTree(dir: string, o: { bin?: Record<string, Uint8Array | string>; dispatch?: unknown[]; config?: Record<string, unknown> } = {}): Promise<string> {
+  const image = join(ROOT, "images/default");
+  await fs.mkdir(join(dir, "bin"), { recursive: true });
+  await fs.mkdir(join(dir, "etc"), { recursive: true });
+  for (const f of await fs.readdir(join(image, "bin"))) await fs.copyFile(join(image, "bin", f), join(dir, "bin", f));
+  for (const [f, b] of Object.entries(o.bin ?? {})) await fs.writeFile(join(dir, "bin", f), b);
+  const rows = JSON.parse(await fs.readFile(join(image, "etc/dispatch.json"), "utf8")) as unknown[];
+  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([...rows, ...(o.dispatch ?? [])]));
+  await fs.writeFile(join(dir, "etc/config.json"), JSON.stringify(o.config ?? JSON.parse(await fs.readFile(join(image, "etc/config.json"), "utf8"))));
+  return dir;
+}
 
 export const until =async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
   for (const end = Date.now() + ms; Date.now() < end;) {
@@ -123,11 +139,15 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const h = {
     home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
     /**
-     * An instance's row, its
-     * genesis at first hydration (the owner's mailbox must exist first to be
-     * named in it). Its identity key (hex).
+     * An instance's row and its store booted from the default image (images/default) as a system tree with
+     * the owner as root (skein next, SPEC 8: one loader — no code genesis; the genesis is written now, so
+     * the owner's mailbox must be configured first to be named in it). Its identity key (hex).
      */
-    instance(handle: string) { db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
+    async instance(handle: string, dir = join(ROOT, "images/default")) {
+      db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() });
+      await router.bootRow(handle, await imageSource(dir));
+      return keyOf(handle).toPublicKey().toString();
+    },
     /** The same as `instance`, by its old name (for tests written before the rename). */
     agent(handle: string) { return h.instance(handle); },
     /**
@@ -207,49 +227,4 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     async entries(handle: string) { const k = (await router.hydrate(handle)).kernel; return (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n + 1; },
   };
   return h;
-}
-
-
-/**
- * A small world on a test host (the explorer's and the store reader's tests):
- * the owner's inbox, the inference peer's (hosted in the host skein), and instance `alpha` with the shell
- * app and the chat app installed (#83); `dir` imported into alpha (objects →
- * `main`); a chat whose turn makes one bash
- * tool call (`ls | head -3`) and answers "README and **src**." into the
- * owner's mailbox. The peer answers from a script, over its raw transport.
- */
-export async function chatWorld(t: { after(f: () => unknown): void }, dir: string, o: { sqlite?: boolean } = {}) {
-  const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
-  const h = await testHost(t, { infer: inferId, ...o });
-  const mailbox = await h.ownerInbox();
-  const inferBox = await h.inbox(inferKey, "infer");
-  const alpha = h.instance("alpha");
-  await h.router.start();
-  await h.install("alpha");
-  const reply = (message: Record<string, unknown>) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" }), { status: 200 });
-  const script = [
-    reply({ content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "bash", arguments: JSON.stringify({ cmd: "ls | head -3" }) } }] }),
-    reply({ content: "README and **src**." }),
-  ];
-  const w = ephemeralWallet(inferKey);
-  const peer = new InferPeer({
-    wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, log: (l) => h.lines.push(`[infer] ${l}`),
-    fetch: (async () => script.shift() ?? new Response("no more", { status: 500 })) as unknown as typeof fetch,
-    raw: {
-      inbox: new RawBox(w, inferBox),
-      outbox: (url) => new RawBox(w, url),
-      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k); return r && h.origin(r.handle); },
-    },
-  });
-  const owner = new RawBox(h.owner, `${h.base}/@alpha`);
-  const { root, bundles } = await dirBundles(dir);
-  for (const b of bundles) await owner.send(alpha, "objects", b);
-  const chat = (await owner.send(alpha, "chat", { text: "What is here?" })).id;
-  const mine = new RawBox(h.owner, mailbox);
-  await until("alpha's answer", async () => {
-    await peer.poll();
-    return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text === "README and **src**.");
-  }, 60_000);
-  await h.router.settled();
-  return { h, alpha, root, chat, store: h.db.get("alpha")!.store };
 }

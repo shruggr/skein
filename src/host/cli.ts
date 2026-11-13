@@ -236,6 +236,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
         if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = signerOf(env.vars, home).identity(handle);
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
         if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
+        // One loader (SPEC 8): a new instance starts from a tree; with no source there is no genesis to write.
+        if (!db.get(handle) && !v.boot && !v.packet && v.image === undefined) { env.err(`skein-host add ${handle}: a new instance starts from a tree: give --image, --boot or --packet`); return 2; }
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.identity ? ` · ${short(r.identity)}` : ""}`);
         if (v.boot || v.packet || v.image !== undefined) {

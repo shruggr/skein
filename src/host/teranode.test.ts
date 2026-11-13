@@ -61,7 +61,7 @@ test("teranode: an empty host syncs the whole chain from the hub before an insta
   t.after(() => f.stop());
   f.mineTo(3000);
   const h = await testHost(t, { sqlite: true, ...regtest, teranode: { bootstrap: [f.addr()], hub: f.hub, discoveryMs: 300, bulkPage: 1000 } });
-  h.instance("alice");
+  await h.instance("alice");
   await h.router.start();
   const tips = async () => (await h.router.hostChainTips())[0]?.tip;
   // (iii) the first sync, then the host chain imported, then alice hydrated.
@@ -110,7 +110,7 @@ test("teranode: a host whose host chain stayed empty (an instance created with n
   f.mineTo(500);
   // Tonight's case: no headers source at all when the instance was made — the image chain and the host chain empty.
   const h1 = await testHost(t, { sqlite: true, ...regtest });
-  h1.instance("alice");
+  await h1.instance("alice");
   await h1.router.start();
   await h1.router.hydrate("alice");
   assert.equal(h1.router.image.tip(), undefined);

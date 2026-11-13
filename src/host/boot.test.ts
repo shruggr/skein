@@ -24,7 +24,7 @@ import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, isOverla
 import { ImageChain } from "./image-chain.ts";
 import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
-import { codeSystem, genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
+import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
 
 const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
 const key = () => PrivateKey.fromRandom().toPublicKey().toString();
@@ -222,11 +222,10 @@ test("SKEIN_NETWORK: the whole host's network, every genesis's defaults.walletNe
   const row = { handle: "a", domain: "localhost" };
   const net = (c: Parameters<typeof resolveSystem>[0], s = plain, r = root) => (genesisRecord(c, resolveSystem(c, programs, s.config, r, s.dispatch)) as Record<string, any>).defaults.walletNetwork;
   const main_ = router({});
-  assert.equal(net(main_.genesisConfig(row, key(), false)), "main", "unset: main in the genesis record");
+  assert.equal(net(main_.genesisConfig(row, key())), "main", "unset: main in the genesis record");
   const test_ = router({ SKEIN_NETWORK: "test" });
-  assert.equal(net(test_.genesisConfig(row, key(), false)), "test", "an agent's genesis");
+  assert.equal(net(test_.genesisConfig(row, key())), "test", "an agent's genesis");
   assert.equal(net(test_.imageConfig(row, key())), "test", "an image's genesis (the host skein, an instance the manager makes)");
-  assert.equal((genesisRecord(test_.genesisConfig(row, key()), codeSystem(test_.genesisConfig(row, key()), programs)) as Record<string, any>).defaults.walletNetwork, "test", "code genesis");
   assert.equal(net(test_.imageConfig(row, key()), pinned, own.root), "regtest", "a tree's defaults.walletNetwork wins over the host's network");
   const warned: string[] = [];
   assert.equal(net({ ...test_.imageConfig(row, key()), overrides: { walletNetwork: "main" }, warn: (l) => warned.push(l) }, pinned, own.root), "main", "an explicit override wins over the tree");
@@ -338,4 +337,24 @@ test("#152: skein-host add <handle> --image takes default, host or a directory â
   assert.ok(rows.some((r) => r.program === "kernel" && r.address === "claim"), "unclaimed: the claim route");
   assert.equal((await k.store.get(await k.call("head", "onboard/app") as CID) as unknown as { version: string }).version, "0.5.0");
   assert.equal((await k.store.get(await k.call("head", "messagebox/app") as CID) as unknown as { version: string }).version, "0.1.0");
+});
+
+test("skein next (SPEC 8, one loader): an empty store is no instance â€” its hydration is refused; `skein-host add` of a new row with no tree is refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-one-loader-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const db = new HostDb(join(home, "host.db"));
+  const signer = new Signer(PrivateKey.fromRandom());
+  const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  t.after(async () => { await r.close(); db.close(); });
+  db.add("empty", { store: join(home, "instances/empty/runtime.db") });
+  await assert.rejects(r.hydrate("empty"), /its store is empty: an instance starts from a tree/);
+  assert.equal(r.loaded.size, 0, "nothing loaded");
+  // The same row booted from a tree (the default image) starts.
+  await r.bootRow("empty", await imageSource());
+  assert.ok((await r.hydrate("empty")).identity);
+
+  const err: string[] = [];
+  const env = { vars: { HOME: home, SKEIN_HOME: join(home, "cli"), SKEIN_MASTER_KEY: "33".repeat(32) }, out: () => {}, err: (l: string) => err.push(l) };
+  assert.equal(await main(["add", "bare"], env), 2);
+  assert.match(err.at(-1)!, /a new instance starts from a tree: give --image, --boot or --packet/);
 });

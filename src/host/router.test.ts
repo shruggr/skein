@@ -29,7 +29,7 @@ import { ephemeralWallet } from "../wallet.ts";
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's hosted mailbox over http; list/ack; polls are reads: no entries, nothing moves", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
-  const alpha = h.instance("alpha");
+  const alpha = await h.instance("alpha");
   await h.router.start();
   await h.install("alpha"); // #83: `run` and `chat` are the shell app's and the chat app's
 
@@ -84,11 +84,11 @@ test("router: the stock client by host name, our client by path prefix; the answ
 
 test("router: an instance's genesis names the owner's configured messagebox (SKEIN_OWNER_MESSAGEBOX) when it is set first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.instance("early"); // genesised before the owner's messagebox is configured
+  await h.instance("early"); // genesised before the owner's messagebox is configured
   await h.router.hydrate("early");
   assert.ok(h.lines.some((l) => l.startsWith("[early] WARNING: its genesis names no owner messagebox")), `warned (${h.lines.join(" | ")})`);
   const mailbox = await h.ownerInbox();
-  h.instance("late");
+  await h.instance("late");
   const k = (await h.router.hydrate("late")).kernel;
   const g = await k.genesis() as { defaults: Record<string, string> };
   assert.equal(g.defaults.ownerMessagebox, mailbox, "the configured messagebox");
@@ -98,7 +98,7 @@ test("router: an instance's genesis names the owner's configured messagebox (SKE
 test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on the host skein that keeps the hosted mailbox (host B) and an instance (host A); a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   const mailbox = await h.ownerInbox();
-  h.instance("alpha");
+  await h.instance("alpha");
   await h.router.start();
   await h.router.settled();
   const b = await h.inboxHost();
@@ -166,8 +166,8 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   t.after(() => { for (const c of conns) c.end(); server.close(); });
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
   const h = await testHost(t, { headersFeed: url });
-  h.instance("a");
-  h.instance("b");
+  await h.instance("a");
+  await h.instance("b");
   await h.router.start();
   await h.router.settled();
   const subscribed = () => ["a", "b"].filter((x) => h.router.feeds.hosts(x));
@@ -220,7 +220,7 @@ test("router: registration through the host skein (#113) — POST /account/regis
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
   const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
-  h.instance("alpha");
+  await h.instance("alpha");
 
   // Where a page finds the router and the handle domain (the app's config): at any host name.
   for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {
