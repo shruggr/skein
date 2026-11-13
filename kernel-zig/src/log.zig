@@ -1,105 +1,43 @@
-// The input log and the record shapes the scheduler checks, in format 10
-// (#146: the BEEF envelope beside the pointer record, not in it — no migration, a store in format 9
-// is refused; #143, format 9: routes, filters, roles; #77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
-// unsigned, identity keys as 33-byte byte strings in every record). Skein is
-// a state process: every package a transport carries in is an entry,
-// appended as received, and the instance's middleware (the front door) is
-// stepped on it; a message the host admits directly and an event from the
-// host's wiring (a header feed, a proof) are the others. There is no wake
-// entry (format 7, #69): a deadline and a sleep are answered by the waker
-// provider's signed message.
+// The input log and the record shapes the scheduler checks, in format 12 (skein next, SPEC.md
+// sections 2-4: no backward compatibility — a store in format 11 or older is refused, index.zig).
+// An instance is a log, a store, a route table with roles, and programs. An arrival earns its log
+// entry in one of two ways: its SENDER is proven (a signed request) or its CONTENT is proven (the
+// route's checks). The kernel checks it (CHECK), then writes it (COMMIT) — scheduler.zig.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport (+ door)}
-//            #163: the kernel appends every entry but the genesis — the host hands over the body and
-//            its stamp (`time`, the host's clock at admission), the kernel assigns `prev` and `n`
-//            from its tip and raises `time` to the tip's when it is behind (scheduler.zig admit/
-//            extend). The genesis (n = 0, no prev) is the host's, through `append`.
-//   door     (#121, #143) a request's admission: what the door established before the entry was
-//            written — {principal?: bytes(33) (who the filters, or the transport, say it is from),
-//            verified?: {caller, theirs, requestId} (kernel.brc104's: the session the answer is
-//            signed on), filters?: [<the route's filters that ran>], beefs?: [<pointer record CID>]
-//            (#146: the package holds each BEEF's envelope {form, beef: <pointer record CID>,
-//            subject?, vout?} where its bytes were; beef.zig),
-//            blocks?: [<CID a filter stored>], bodies?: [{of, is}]} — the request record then the
-//            package as the door handed it back (a filter's rewrite: door.zig, beef.zig). A request
-//            a filter rejects or answers, or the gate refuses, writes no entry (#143)
-//   request  a package as a transport carried it in (#68), unverified: the
-//            host verifies nothing. `transport` names the middleware stepped
-//            on it (the genesis's front door for "http", "libp2p" and
-//            "local": scheduler.zig middlewareOf). The record:
-//              http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
-//                      `path` as the client sent it (what BRC-104 signs), `route` what the
-//                      routes table sees (the host strips `/@<handle>`)
-//              libp2p  {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
-//                      a GossipSub message, signature and all — the same record an accepted
-//                      message is routed as (box `libp2p:<topic>`)
-//                      {kind: "p2p-frame", protocol, from: bytes, body: bytes, topic?}
-//                      one frame of an inbound stream (unsigned: the stream is Noise's);
-//                      0.6.0: `topic`, on a frame the host itself writes into an overlay's
-//                      receive row, the one topic it fetched the BEEF for (the front door
-//                      hands it to the handler)
-//              local   {kind: "message", message: <a mail record>, body: bytes}
-//                      a message the host carried in with its body (#70): a provider's
-//                      answer or a forwarded claim, signed (the front door checks the
-//                      signature), or the host's loopback (#79) — this instance's own
-//                      emit to itself, unsigned (the front door finds it in the store)
-//   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, subject?: <cid>,
-//             (#127: a claim, box `claim`, may name no recipient — signed before the instance it
-//             claims existed and forwarded into it by the host)
-//             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes}
-//            a message (#40, #70): its CID is the message's id — what a
-//            reply's `replyTo` names. Its sender is proven by the transport
-//            that carried it (#126 step 4): `session`, the BRC-104 signed
-//            request it came in (a BRC-33 client's); an emitted message
-//            (`nonce`: the emit's own, no session) delivered on the sender's
-//            BRC-104 session to this instance's front door or over libp2p —
-//            the request entry it was admitted from holds the proof, and the
-//            record is the one the sender emitted, so both know it by one CID.
-//            `signature` (BRC-169's signing — [2, "metanet handles envelope"],
-//            key "send", counterparty anyone; the SDK's message.zig) is on the
-//            records no session of this instance's carries: a claim (#127), a
-//            host provider's answer and the instance's request an intention's
-//            answer carries (#126); and on every emitted message in a log
-//            written before #126 step 4, read (replay serves that signing from
-//            the witness: scheduler.zig oldEnvelope), never written. Routed to
-//            the thread awaiting the message its body's `replyTo` names, else
-//            by subscription on (sender, box). Since #68 a message arrives
-//            inside a request and the middleware's step routes it; a host may
-//            still admit one as an entry of its own (the browser's).
-//   event    a record from the host's wiring, self-validating (#29, #65: a
-//            header from a feed; a proof — a transaction's merkle path — from
-//            the broadcaster's Arcade session), routed by its `subject` or by box;
-//            on a box whose `event` route names kernel.beef (#121, #164) the
-//            record as the door handed it back (no `door` on the entry)
-//   genesis  {kind: "genesis", identity: bytes, root?: [bytes], handle, domain, programs,
-//             dispatch: [<route>], roles?: {<role>: ["<program>.<fn>"]},
-//             scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
-//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
-//             addressBook?: [{key: bytes, transport, address, handle?, domain?}]}
-//            `dispatch` (#77; #143, format 9): the seed of the route table (dispatch.zig: the routes
-//            — boxes, events, HTTP paths, libp2p topics and protocols — and the admin routes
-//            whose program is the kernel), written as the chain's first updates when the
-//            genesis is processed. `root` (#143): the initial root holders, written into the
-//            head `grants` when the genesis is processed (grants.zig); none: an image, claimed
-//            by its first claim. `roles` (#143): what gates the genesis's own programs'
-//            functions (the explorer: {root: ["frontdoor.explore"]}). No `owner` (#143: the
-//            owner is root), no `reads` (#143: a read is a route). `scopes`: the heads a genesis-wired program (one with no
-//            app record) may advance, by the program's name — an exact head name, or a prefix
-//            ending in `/` (an app's program writes `<app>/…` by its record's `app`). A genesis
-//            naming `subscriptions` or `routes` (format 7) is refused.
-//            `tree` (issue #4): the system tree the instance booted from (a git
-//            tree, its objects pre-filled by the loader); processing the genesis
-//            sets the head `main` to it.
-//            `heads` (#141): {<head name>: <record CID>} — an image's installed apps (`<app>/app`,
-//            the app record); processing the genesis advances each, after
-//            the dispatch rows (the records pre-filled by the loader, as the tree's objects are).
-//            `addressBook` (#70): the address book's seed (the host's providers,
-//            the owner's mailbox), written into the head `peers` when the
-//            genesis is processed.
-//            No `root` (#89, #143): an image. The default image is one genesis
-//            for everyone; its routes carry a `claim` route to the kernel,
-//            and root comes with the claim (scheduler.zig claim: root granted
-//            to the claimant; the head `claim` keeps what was claimed).
+//   entry    {kind: "log", prev, n, time, genesis | request: <cid> + door | event: <cid> + name + door}
+//            The kernel appends every entry but the genesis (#163): the host hands over the arrival
+//            and its stamp (`time`), COMMIT assigns `prev` and `n` from its tip and raises `time` to
+//            the tip's when it is behind. The genesis (n = 0, no prev) is the host's (`append`).
+//   door     what CHECK established, so a replay never needs the signer or a re-verification:
+//            {principal?: bytes(33), scheme?: text, row: <the matched row>, checks: [<names that
+//            ran>], blocks?: [<cids the checks stored>], request?: <cid> (a request entry: the
+//            package as the checks handed it back) | event?: <cid> (an event entry: likewise)}.
+//            An arrival CHECK refuses writes nothing.
+//   request  {kind: "request", payload: {method, path, query, headers: {name: text}, body: bytes},
+//             signature?: {scheme, …}}
+//            `path` is what the route table matches. `signature` absent: a content-proven arrival
+//            (the row's role is `anyone` and its checks prove it). Schemes (door.zig):
+//              brc104  {scheme: "brc104", version: text, identityKey: bytes(33), nonce: text,
+//                       yourNonce: text, requestId: text (base64 of 32 bytes), signature: bytes}
+//                      — the x-bsv-auth-* headers as the host gathered them; the signed payload is
+//                      BRC-104's request serialization of `payload`
+//              signed  {scheme: "signed", sender: bytes(33), recipient: bytes(33), nonce: bytes,
+//                       signature: bytes} — BRC-169's message signing ([2, "metanet handles
+//                       envelope"], key "send", counterparty anyone) over dag-cbor {sender,
+//                       recipient, nonce, payload}; `recipient` is this instance
+//            A signed request record is admitted once: the `unique` map keys it by its CID
+//            (index.zig uniqueOf), so an identical one is refused at CHECK and at COMMIT.
+//   event    any map: the host's own fact (the chain pointer {kind: "chain", root, height}, a merkle
+//            proof, a deploy BEEF), routed by its `name` to an event row.
+//   genesis  {kind: "genesis", identity: bytes(33), handle, domain, routes: [<row>],
+//             grants?: {<role>: [bytes(33)]}, calls?, services?, defaults?: {<name>: text},
+//             tree?: <git tree>, heads?: {<head name>: <record cid>}}
+//            `routes` (dispatch.zig) seed the route table and `grants` the head `grants`
+//            (grants.zig), in that order, when the genesis is processed; then `tree` → head `main`,
+//            then each of `heads` (an image's installed apps, `<app>/app`). Who builds the image
+//            decides what the starting table holds. Gone (refused): owner, root, roles, programs,
+//            middleware, scopes, peers, addressBook, names, collect, dispatch, feeds,
+//            resolveOrigin, ownerMessagebox (and the older host, attest, jobs, subscriptions, reads).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -129,11 +67,11 @@ pub fn eventRecord(a: std.mem.Allocator, emit: Value, name: []const u8, app: ?[]
     return rec.value();
 }
 
-/// The intentions (#119, #126, #138, #157): event names the kernel or the host wires as
-/// requests of their own — not facts. They are not under the name rule (an app emits them by
+/// The intentions (#119, #126, #138; skein next: membership only — no fetch, deadline, deliver,
+/// want): event names the host wires as declarations of its own — not facts. They are not under the name rule (an app emits them by
 /// these names) and not in the event index (index.zig `events`); everything else a program emits
 /// as {event: <name>} is a fact, indexed by name.
-pub const intentions = [_][]const u8{ "fetch", "deliver", "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness" };
+pub const intentions = [_][]const u8{ "subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness" };
 
 pub fn isIntention(name: []const u8) bool {
     for (intentions) |x| if (std.mem.eql(u8, x, name)) return true;
@@ -179,7 +117,7 @@ test "event names (0.5.0): segments, the app's own first segment, intentions apa
     try std.testing.expect(underApp("amm", "amm"));
     try std.testing.expect(!underApp("ammx/pool", "amm"));
     try std.testing.expect(!underApp("pool", "amm"));
-    try std.testing.expect(isIntention("subscribe") and isIntention("fetch") and !isIntention("amm/fetch"));
+    try std.testing.expect(isIntention("subscribe") and !isIntention("fetch") and !isIntention("deadline") and !isIntention("amm/subscribe"));
 }
 
 /// Whether a record is an emitted event of #119's kind ({kind: "event", event: <name>, …}).
@@ -233,151 +171,68 @@ pub fn stampOf(v: ?Value) ?syscalls.Stamp {
     return .{ .sec = @intCast(s), .nsec = @intCast(n) };
 }
 
-/// A plain entry (#29): an event the host admits from a feed it holds (a
-/// header, a proof, a transaction status), the record `event` names, routed
-/// by `box` (or its `subject`). No envelope: it self-validates inside the
-/// program that takes it.
-pub fn isEventEntry(e: Value) bool {
-    return isLogEntry(e) and e.get("event") != null;
-}
-
-/// The one entry encoding (format 7, #69): {kind: "log", prev, n, time} and
-/// exactly one of genesis | mail | event (+box) | request (+transport).
-/// No signature on any of them.
+/// The one entry encoding (format 12): {kind: "log", prev, n, time} and exactly one of genesis |
+/// request (+ door) | event (+ name, door). No signature on any of them.
 pub fn isLogEntry(e: Value) bool {
     if (e != .map) return false;
-    const kind = Value.str(e.get("kind")) orelse return false;
-    if (!std.mem.eql(u8, kind, "log")) return false;
+    if (!std.mem.eql(u8, Value.str(e.get("kind")) orelse "", "log")) return false;
     if (!Value.isNumber(e.get("n"))) return false;
-    if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    if (e.get("wake") != null) return false; // format 6: a wake entry (#69: the waker's message now)
-    for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| {
+    for ([_][]const u8{ "genesis", "event", "request" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
-    for ([_][]const u8{ "envelope", "body", "outcome" }) |k| if (e.get(k) != null) return false; // format 2
-    // A box goes with an event, and only with it.
-    if (e.get("event") != null) {
-        if (e.get("event").? != .cid) return false;
-        const box = Value.str(e.get("box")) orelse return false;
-        if (box.len == 0) return false;
-    } else if (e.get("box") != null) return false;
-    if (e.get("mail")) |m| if (m != .cid) return false;
-    // A transport goes with a request, and only with it (#68); so does the door's outcome (#121).
-    // #143: no `refused` — a request the door turns away writes no entry.
-    if (e.get("refused") != null) return false;
+    for (e.map) |x| {
+        const known = for ([_][]const u8{ "kind", "prev", "n", "time", "genesis", "event", "request", "name", "door" }) |k| {
+            if (std.mem.eql(u8, x.key, k)) break true;
+        } else false;
+        if (!known) return false;
+    }
+    if (e.get("genesis")) |g| {
+        if (g != .cid) return false;
+        return e.get("name") == null and e.get("door") == null;
+    }
+    const d = e.get("door") orelse return false;
+    if (d != .map) return false;
     if (e.get("request")) |r| {
         if (r != .cid) return false;
-        const t = Value.str(e.get("transport")) orelse return false;
-        if (t.len == 0) return false;
-        if (e.get("door")) |d| if (d != .map) return false;
-    } else if (e.get("transport") != null or e.get("door") != null) return false;
-    return true;
+        return e.get("name") == null;
+    }
+    if (e.get("event").? != .cid) return false;
+    const name = Value.str(e.get("name")) orelse return false;
+    return dispatch.isBox(name);
 }
 
-/// A request record (#68): the package a transport carried in, in the shape
-/// that transport's middleware reads (the header's table). Checked at
-/// admission for its form only; what it says is the middleware's to judge.
-pub fn isRequest(transport: []const u8, x: ?Value) bool {
+/// A request record (SPEC 2): {kind: "request", payload: {method, path, query, headers: {name:
+/// text}, body: bytes}, signature?: {scheme: text, …}}. Its form only; who it is from is door.zig's.
+pub fn isRequest(x: ?Value) bool {
     const r = x orelse return false;
     if (r != .map) return false;
-    const kind = Value.str(r.get("kind")) orelse return false;
-    if (std.mem.eql(u8, transport, "http")) {
-        if (!std.mem.eql(u8, kind, "http")) return false;
-        for ([_][]const u8{ "method", "path", "route", "query" }) |k| if (Value.str(r.get(k)) == null) return false;
-        const h = r.get("headers") orelse return false;
-        if (h != .map) return false;
-        for (h.map) |e| if (e.value != .string) return false;
-        return Value.bytesOf(r.get("body")) != null;
-    }
-    if (std.mem.eql(u8, transport, "libp2p")) {
-        if (Value.bytesOf(r.get("from")) == null or Value.bytesOf(r.get("body")) == null) return false;
-        if (std.mem.eql(u8, kind, "p2p")) {
-            if (Value.str(r.get("topic")) == null) return false;
-            return Value.bytesOf(r.get("seqno")) != null and Value.bytesOf(r.get("signature")) != null;
-        }
-        if (std.mem.eql(u8, kind, "p2p-frame")) return Value.str(r.get("protocol")) != null;
-        return false;
-    }
-    if (std.mem.eql(u8, transport, "local")) {
-        // #70: a signed message and its body, as a provider carried it in — or (#79, #126 step 4)
-        // the loopback, the instance's own unsigned emit to itself (the front door checks it is).
-        if (!std.mem.eql(u8, kind, "message")) return false;
-        const m = r.get("message") orelse return false;
-        if (!isMail(m)) return false;
-        if (Value.bytesOf(m.get("signature")) == null and !std.mem.eql(u8, Value.bytesOf(m.get("sender")).?, Value.bytesOf(m.get("recipient")) orelse "")) return false;
-        return Value.bytesOf(r.get("body")) != null;
-    }
-    return false;
-}
-
-/// The transports an address book entry may name (#70): a messagebox URL over
-/// BRC-103/104, a libp2p peer ID or `topic:<name>`, a host provider's name.
-pub const transports = [_][]const u8{ "mailbox", "libp2p", "local" };
-
-pub fn isTransport(t: []const u8) bool {
-    for (transports) |x| if (std.mem.eql(u8, x, t)) return true;
-    return false;
-}
-
-/// An address book entry as a genesis seeds it, or as the head `peers` holds
-/// it (#70): {key, transport, address, handle?, domain?} (the peer record adds
-/// kind, since, source). No role (#126); an older genesis's `role` (text) is
-/// read and not kept.
-pub fn isAddress(x: ?Value) bool {
-    const e = x orelse return false;
-    if (e != .map) return false;
-    if (!secp.isKey(Value.bytesOf(e.get("key")) orelse return false)) return false;
-    if (!isTransport(Value.str(e.get("transport")) orelse return false)) return false;
-    if ((Value.str(e.get("address")) orelse return false).len == 0) return false;
-    for ([_][]const u8{ "role", "handle", "domain" }) |k| if (e.get(k)) |v| if (v != .string and v != .null) return false;
-    return true;
-}
-
-/// A message record (#40): a BRC-33 message that arrived, its sender the
-/// authenticated one. A box a client names never starts with ':' (reserved
-/// for the host's own boxes).
-pub fn isMail(x: ?Value) bool {
-    const m = x orelse return false;
-    if (m != .map) return false;
-    if (!std.mem.eql(u8, Value.str(m.get("kind")) orelse return false, "mail")) return false;
-    if (!std.mem.eql(u8, Value.str(m.get("op")) orelse return false, "put")) return false;
-    if (!secp.isKey(Value.bytesOf(m.get("sender")) orelse return false)) return false;
-    const box = Value.str(m.get("box")) orelse return false;
-    if (box.len == 0 or box[0] == ':') return false;
-    // #127: a claim may name no recipient (signed before the instance it claims existed, forwarded into it).
-    if (m.get("recipient")) |r| {
-        if (!secp.isKey(Value.bytesOf(r) orelse return false)) return false;
-    } else if (!std.mem.eql(u8, box, CLAIM_BOX)) return false;
-    if (Value.cidOf(m.get("body")) == null) return false;
-    if (m.get("json")) |j| if (j != .bool) return false;
-    if (m.get("subject")) |s| if (s != .cid) return false;
-    if (m.get("session")) |s| {
+    if (!std.mem.eql(u8, Value.str(r.get("kind")) orelse "", "request")) return false;
+    for (r.map) |e| if (!std.mem.eql(u8, e.key, "kind") and !std.mem.eql(u8, e.key, "payload") and !std.mem.eql(u8, e.key, "signature")) return false;
+    const p = r.get("payload") orelse return false;
+    if (p != .map) return false;
+    for ([_][]const u8{ "method", "path", "query" }) |k| if (Value.str(p.get(k)) == null) return false;
+    if ((Value.str(p.get("method")).?).len == 0) return false;
+    const h = p.get("headers") orelse return false;
+    if (h != .map) return false;
+    for (h.map) |e| if (e.value != .string) return false;
+    if (Value.bytesOf(p.get("body")) == null) return false;
+    if (r.get("signature")) |s| {
         if (s != .map) return false;
-        if (Value.bytesOf(s.get("payload")) == null or Value.bytesOf(s.get("signature")) == null) return false;
-        if (Value.str(s.get("nonce")) == null or Value.str(s.get("yourNonce")) == null) return false;
-        if (m.get("signature") != null) return false; // proven one way or the other
+        if (Value.str(s.get("scheme")) == null) return false;
     }
-    if (m.get("signature")) |s| if (s != .bytes) return false;
-    if (m.get("nonce")) |s| if (s != .bytes) return false;
     return true;
 }
 
-/// A signed message's preimage (#70): the dag-cbor of its mail record without
-/// `signature` — what the sender signed, BRC-169's way ([2, "metanet handles
-/// envelope"], key "send", counterparty anyone; message.zig in the SDK (lib/)
-/// checks it): a claim, a provider's answer, an emit in a log before #126 step 4.
-pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
-    return cbor.encode(a, try cbor.without(a, m, "signature"));
+/// Whether a request record carries a signature (an arrival of kind (a), SPEC 1).
+pub fn isSigned(r: Value) bool {
+    return r.get("signature") != null;
 }
 
-/// The BRC-43 protocol and key a signed message is signed under (#70: BRC-169 §7.2's) — a claim, a
-/// provider's answer, an intention's request; an emit before #126 step 4 (read on replay, never written).
+/// The BRC-43 protocol and key the `signed` scheme signs under (BRC-169 §7.2's message signing).
 pub const MESSAGE_PROTOCOL = "metanet handles envelope";
 pub const MESSAGE_KEY_ID = "send";
-/// The one box a message may name no recipient in (#127: a claim, forwarded; the SDK's message.CLAIM_BOX).
-pub const CLAIM_BOX = "claim";
 
 fn isCidMap(v: ?Value) bool {
     const m = v orelse return false;
@@ -386,41 +241,18 @@ fn isCidMap(v: ?Value) bool {
     return true;
 }
 
-/// records.ts isGenesis.
+/// The genesis fields gone in format 12 (and before): a genesis naming one is refused.
+const gone_fields = [_][]const u8{ "owner", "root", "roles", "programs", "middleware", "scopes", "peers", "addressBook", "names", "collect", "dispatch", "feeds", "resolveOrigin", "ownerMessagebox", "host", "attest", "jobs", "subscriptions", "reads" };
+
+/// The genesis record (format 12).
 pub fn isGenesis(x: ?Value) bool {
     const g = x orelse return false;
     if (g != .map) return false;
     if (!std.mem.eql(u8, Value.str(g.get("kind")) orelse return false, "genesis")) return false;
     if (!secp.isKey(Value.bytesOf(g.get("identity")) orelse return false)) return false;
-    // #143 (format 9): no owner — root holders, keys; an image names none (the claim brings root).
-    if (g.get("owner") != null) return false;
-    if (g.get("root")) |r| {
-        if (r != .array) return false;
-        for (r.array) |k| if (!secp.isKey(Value.bytesOf(k) orelse return false)) return false;
-    }
-    // #143: what gates the genesis's own programs' functions: {<role>: ["<program>.<fn>"]}.
-    if (g.get("roles")) |rs| {
-        if (rs != .map) return false;
-        for (rs.map) |e| {
-            if (e.value != .array) return false;
-            for (e.value.array) |f| if (Value.str(f) == null) return false;
-        }
-    }
-    if (g.get("host") != null) return false; // format 1
-    // #62's attest key went with the recorded http/libp2p calls (#67, format 6).
-    if (g.get("attest") != null) return false;
-    // #60's jobs went with the host's cron clock (#69, format 7): a schedule is a message to the cron provider.
-    if (g.get("jobs") != null) return false;
-    // #70: the address book's seed.
-    if (g.get("addressBook")) |ab| {
-        if (ab != .array) return false;
-        for (ab.array) |e| if (!isAddress(e)) return false;
-    }
+    for (gone_fields) |k| if (g.get(k) != null) return false;
     if (Value.str(g.get("handle")) == null or Value.str(g.get("domain")) == null) return false;
-    if (!isCidMap(g.get("programs"))) return false;
-    // #77 (format 8): one dispatch table; no subscriptions chain, no routes.
-    if (g.get("subscriptions") != null or g.get("routes") != null) return false;
-    const rows = g.get("dispatch") orelse return false;
+    const rows = g.get("routes") orelse return false;
     if (rows != .array) return false;
     var scratch: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
@@ -429,11 +261,12 @@ pub fn isGenesis(x: ?Value) bool {
         const bad = dispatch.problem(fba.allocator(), r) catch return false;
         if (bad != null) return false;
     }
-    if (g.get("scopes")) |sc| {
-        if (sc != .map) return false;
-        for (sc.map) |e| {
-            if (e.value != .array) return false;
-            for (e.value.array) |h| if (h != .string or h.string.len == 0) return false;
+    // The starting grants: {<role>: [key …]}, each role grantable (root, <app>.<role>).
+    if (g.get("grants")) |gs| {
+        if (gs != .map) return false;
+        for (gs.map) |e| {
+            if (!grants.isGrantable(e.key) or e.value != .array) return false;
+            for (e.value.array) |k| if (!secp.isKey(Value.bytesOf(k) orelse return false)) return false;
         }
     }
     // Call permissions (grants.zig): {<caller>: {<callee>: [<name> …] | "*"}} and {<caller>: [<service> …]},
@@ -459,28 +292,13 @@ pub fn isGenesis(x: ?Value) bool {
             for (e.value.array) |svc| if (!grants.isService(Value.str(svc) orelse return false)) return false;
         }
     }
-    if (g.get("peers")) |p| {
-        if (p != .map) return false;
-        for (p.map) |e| if (!secp.isKey(Value.bytesOf(e.value) orelse return false)) return false;
-    }
     if (g.get("defaults")) |d| {
         if (d != .map) return false;
         for (d.map) |e| if (e.value != .string) return false;
     }
-    if (g.get("names")) |n| {
-        if (n != .array) return false;
-        for (n.array) |e| {
-            if (e != .map or !secp.isKey(Value.bytesOf(e.get("identityKey")) orelse return false)) return false;
-            if (Value.str(e.get("handle")) == null or Value.str(e.get("domain")) == null) return false;
-        }
-    }
-    if (g.get("collect")) |c| {
-        if (c != .array) return false;
-        for (c.array) |b| if (b != .string or b.string.len == 0) return false;
-    }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
     // An image's installed apps (#141): {<head name>: <record CID>}, each head advanced when the genesis is
-    // processed. Not `main` (the tree's), `claim` (the claim's) or `grants` (the kernel's own, #143).
+    // processed. Not `main` (the tree's), `claim` (the claim's) or `grants` (the kernel's own).
     if (g.get("heads")) |hs| {
         if (!isCidMap(hs)) return false;
         for (hs.map) |e| {
@@ -488,12 +306,10 @@ pub fn isGenesis(x: ?Value) bool {
             for ([_][]const u8{ "main", "claim", "grants" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
         }
     }
-    // #143: no reads table (a read is a route: filters only).
-    if (g.get("reads") != null) return false;
     return true;
 }
 
-/// A signer call a step made (#67: the one recorded call left): {kind:
+/// A signer call a step made (#67: the one recorded call): {kind:
 /// "oracle", thread, step, i, request: bytes (the BRC-100 wire frame),
 /// result: bytes (its answer)}. Replay serves `result` for the call at (thread,
 /// step, i) and never asks a wallet (records.ts isSignerCall). The kind

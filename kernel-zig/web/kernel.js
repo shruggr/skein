@@ -256,8 +256,6 @@ export class Kernel {
   open(id) { this.check(this.x.skein_open(id)); }
   /** A call's return value: a failure (< 0) throws with the kernel's message. */
   check(r) { if (r < 0) throw new Error(`kernel: ${dec.decode(this.result(-r - 1))}`); return r; }
-  /** The pinned modules and files: dag-cbor [{name, file, cid}]. */
-  modulesList() { return this.result(this.x.skein_modules()); }
   putBlock(cid, bytes) {
     const c = this.push(cid), b = this.push(bytes);
     try { this.check(this.x.skein_put_block(c[0], c[1], b[0], b[1])); } finally { this.release(c); this.release(b); }
@@ -267,12 +265,12 @@ export class Kernel {
     try { const n = this.x.skein_get_block(c[0], c[1]); return n === -1 ? undefined : this.result(this.check(n)); } finally { this.release(c); }
   }
   /**
-   * A serve op as a frame {op, v} (dag-cbor) → the reply frame (dag-cbor {ok} | {error, rejected}).
-   * Among them the kernel's `call` (#40): {op: "call", v: {program, fn, arg, caller?, now?}} → ok {ok, result | error, fuel}.
+   * An op as a frame {op, v} (dag-cbor) → the reply frame (dag-cbor {ok} | {error, rejected}) —
+   * among them `check` (CHECK: reads only) and `commit` (COMMIT: the entry written and its step run
+   * here, before the next call), and the kernel's `call` (#40): {op: "call", v: {program, fn, arg,
+   * caller?, now}} → ok {ok, result | error, fuel}. kernel-zig/README.md, "The host surface".
    */
   call(frame) { const f = this.push(frame); try { return this.result(this.x.skein_call(f[0], f[1])); } finally { this.release(f); } }
-  /** serve's admit ({entry, envelope?, body?}, dag-cbor) → the reply frame; not processed until drain. */
-  admit(frame) { const f = this.push(frame); try { return this.result(this.x.skein_admit(f[0], f[1])); } finally { this.release(f); } }
   start() { return this.result(this.x.skein_start()); }
   drain() { return this.result(this.x.skein_drain()); }
   state() { return this.result(this.x.skein_state()); }

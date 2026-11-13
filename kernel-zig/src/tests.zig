@@ -25,6 +25,7 @@ test {
     _ = @import("log.zig");
     _ = @import("beef.zig");
     _ = @import("door_test.zig");
+    _ = @import("runtime_test.zig");
     _ = @import("authfetch.zig");
     _ = @import("grants.zig");
     _ = @import("rocksdb_store.zig");
@@ -85,19 +86,6 @@ test "anyone signatures and JCS as in TS" {
         try json.jcs(&out, v);
         try std.testing.expectEqualStrings(c.object.get("jcs").?.string, out.items);
     }
-}
-
-test "format 2 (issue #33): genesis keys are bytes; entries unsigned" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/format2.json", a, .limited(1 << 20));
-    const f = (try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{})).object;
-    const logm = @import("log.zig");
-    try std.testing.expect(logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesis").?.string))));
-    try std.testing.expect(!logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesisWithHost").?.string))));
-    try std.testing.expect(logm.isLogEntry(try cbor.decode(a, try unhex(a, f.get("entry").?.string))));
-    try std.testing.expect(!logm.isLogEntry(try cbor.decode(a, try unhex(a, f.get("entrySigned").?.string))));
 }
 
 test "entropy stream and the fixed CIDs" {
@@ -167,81 +155,3 @@ test "traps come back as V8 names them (modules as in README; messages read from
 }
 
 // ---------------------------------------------------------------- the dispatch table's cases (#115)
-
-const dispatch = @import("dispatch.zig");
-
-/// A fixture value as the kernel holds it: "$<name>" a key, "$cid" the CID, "$bytes32" 32 bytes.
-fn caseValue(a: std.mem.Allocator, f: std.json.Value, j: std.json.Value) !cbor.Value {
-    return switch (j) {
-        .null => .null,
-        .bool => |b| .{ .bool = b },
-        .integer => |i| cbor.int(i),
-        .string => |s| blk: {
-            if (std.mem.eql(u8, s, "$cid")) break :blk cbor.cidv(try cidm.parse(a, f.object.get("cid").?.string));
-            if (std.mem.eql(u8, s, "$bytes32")) break :blk .{ .bytes = try a.alloc(u8, 32) };
-            if (s.len > 1 and s[0] == '$') if (f.object.get("keys").?.object.get(s[1..])) |k| break :blk .{ .bytes = try unhex(a, k.string) };
-            break :blk cbor.string(s);
-        },
-        .array => |xs| blk: {
-            const out = try a.alloc(cbor.Value, xs.items.len);
-            for (xs.items, out) |x, *o| o.* = try caseValue(a, f, x);
-            break :blk .{ .array = out };
-        },
-        .object => |o| blk: {
-            var m = cbor.MapBuilder.init(a);
-            var it = o.iterator();
-            while (it.next()) |e| try m.put(e.key_ptr.*, try caseValue(a, f, e.value_ptr.*));
-            break :blk m.value();
-        },
-        else => error.BadFixture,
-    };
-}
-
-fn idOf(r: ?dispatch.Row) ?[]const u8 {
-    const x = r orelse return null;
-    return cbor.Value.str(x.value.get("id"));
-}
-
-test "the route table: fold and match, the cases dispatch.ts is checked against (test/dispatch-cases.json)" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/dispatch-cases.json", a, .limited(1 << 20));
-    const f = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-    for (f.object.get("tables").?.array.items) |t| {
-        const name = t.object.get("name").?.string;
-        const ups = t.object.get("updates").?.array.items;
-        const vals = try a.alloc(cbor.Value, ups.len);
-        for (ups, vals) |u, *v| v.* = try caseValue(a, f, u);
-        const rows = try dispatch.fold(a, vals);
-        const want_fold = t.object.get("fold").?.array.items;
-        std.testing.expectEqual(want_fold.len, rows.len) catch |e| {
-            std.debug.print("{s}: fold\n", .{name});
-            return e;
-        };
-        for (want_fold, rows) |w, r| try std.testing.expectEqualStrings(w.string, idOf(r).?);
-        for (t.object.get("cases").?.array.items, 0..) |c, i| {
-            const kind = c.object.get("kind").?.string;
-            const want = c.object.get("want").?;
-            const got: ?[]const u8 = if (std.mem.eql(u8, kind, "mail"))
-                idOf(dispatch.forMail(rows, c.object.get("box").?.string))
-            else if (std.mem.eql(u8, kind, "event"))
-                idOf(dispatch.forEvent(rows, c.object.get("box").?.string))
-            else if (std.mem.eql(u8, kind, "http"))
-                idOf(dispatch.forHttp(rows, c.object.get("path").?.string))
-            else if (std.mem.eql(u8, kind, "libp2p"))
-                idOf(dispatch.forLibp2p(rows, c.object.get("name").?.string))
-            else
-                return error.BadFixture;
-            const ok = switch (want) {
-                .null => got == null,
-                .string => |s| got != null and std.mem.eql(u8, got.?, s),
-                else => false,
-            };
-            if (!ok) {
-                std.debug.print("{s}: case {d} ({s}): got {?s}\n", .{ name, i, kind, got });
-                return error.TestUnexpectedResult;
-            }
-        }
-    }
-}

@@ -1,5 +1,5 @@
-// The kernel's own BRC-100 wire frames to the signer (#70): what `emit` signs
-// a message with, and (#126) what `authfetch` signs and verifies with. The same framing as a program's (the SDK's lib/brc104.zig
+// The kernel's own BRC-100 wire frames to the signer: what the brc104 scheme checks a request's
+// server nonce and signature with (door.zig). The same framing as a program's (the SDK's
 // keyParams): the call code, an empty originator, security level, protocol,
 // key ID, counterparty, privileged false; the answer frame is 0 ‖ payload on
 // success. A frame the kernel makes goes through the step's `wallet` path, so
@@ -58,6 +58,18 @@ pub fn verifySignatureFrame(a: std.mem.Allocator, protocol: []const u8, key_id: 
     try varint(a, &f, sig.len);
     try f.appendSlice(sig);
     try f.append(1); // data follows
+    try varint(a, &f, data.len);
+    try f.appendSlice(data);
+    try f.append(0); // seekPermission: false
+    return f.toOwnedSlice();
+}
+
+/// verifyHmac (call 14) at security level 2 (the server nonce, @bsv/sdk verifyNonce): the 32-byte HMAC
+/// over `data`; the answer frame is 0 when it verifies.
+pub fn verifyHmacFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, data: []const u8, hmac: []const u8) ![]u8 {
+    var f = std.array_list.Managed(u8).init(a);
+    try keyParams(a, &f, 14, protocol, key_id, cp);
+    try f.appendSlice(hmac);
     try varint(a, &f, data.len);
     try f.appendSlice(data);
     try f.append(0); // seekPermission: false

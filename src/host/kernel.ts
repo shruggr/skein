@@ -6,7 +6,6 @@
 // database — what the npm package runs) are the two ways a host runs kernels. Their surface is
 // `KernelSurface`; the frames are listed in kernel-zig/README.md ("The host surface").
 
-import type { DispatchRow } from "../runtime/dispatch.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -15,11 +14,10 @@ import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
 import { parseRocksSpec } from "../runtime/index-store.ts";
-import type { Entry, EntryBody } from "../runtime/log.ts";
+import type { Entry } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
-import type { Ms } from "../runtime/types.ts";
 import type { Outgoing } from "./providers.ts";
 
 const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -27,11 +25,29 @@ const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 export const KERNEL_BIN = process.env.SKEIN_KERNEL_BIN || join(ROOT, "kernel-zig/zig-out/bin/skein-kernel");
 
 type Frame = Record<string, unknown>;
-/** A request thread's answer (#66, the `answer` frame): at rest (finished | errored), or not yet at the wait's bound. */
-export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Array } | { thread?: CID; state: "errored"; error: string } | { thread?: CID; state: "waiting" | "running" | "new" | "pending" };
 
-export { DoorAnswered, doorAnswer, type DoorAnswer } from "./door-answer.ts";
-import { DoorAnswered, doorAnswer } from "./door-answer.ts";
+// ---------------------------------------------------------------- CHECK and COMMIT (SPEC.md section 4)
+
+/** A request record (kernel-zig/src/log.zig): the payload, and the signature when its sender is proven. */
+export interface RequestRecord {
+  kind: "request";
+  payload: { method: string; path: string; query: string; headers: Record<string, string>; body: Uint8Array };
+  /** brc104: {scheme, version, identityKey: bytes(33), nonce, yourNonce, requestId (base64), signature: bytes}
+   *  signed: {scheme, sender: bytes(33), recipient: bytes(33), nonce: bytes, signature: bytes}. Absent: content-proven. */
+  signature?: Record<string, unknown>;
+}
+/** What a handler answers, and what a kernel operation returns (body dag-cbor {done} | {refused}). */
+export type Answer = { status: number; type?: string; headers?: Record<string, string>; body: Uint8Array };
+/** A refusal: nothing was stored or logged. */
+export type Refusal = { status: number; code?: string; reason: string; principal?: Uint8Array; fuel: number };
+/** The READY package CHECK hands back, for COMMIT (the host carries it between the two calls, untouched). */
+export type Ready = Record<string, unknown> & { kind: "ready" };
+/** CHECK's outcome: refused (nothing written), READY, or a read row's answer (nothing written). */
+export type CheckResult = { refused: Refusal } | { ready: Ready } | { read: { answer: Answer; fuel: number; principal?: Uint8Array } };
+/** COMMIT's outcome: the entry written and its step run (the handler's answer when it came to rest), or refused. */
+export type CommitResult = { committed: { entry: CID; state: "finished" | "errored" | "waiting" | "kernel" | "none"; thread?: CID; answer?: Answer } } | { refused: Refusal };
+/** The `answered` notice: a request's thread came to rest after its COMMIT returned. */
+export type Answered = { entry: CID; thread: CID; state: string; answer?: Answer };
 /** The host chain as the kernel answers it (#156): its record's CID and tip; `headers`/`chain-import` also count. */
 export type HostChainTip = { root: CID; height: number; hash: string; added?: number; replaced?: number };
 
@@ -45,8 +61,10 @@ export interface KernelOptions {
   domain: string;
   /** Answers the kernel's `wallet` frames: the instance's signer. Absent: every wallet call fails. */
   wallet?: WalletInterface;
-  /** A message (#70) or an event (#65) the kernel hands over to carry out (the `emit` notice): a `local` provider's, the libp2p node's, the broadcaster's (providers.ts). Absent: dropped. */
+  /** An event the kernel hands over to carry out (the `emit` notice: a broadcast, a fact, a membership declaration). Absent: dropped. */
   emit?(o: Outgoing): void;
+  /** The `answered` notice: a request's thread came to rest after its COMMIT returned. */
+  answered?(a: Answered): void;
   /** Log lines (the kernel's stderr and this side's notes). */
   log?(line: string): void;
   /** The process exited (code or signal). */
@@ -80,7 +98,6 @@ export abstract class KernelSurface {
     has: async (cid: CID) => (await this.call("get", cid)) != null,
     log: {
       tip: async () => (await this.call("tip") as CID | null) ?? undefined,
-      byEnvelope: async (envelope: CID) => (await this.call("byEnvelope", envelope) as CID | null) ?? undefined,
       append: async (entry: Entry) => await this.call("append", entry) as CID,
     },
   } as unknown as Store;
@@ -91,44 +108,36 @@ export abstract class KernelSurface {
   async putBlock(cid: CID, bytes: Uint8Array): Promise<void> { await this.call("putblock", { cid, bytes }); }
   /** Adopt a checkpoint's state record (its blocks put first) as this empty store's state (#4). */
   async restore(state: CID): Promise<void> { await this.call("restore", state); }
-  async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
-  /** The dispatch table as it stands (#77): its chain's tip (the change key; null before the genesis is processed) and its rows. */
-  async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
+  /** The route table as it stands: its chain's tip (the change key; null before the genesis is processed) and its rows. */
+  async routes(): Promise<{ tip: CID | null; rows: Record<string, unknown>[] }> { return await this.call("routes") as { tip: CID | null; rows: Record<string, unknown>[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /**
-   * Admit an arrival (#163): its entry's body and its stamp (`time`, the host's clock at
-   * admission; default now) — the kernel appends it, assigning `prev` and `n` from its own tip.
-   * A request's record beside it (#121: the kernel puts it, after the door), an event's likewise
-   * (#164: through the door when its box's route names kernel.beef), else put first. A request
-   * or event the door turns away or answers writes no entry (#143): DoorAnswered. The entry's CID.
+   * CHECK (SPEC 4): an arrival — a request record, or an event record and its name — with its
+   * stamp (the host's clock at arrival; default now). Reads only: nothing is stored or logged. A
+   * read row answers here; a refusal is sent back; READY goes to `commit`. On a hosted kernel
+   * (#158) it runs over the set as committed, beside the instance's step.
    */
-  async admit(body: EntryBody, records: { body?: Uint8Array; request?: Record<string, unknown>; event?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
-    const r = await this.call("admit", { entry: { ...body, time }, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}), ...(records.event ? { event: records.event } : {}) });
-    const answered = (r as { answered?: Record<string, unknown> } | null)?.answered;
-    if (answered && typeof answered === "object" && !(r instanceof Uint8Array)) throw new DoorAnswered(doorAnswer(answered));
-    return r as CID;
+  async check(arrival: { request: RequestRecord } | { event: Record<string, unknown>; name: string }, time: Stamp = clockNow()): Promise<CheckResult> {
+    return await this.call("check", { ...arrival, time }) as CheckResult;
   }
   /**
-   * The kernel's `call` (#40): a program's function (by CID, or a genesis
-   * program's name) over the current state — no entry, no writes, the signer
-   * and http answered but not recorded; fuel-limited (`callFuelLimit`). The
-   * result is what the program wrote to stdout; `fuel` is reported either way
-   * (the router's ledger). On a hosted kernel (#158) it reads the state as
-   * committed, beside a step that may be running.
+   * COMMIT (SPEC 4): the READY package `check` made, on the instance's one writer — the row's
+   * recheck at the tip, the gate again if the grants moved, then the blocks and the entry written
+   * and its step run to completion before anything else is taken. The entry and the handler's
+   * answer (when its thread came to rest; else the `answered` notice comes later), or a refusal
+   * with nothing written.
    */
-  async invoke(program: CID | string, fn: string, arg: Uint8Array, o: { caller?: Uint8Array; now?: number } = {}): Promise<CallAnswer> {
+  async commit(ready: Ready): Promise<CommitResult> {
+    return await this.call("commit", ready) as CommitResult;
+  }
+  /**
+   * The kernel's `call` (#40): a program's function (by its record's CID) over the current state —
+   * no entry, no writes, the signer answered but not recorded; fuel-limited (`callFuelLimit`). The
+   * result is what the program wrote to stdout; `fuel` is reported either way (the host's ledger).
+   * On a hosted kernel (#158) it reads the state as committed, beside a step that may be running.
+   */
+  async invoke(program: CID, fn: string, arg: Uint8Array, o: { caller?: Uint8Array; now?: number } = {}): Promise<CallAnswer> {
     return await this.call("call", { program, fn, arg, ...(o.caller ? { caller: o.caller } : {}), now: o.now ?? Date.now() }) as CallAnswer;
-  }
-  /**
-   * A synchronous client's wait (#66): the answer of the thread a request
-   * entry launched (the middleware stepped on it), once that thread has come
-   * to rest for good — finished (`answer`: the middleware's dag-cbor answer)
-   * or errored — or, `waitMs` on, its state as it stands (`waiting`; or
-   * `pending`: the entry not processed yet). The kernel keeps the bound, so
-   * this always settles.
-   */
-  async answer(entry: CID, waitMs: number): Promise<RequestAnswer> {
-    return await this.call("answer", { entry, wait: Math.max(0, Math.floor(waitMs)) }) as RequestAnswer;
   }
   async idle(): Promise<void> { await this.call("idle"); }
   async start(): Promise<void> { await this.call("start"); }
@@ -147,8 +156,8 @@ function tipOf(v: unknown): HostChainTip {
 }
 
 /**
- * The kernel's own request (`wallet`, `http`) or notice (`emit`, `stop`), answered for instance `o`
- * through `answer`/`fail` — the same for a serve process and a hosted instance.
+ * The kernel's own request (`wallet`) or notice (`emit`, `answered`, `stop`), answered for instance
+ * `o` through `answer`/`fail`.
  */
 async function kernelRequest(k: KernelSurface, wire: WalletWireProcessor | undefined, f: Frame, answer: (ok: unknown) => void, fail: (e: unknown) => void): Promise<void> {
   const o = k.o;
@@ -160,8 +169,12 @@ async function kernelRequest(k: KernelSurface, wire: WalletWireProcessor | undef
         if (!wire) throw new Error("no wallet");
         return answer(Uint8Array.from(await wire.transmitToWallet([...(f.v as Uint8Array)])));
       case "emit":
-        // A signed message (#70) or an event (#65) to carry out, its step committed: nothing goes back.
+        // An event to carry out, its step committed: nothing goes back.
         o.emit?.(f.v as Outgoing);
+        return;
+      case "answered":
+        // A request's thread came to rest after its COMMIT returned.
+        o.answered?.(f.v as Answered);
         return;
       case "stop": return;
     }

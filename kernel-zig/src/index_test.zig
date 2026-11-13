@@ -281,14 +281,14 @@ test "index: a kept bitcoin transaction's inputs are edges from the block (#42);
     try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
 }
 
-fn appendEvent(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, event: []const u8, box: []const u8) !@import("store.zig").AppendResult {
+fn appendRequest(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, request: []const u8) !@import("store.zig").AppendResult {
     var e = cbor.MapBuilder.init(a);
     try e.put("kind", cbor.string("log"));
     try e.put("prev", prev.*);
     try e.put("n", cbor.int(n.*));
     try e.put("time", .{ .array = try a.dupe(Value, &.{ cbor.int(1), cbor.int(n.*) }) });
-    try e.put("event", .{ .cid = event });
-    try e.put("box", cbor.string(box));
+    try e.put("request", .{ .cid = request });
+    try e.put("door", .{ .map = &.{} });
     const r = try s.logAppend(a, e.value());
     if (r == .ok) {
         prev.* = .{ .cid = r.ok };
@@ -297,7 +297,7 @@ fn appendEvent(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, event: [
     return r;
 }
 
-test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redelivery is refused, nothing written; other events recur" {
+test "index (skein next): a signed request record is admitted once — a replay refused, nothing written; an unsigned one may recur" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -308,29 +308,33 @@ test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redeliver
     defer ix.deinit();
     const s = ix.store();
 
-    var ev = cbor.MapBuilder.init(a);
-    try ev.put("kind", cbor.string("p2p"));
-    try ev.put("topic", cbor.string("t"));
-    try ev.put("body", .{ .bytes = "hello" });
-    const p2p = try cbor.block(a, ev.value());
-    try s.putBlock(p2p.cid, p2p.bytes);
-    var hv = cbor.MapBuilder.init(a);
-    try hv.put("kind", cbor.string("header"));
-    const hdr = try cbor.block(a, hv.value());
-    try s.putBlock(hdr.cid, hdr.bytes);
+    var sig = cbor.MapBuilder.init(a);
+    try sig.put("scheme", cbor.string("signed"));
+    var rq = cbor.MapBuilder.init(a);
+    try rq.put("kind", cbor.string("request"));
+    try rq.put("payload", .{ .map = &.{} });
+    try rq.put("signature", sig.value());
+    const signed = try cbor.block(a, rq.value());
+    try s.putBlock(signed.cid, signed.bytes);
+    var uq = cbor.MapBuilder.init(a);
+    try uq.put("kind", cbor.string("request"));
+    try uq.put("payload", .{ .map = &.{} });
+    const plain = try cbor.block(a, uq.value());
+    try s.putBlock(plain.cid, plain.bytes);
 
     var prev: Value = .null;
     var n: i64 = 0;
-    try std.testing.expect((try appendEvent(a, s, &prev, &n, p2p.cid, "libp2p:t")) == .ok);
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, signed.cid)) == .ok);
     const puts = mem.puts;
-    const again = try appendEvent(a, s, &prev, &n, p2p.cid, "libp2p:t");
+    const again = try appendRequest(a, s, &prev, &n, signed.cid);
     try std.testing.expect(again == .rejected);
     try std.testing.expectEqualStrings("duplicate-envelope", again.rejected.reason.text());
     try std.testing.expectEqual(puts, mem.puts); // nothing written
     try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .log)).len);
-    // A feed's event may recur: not unique.
-    try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
-    try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
+    try std.testing.expect((try s.byUnique(a, signed.cid)) != null);
+    // A content-proven (unsigned) arrival is not unique: its row's checks and the chain app judge it.
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid)) == .ok);
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid)) == .ok);
     try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .log)).len);
 }
 

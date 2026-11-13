@@ -63,11 +63,8 @@ pub const VTable = struct {
     logAppend: *const fn (ctx: *anyopaque, a: std.mem.Allocator, entry: Value) anyerror!AppendResult,
     logTip: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
     logFrom: *const fn (ctx: *anyopaque, a: std.mem.Allocator, from: i64) anyerror![][]u8,
-    /// The entry whose unique column is `cid` (an envelope, or an outcome's emit).
+    /// The entry whose unique key is `cid` (a signed request record: index.zig uniqueOf).
     logByUnique: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
-    /// Mark `cid` (a message, a `p2p` event a middleware routed while `entry`
-    /// was processed, #68) admitted by `entry`; false if it already was.
-    markUnique: *const fn (ctx: *anyopaque, cid: []const u8, entry: []const u8) anyerror!bool,
     resting: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror![][]u8,
     awaiting: *const fn (ctx: *anyopaque, a: std.mem.Allocator, envelope: []const u8) anyerror![][]u8,
     threads: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror![][]u8,
@@ -147,21 +144,8 @@ pub const Store = struct {
     pub fn logFrom(s: Store, a: std.mem.Allocator, from: i64) ![][]u8 {
         return s.vt.logFrom(s.ctx, a, from);
     }
-    pub fn byEnvelope(s: Store, a: std.mem.Allocator, envelope: []const u8) !?[]u8 {
-        const c = (try s.vt.logByUnique(s.ctx, a, envelope)) orelse return null;
-        const e = (try s.get(a, c)) orelse return null;
-        return if (e.get("envelope") != null) c else null;
-    }
-    pub fn outcomeOf(s: Store, a: std.mem.Allocator, emit: []const u8) !?[]u8 {
-        const c = (try s.vt.logByUnique(s.ctx, a, emit)) orelse return null;
-        const e = (try s.get(a, c)) orelse return null;
-        return if (e.get("outcome") != null) c else null;
-    }
     pub fn byUnique(s: Store, a: std.mem.Allocator, cid: []const u8) !?[]u8 {
         return s.vt.logByUnique(s.ctx, a, cid);
-    }
-    pub fn markUnique(s: Store, cid: []const u8, entry: []const u8) !bool {
-        return s.vt.markUnique(s.ctx, cid, entry);
     }
     pub fn resting(s: Store, a: std.mem.Allocator) ![][]u8 {
         return s.vt.resting(s.ctx, a);

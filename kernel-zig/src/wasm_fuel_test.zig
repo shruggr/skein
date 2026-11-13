@@ -83,33 +83,32 @@ test "instrumented fuel: exhaustion at the same point for every limit" {
     try std.testing.expect(exhausted > 20);
 }
 
-test "instrumented fuel: every pinned program instruments to a valid module" {
+test "instrumented fuel: the kernel's own test programs instrument to valid modules" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var eng = try engine.Engine.init();
     defer eng.deinit();
     const io = std.testing.io;
-    var dir = try std.Io.Dir.cwd().openDir(io, "../wasm", .{ .iterate = true });
-    defer dir.close(io);
-    var it = dir.iterate();
+    // skein next: no pinned programs (no front door, mail or resolve); the modules here are the
+    // kernel's test programs (test/call/*.wasm, test/fuel/probe.wasm).
     var n: usize = 0;
-    while (try it.next(io)) |e| {
-        if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".wasm")) continue;
-        const bytes = try dir.readFileAlloc(io, e.name, a, .limited(1 << 30));
-        if (!std.mem.eql(u8, bytes[4..8], "\x01\x00\x00\x00")) continue; // a component
-        const ins = try wasm_fuel.instrument(a, bytes);
-        var m: ?*engine.c.wasmtime_module_t = null;
-        if (engine.c.wasmtime_module_validate(eng.e, ins.bytes.ptr, ins.bytes.len)) |err| {
-            var msg: engine.c.wasm_name_t = undefined;
-            engine.c.wasmtime_error_message(err, &msg);
-            std.debug.print("{s}: {s}\n", .{ e.name, msg.data[0..msg.size] });
-            return error.Invalid;
+    for ([_][]const u8{ "test/call", "test/fuel" }) |path| {
+        var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |e| {
+            if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".wasm")) continue;
+            const bytes = try dir.readFileAlloc(io, e.name, a, .limited(1 << 30));
+            const ins = try wasm_fuel.instrument(a, bytes);
+            if (engine.c.wasmtime_module_validate(eng.e, ins.bytes.ptr, ins.bytes.len)) |err| {
+                var msg: engine.c.wasm_name_t = undefined;
+                engine.c.wasmtime_error_message(err, &msg);
+                std.debug.print("{s}: {s}\n", .{ e.name, msg.data[0..msg.size] });
+                return error.Invalid;
+            }
+            n += 1;
         }
-        _ = &m;
-        n += 1;
     }
-    // wasm/ holds the boundary programs and wire-probe (#83: the shell's modules are the shell
-    // app's, not pinned here; run.sh's instrumented replay of the corpus instruments the ones it runs).
-    try std.testing.expect(n >= 4);
+    try std.testing.expect(n >= 2);
 }

@@ -21,9 +21,8 @@
 // uvarint-length-prefixed):
 //
 //   log       n                          → entry CID           (log.ts entries by n)
-//   unique    message CID                → entry CID           (a message's entry: admitted once, #40; and a
-//                                                              libp2p `p2p` event record's: a redelivered
-//                                                              GossipSub message is refused, #51/#42)
+//   unique    request record CID         → entry CID           (skein next: a SIGNED request record's entry —
+//                                                              an identical signed request is admitted once)
 //   chains    origin                     → {tip, seq, kind?}   (every chain's tip)
 //   updates   origin ‖ seq               → update CID          (a chain's history)
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
@@ -843,7 +842,6 @@ pub const Index = struct {
         .logTip = logTipFn,
         .logFrom = logFromFn,
         .logByUnique = logByUniqueFn,
-        .markUnique = markUniqueFn,
         .resting = restingFn,
         .awaiting = awaitingFn,
         .threads = threadsFn,
@@ -1001,30 +999,21 @@ pub const Index = struct {
         return out;
     }
 
-    /// The record an entry is unique by: its mail record (#40), or a libp2p
-    /// `p2p` event record (#51, #42 decided 2026-09-30: the record is
-    /// content-addressed — topic, from, seqno, signature, body — so a
-    /// redelivered GossipSub message is the same record). Other events
-    /// (feeds: a header, a status) may recur, and are not unique; so may a
-    /// request (#68: every package is appended as received — what a
-    /// middleware routes out of one is marked unique then, markUnique).
+    /// The key an entry holds in the `unique` map: a request entry's record, when it is signed (SPEC 2:
+    /// an identical signed request is admitted once). A content-proven arrival needs none.
     fn uniqueOf(ix: *Index, a: std.mem.Allocator, entry: Value) !?[]const u8 {
-        if (Value.cidOf(entry.get("mail"))) |m| return m;
-        const ev = Value.cidOf(entry.get("event")) orelse return null;
-        const b = (try ix.backend.vt.get(ix.backend.ctx, a, ev)) orelse return null;
+        const rc = Value.cidOf(entry.get("request")) orelse return null;
+        const b = (try ix.backend.vt.get(ix.backend.ctx, a, rc)) orelse return null;
         const rec = cbor.decode(a, b) catch return null;
-        const kind = Value.str(rec.get("kind")) orelse return null;
-        return if (std.mem.eql(u8, kind, "p2p")) ev else null;
+        return if (rec == .map and rec.get("signature") != null) rc else null;
     }
 
     fn logAppendFn(ctx: *anyopaque, a: std.mem.Allocator, entry: Value) anyerror!storem.AppendResult {
         const ix = self(ctx);
-        // A message is admitted once (#40: its record's CID is its id; a replayed request is the same
-        // record), and so is a libp2p message (its `p2p` event record): refused here, nothing written.
-        const mail = try ix.uniqueOf(a, entry);
-        if (mail) |e| if (try logByUniqueFn(ctx, a, e) != null) {
-            const what = if (entry.get("mail") != null) "message" else "libp2p message";
-            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: {s} {s} is already admitted", .{ what, try cidm.format(a, e) }) } };
+        // A signed request is admitted once (its record's CID): refused here, nothing written.
+        const uniq = try ix.uniqueOf(a, entry);
+        if (uniq) |e| if (try logByUniqueFn(ctx, a, e) != null) {
+            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: the signed request {s} is admitted already", .{try cidm.format(a, e)}) } };
         };
         const n = Value.intOf(entry.get("n")) orelse -1;
         var ok_prev: bool = undefined;
@@ -1044,7 +1033,7 @@ pub const Index = struct {
             return .{ .rejected = .{ .reason = .out_of_order, .message = try std.fmt.allocPrint(a, "log: entry #{d} does not extend the tip{s}", .{ n, if (ok_time) "" else " (stamped before it)" }) } };
         }
         const cid = try ix.putValue(a, entry);
-        try ix.importEntry(@intCast(n), cid, mail);
+        try ix.importEntry(@intCast(n), cid, uniq);
         try ix.commitLog();
         return .{ .ok = cid };
     }
@@ -1074,16 +1063,6 @@ pub const Index = struct {
         const ix = self(ctx);
         const v = (try ix.mapGet(ix.scratch(), .unique, cid)) orelse return null;
         return try a.dupe(u8, v.cid);
-    }
-
-    /// A record a middleware routed while `entry` was processed (#68: a
-    /// message, a libp2p `p2p` event) is admitted once: false if it was
-    /// before (by an entry of its own, or routed from another request).
-    fn markUniqueFn(ctx: *anyopaque, cid: []const u8, entry: []const u8) anyerror!bool {
-        const ix = self(ctx);
-        if ((try ix.mapGet(ix.scratch(), .unique, cid)) != null) return false;
-        try ix.mapPut(.unique, cid, .{ .cid = entry });
-        return true;
     }
 
     /// The origin at the end of an `… ‖ origin` key.

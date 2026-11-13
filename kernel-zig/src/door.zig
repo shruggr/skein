@@ -1,43 +1,10 @@
-// The kernel's own filters (#121, #143): what a route's `filters` may name as
-// `kernel.<name>`, run by the kernel in the door on a request's package (and,
-// #164, `kernel.beef` alone on an event record whose box's `event` route names
-// it: scheduler.zig `eventDoor` — an event has no sender) before anything is
-// recorded (scheduler.zig `door`, which runs a route's filters in
-// order and an app's own — `<app>.<filter>` — as calls in the deterministic
-// profile). A filter reads the package and the state as it stands; what it
-// writes is blocks (content-addressed, once) and the package it hands back,
-// which the entry then names instead of the one received. It is lossless for
-// anything a signature covers: what it rewrites is reconstructible to the
-// exact bytes (beef.zig `encode`).
+// What the kernel checks before an entry is written (skein next, SPEC.md sections 2 and 4): a
+// request's signature, by scheme (`verify`: brc104, signed). The scheduler's CHECK calls it, then
+// matches the row, gates it and runs the row's checks (scheduler.zig).
 //
-//   kernel.brc104   the BRC-104 request check (http): the request's session
-//                   (the front door's table, the head `frontdoor/sessions`,
-//                   found by its `yourNonce`, not expired) and its signature
-//                   over the request, through the signer — passed on with the
-//                   PRINCIPAL the client's key; a request with no x-bsv-auth-*
-//                   headers, or one that does not check, is rejected (401: the
-//                   stock client shakes hands again; 400 for a malformed one).
-//   kernel.beef     every byte string in the package (an http body, a libp2p
-//                   message's body; walked through maps and arrays) that starts
-//                   with a BEEF pattern (beef.zig `patterns`) is decoded and
-//                   proven: skein-sdk's verifier (chain/src/spv.zig `verify`)
-//                   over the BEEF alone — every BUMP's root the header's at its
-//                   height in the chain app's state (the head `chain/state`,
-//                   read only), every transaction no BUMP proves spending only
-//                   transactions before it in the BEEF (or held) with its
-//                   scripts verified, a txid-only entry only for a transaction
-//                   the instance HOLDS (chain/state's `txs`, not rejected:
-//                   proven when it entered; 2026-11-07). Any error is a rejection (400 ERR_BEEF, the error's
-//                   name first), as is no chain state. Then each transaction is
-//                   stored as its `bitcoin-tx` block, each BUMP as the raw block
-//                   of its bytes and the merkle nodes it reveals; and the bytes
-//                   are replaced by the envelope — {form, beef: <a link to the
-//                   pointer record>, subject?, vout?} — the record the BEEF
-//                   alone (its BUMPs' `proves` the verifier's proven), the
-//                   envelope beside it (beef.zig, #146). A package with no BEEF
-//                   in it when no filter before it yielded a principal is a
-//                   rejection too (#135: signed or validated — "nothing to
-//                   validate").
+// The BEEF walk below (Headers, Walk, filterBeef, restore) is the format-11 kernel.beef, no longer
+// reached from the scheduler: it moves to skein-sdk chain/ (the chain app's `chain.beef` check),
+// and leaves this file with that step.
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -55,7 +22,6 @@ const chain = @import("chainlib");
 /// The head the chain app keeps its state under (shruggr/skein-chain; skein-sdk `chain.state`).
 pub const CHAIN_STATE = "chain/state";
 
-pub const BRC104 = "kernel.brc104";
 pub const BEEF = "kernel.beef";
 
 /// The chain app's headers, read only: {kind: "chain-state", maps: {headers: <MST root>}}, the map
@@ -313,168 +279,109 @@ pub fn restore(a: std.mem.Allocator, s: Store, v: Value, beefs: []const []const 
     }
 }
 
-// ---------------------------------------------------------------- kernel.brc104 (#143)
+// ---------------------------------------------------------------- the signature schemes (SPEC 2)
 
-/// A filter's rejection: the status the transport answers with, a code, why.
+/// A refusal at the check: the status the host answers with, a code, why. Nothing is written.
 pub const Reject = struct { status: i64, code: ?[]const u8 = null, reason: []const u8 };
 
-/// The front door's session table (programs/frontdoor/sessions.zig, written on the handshake),
-/// read only: {kind: "sessions", buckets: [<bucket> × 16]}, a bucket {sessions: [{nonce, peer,
-/// peerNonce, created}]}, a session in bucket sha256(nonce)[0] mod 16.
-pub const SESSIONS = "frontdoor/sessions";
-const BUCKETS = 16;
-
-pub const Session = struct { peer: []const u8, ours: []const u8, theirs: []const u8, created: i128 };
-
-/// The session whose nonce (ours) is `nonce`, or null.
-pub fn sessionOf(a: std.mem.Allocator, s: Store, nonce: []const u8) !?Session {
-    const root = (try s.headTree(a, SESSIONS)) orelse return null;
-    const r = s.getOpt(a, root) orelse return null;
-    const bs = r.get("buckets") orelse return null;
-    if (bs != .array or bs.array.len != BUCKETS) return null;
-    var h: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(nonce, &h, .{});
-    const bc = Value.cidOf(bs.array[h[0] % BUCKETS]) orelse return null;
-    const b = s.getOpt(a, bc) orelse return null;
-    const ss = b.get("sessions") orelse return null;
-    if (ss != .array) return null;
-    for (ss.array) |x| {
-        const ours = Value.str(x.get("nonce")) orelse continue;
-        if (!std.mem.eql(u8, ours, nonce)) continue;
-        return .{
-            .ours = ours,
-            .peer = Value.bytesOf(x.get("peer")) orelse return null,
-            .theirs = Value.str(x.get("peerNonce")) orelse return null,
-            .created = Value.intOf(x.get("created")) orelse 0,
-        };
-    }
-    return null;
-}
-
-/// The signer, as the door asks it (not recorded: the door's outcome is what the log keeps).
+/// The signer, as the check asks it (not recorded: the entry's `door` is what the log keeps).
 pub const Signer = struct {
     ctx: *anyopaque,
     call: *const fn (ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8,
 };
 
-/// What `kernel.brc104` came to: passed on with the client's key (and the session's nonce and
-/// the request id, which the front door signs the answer with), or a rejection.
-pub const Brc104 = union(enum) {
-    pass: struct { caller: []const u8, theirs: []const u8, request_id: []const u8 },
-    reject: Reject,
+/// What a request's signature came to: its sender (the principal) under a scheme, or a refusal.
+pub const Verified = union(enum) {
+    ok: struct { principal: []const u8, scheme: []const u8 },
+    refused: Reject,
 };
 
-fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
-    const hs = headers orelse return null;
-    if (hs != .map) return null;
-    for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, name)) return Value.str(e.value);
-    return null;
+pub const BRC104 = "brc104";
+pub const SIGNED = "signed";
+
+fn refused(status: i64, code: []const u8, reason: []const u8) Verified {
+    return .{ .refused = .{ .status = status, .code = code, .reason = reason } };
 }
 
-/// Whether a request carries BRC-104 headers (x-bsv-auth-*): a general message.
-pub fn signedRequest(req: Value) bool {
-    const hs = req.get("headers") orelse return false;
-    if (hs != .map) return false;
-    for (hs.map) |e| if (std.ascii.startsWithIgnoreCase(e.key, "x-bsv-auth-")) return true;
-    return false;
+/// A request record's signature checked (log.zig isRequest; the record has one): `brc104` — a wallet
+/// over HTTP, the host's one handshake — or `signed` — a host service, or the host's root key,
+/// handing a request in. `identity` is this instance's key; `w` the instance's signer (brc104 needs
+/// it: the server nonce and the signature are this instance's to check).
+pub fn verify(a: std.mem.Allocator, w: ?Signer, identity: []const u8, rec: Value) !Verified {
+    const sig = rec.get("signature").?;
+    const payload = rec.get("payload").?;
+    const scheme = Value.str(sig.get("scheme")) orelse return refused(400, "ERR_AUTH_MALFORMED", "signature: no scheme");
+    if (std.mem.eql(u8, scheme, BRC104)) return brc104(a, w, sig, payload);
+    if (std.mem.eql(u8, scheme, SIGNED)) return signed(a, identity, sig, payload);
+    return refused(401, "ERR_AUTH_SCHEME", try std.fmt.allocPrint(a, "signature scheme {s}: want brc104 or signed", .{scheme}));
 }
 
-const UNAUTHORIZED: Reject = .{ .status = 401, .code = "UNAUTHORIZED", .reason = "Mutual-authentication failed!" };
-const MALFORMED: Reject = .{ .status = 400, .code = "ERR_AUTH_MALFORMED", .reason = "The authentication request is malformed." };
-
-fn failed(reason: []const u8) Brc104 {
-    return .{ .reject = .{ .status = 401, .code = "ERR_AUTH_FAILED", .reason = reason } };
-}
-
-/// kernel.brc104: the request's BRC-104 general message checked — its session (by `yourNonce`, not
-/// past `ttl` ms from its handshake at `now`, the entry's time), its identity the session's, and
-/// its signature over the request (SimplifiedFetchTransport's payload) under [2, "auth message
-/// signature"], key "<nonce> <ours>", counterparty the client, through the signer.
-pub fn brc104(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, now: i64, ttl: i64) !Brc104 {
-    if (!signedRequest(req)) return .{ .reject = UNAUTHORIZED };
-    const hs = req.get("headers");
-    const need = struct {
-        fn f(h: ?Value, name: []const u8) ?[]const u8 {
-            const v = headerOf(h, name) orelse return null;
-            return if (v.len == 0) null else v;
-        }
-    }.f;
-    const key_hex = need(hs, "x-bsv-auth-identity-key") orelse return .{ .reject = MALFORMED };
-    const nonce = need(hs, "x-bsv-auth-nonce") orelse return .{ .reject = MALFORMED };
-    const your = need(hs, "x-bsv-auth-your-nonce") orelse return .{ .reject = MALFORMED };
-    const sig_hex = need(hs, "x-bsv-auth-signature") orelse return .{ .reject = MALFORMED };
-    const request_id = need(hs, "x-bsv-auth-request-id") orelse return .{ .reject = UNAUTHORIZED };
-    _ = need(hs, "x-bsv-auth-version") orelse return .{ .reject = MALFORMED };
-    if (key_hex.len != 66 or sig_hex.len % 2 != 0) return .{ .reject = MALFORMED };
-    const peer = try a.alloc(u8, 33);
-    _ = std.fmt.hexToBytes(peer, key_hex) catch return .{ .reject = MALFORMED };
-    if (!secp.isKey(peer)) return .{ .reject = MALFORMED };
-    const sig = try a.alloc(u8, sig_hex.len / 2);
-    _ = std.fmt.hexToBytes(sig, sig_hex) catch return .{ .reject = MALFORMED };
+/// `brc104` (SPEC 2, review points 3, 33): the host answered the one BRC-103 handshake with the
+/// standard @bsv/sdk self-checking nonce (createNonce: 16 random bytes ‖ HMAC [2, "server hmac"],
+/// key ID their UTF-8 reading, counterparty self, base64) and gathered the request's x-bsv-auth-*
+/// headers into the signature: {identityKey: bytes(33), nonce, yourNonce, requestId (base64 of 32
+/// bytes), signature: bytes, version}. Checked here through the signer, nothing stored: `yourNonce`
+/// verifies as this instance's (verifyNonce: verifyHmac), and the signature verifies for
+/// `identityKey` under [2, "auth message signature"], key "<nonce> <yourNonce>", over BRC-104's
+/// request serialization of the payload. No session table, no expiry (this cut).
+fn brc104(a: std.mem.Allocator, w: ?Signer, sig: Value, payload: Value) !Verified {
+    const MALFORMED = "ERR_AUTH_MALFORMED";
+    const peer = Value.bytesOf(sig.get("identityKey")) orelse return refused(400, MALFORMED, "brc104: identityKey: want 33 bytes");
+    if (!secp.isKey(peer)) return refused(400, MALFORMED, "brc104: identityKey is not a key");
+    const nonce = Value.str(sig.get("nonce")) orelse return refused(400, MALFORMED, "brc104: no nonce");
+    const your = Value.str(sig.get("yourNonce")) orelse return refused(400, MALFORMED, "brc104: no yourNonce");
+    const rid_text = Value.str(sig.get("requestId")) orelse return refused(400, MALFORMED, "brc104: no requestId");
+    const der = Value.bytesOf(sig.get("signature")) orelse return refused(400, MALFORMED, "brc104: no signature");
+    if (nonce.len == 0 or your.len == 0) return refused(400, MALFORMED, "brc104: an empty nonce");
     const b64 = std.base64.standard.Decoder;
-    const rid = try a.alloc(u8, b64.calcSizeForSlice(request_id) catch return .{ .reject = MALFORMED });
-    b64.decode(rid, request_id) catch return .{ .reject = MALFORMED };
-    const sess = (try sessionOf(a, s, your)) orelse return failed("Session not found for nonce (expired or unknown)");
-    if (sess.created + ttl < now) return failed("Session expired");
-    if (!std.mem.eql(u8, sess.peer, peer)) return failed("general identity does not match the authenticated session.");
-    const payload = try authfetch.requestPayload(a, rid, Value.str(req.get("method")) orelse "GET", Value.str(req.get("path")) orelse "/", Value.str(req.get("query")) orelse "", try authfetch.headerList(a, hs), Value.bytesOf(req.get("body")) orelse "");
-    const key_id = try std.fmt.allocPrint(a, "{s} {s}", .{ nonce, sess.ours });
-    const sg = w orelse return failed("this host has no signer to check the signature with");
-    const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return failed("Invalid signature in generalMessage");
-    if (res.len == 0 or res[0] != 0) return failed("Invalid signature in generalMessage");
-    return .{ .pass = .{ .caller = peer, .theirs = sess.theirs, .request_id = request_id } };
+    const rid = try a.alloc(u8, b64.calcSizeForSlice(rid_text) catch return refused(400, MALFORMED, "brc104: requestId is not base64"));
+    b64.decode(rid, rid_text) catch return refused(400, MALFORMED, "brc104: requestId is not base64");
+    const sg = w orelse return refused(401, "ERR_AUTH_FAILED", "brc104: this host has no signer to check the request with");
+    // The server nonce: ours, by its HMAC (@bsv/sdk verifyNonce).
+    const nb = try a.alloc(u8, b64.calcSizeForSlice(your) catch return refused(401, "ERR_AUTH_FAILED", "brc104: yourNonce is not this instance's"));
+    b64.decode(nb, your) catch return refused(401, "ERR_AUTH_FAILED", "brc104: yourNonce is not this instance's");
+    if (nb.len != 48) return refused(401, "ERR_AUTH_FAILED", "brc104: yourNonce is not this instance's");
+    const key_id = try cbor.utf8Fix(a, nb[0..16]);
+    const hm = sg.call(sg.ctx, a, try signer.verifyHmacFrame(a, authfetch.NONCE_PROTOCOL, key_id, .self, nb[0..16], nb[16..48])) catch return refused(401, "ERR_AUTH_FAILED", "brc104: yourNonce is not this instance's (expired or unknown: shake hands again)");
+    if (hm.len == 0 or hm[0] != 0) return refused(401, "ERR_AUTH_FAILED", "brc104: yourNonce is not this instance's (expired or unknown: shake hands again)");
+    // The request's signature, the client's.
+    const body = Value.bytesOf(payload.get("body")) orelse "";
+    const bytes = try authfetch.requestPayload(a, rid, Value.str(payload.get("method")).?, Value.str(payload.get("path")).?, Value.str(payload.get("query")).?, try authfetch.headerList(a, payload.get("headers")), body);
+    const sk = try std.fmt.allocPrint(a, "{s} {s}", .{ nonce, your });
+    const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, sk, .{ .other = peer }, bytes, der)) catch return refused(401, "ERR_AUTH_FAILED", "brc104: the request's signature does not verify");
+    if (res.len == 0 or res[0] != 0) return refused(401, "ERR_AUTH_FAILED", "brc104: the request's signature does not verify");
+    return .{ .ok = .{ .principal = peer, .scheme = BRC104 } };
 }
 
-// ------------------------------------------------------------------ a delivery's answer (#157)
-
-/// The record a `deliver` intention is answered with (#157): an event the host admits, standing on
-/// its own — {kind: "delivery", replyTo: <the deliver event's CID>, peer: <the answering server's
-/// identity key, 33 bytes>, nonce: <our session nonce, base64 text>, yourNonce: <the answer's own
-/// nonce, base64 text>, signature: bytes, status, headers?: {name: text} (the answer's signed
-/// ones: x-bsv-* but x-bsv-auth-*, authorization), body: bytes}.
-pub const DELIVERY = "delivery";
-
-pub fn isDeliveryAnswer(v: Value) bool {
-    if (v != .map) return false;
-    return std.mem.eql(u8, Value.str(v.get("kind")) orelse "", DELIVERY);
+/// What the `signed` scheme signs: dag-cbor {sender, recipient, nonce, payload} — the request
+/// without its signature, the signature's own fields beside the payload.
+pub fn signedPreimage(a: std.mem.Allocator, sender: []const u8, recipient: []const u8, nonce: []const u8, payload: Value) ![]u8 {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("sender", .{ .bytes = sender });
+    try m.put("recipient", .{ .bytes = recipient });
+    try m.put("nonce", .{ .bytes = nonce });
+    try m.put("payload", payload);
+    return cbor.encode(a, m.value());
 }
 
-/// Why a delivery's answer does not stand (null: it does): the server's BRC-104 signature over the
-/// answer — SimplifiedFetchTransport's response payload (the request id: the deliver event's
-/// `nonce`, 32 bytes; the status; the signed headers, lower-cased and sorted; the body) under
-/// [2, "auth message signature"], key "<yourNonce> <nonce>", counterparty `peer` — checked through
-/// the signer, as authfetch checked an answer in the step before #157 and kernel.brc104 checks a
-/// request. `request_id`: the deliver event's nonce.
-pub fn deliveryAnswer(a: std.mem.Allocator, w: ?Signer, rec: Value, request_id: []const u8) !?[]const u8 {
-    if (request_id.len != 32) return "the deliver event has no 32-byte nonce";
-    const peer = Value.bytesOf(rec.get("peer")) orelse return "no `peer`";
-    if (!secp.isKey(peer)) return "`peer` is not an identity key";
-    const ours = Value.str(rec.get("nonce")) orelse return "no `nonce`";
-    const theirs = Value.str(rec.get("yourNonce")) orelse return "no `yourNonce`";
-    if (ours.len == 0 or theirs.len == 0) return "an empty nonce";
-    const sig = Value.bytesOf(rec.get("signature")) orelse return "no `signature`";
-    const status = Value.intOf(rec.get("status")) orelse return "no `status`";
-    if (status < 0 or status > 999) return "`status` is not an HTTP status";
-    const body = Value.bytesOf(rec.get("body")) orelse return "no `body`";
-    var hs = std.array_list.Managed(authfetch.Header).init(a);
-    if (rec.get("headers")) |h| if (h != .null) {
-        if (h != .map) return "`headers`: want {name: text}";
-        for (h.map) |e| {
-            const k = try std.ascii.allocLowerString(a, e.key);
-            const v = Value.str(e.value) orelse return "`headers`: want {name: text}";
-            const signed = (std.mem.startsWith(u8, k, "x-bsv-") and !std.mem.startsWith(u8, k, "x-bsv-auth")) or std.mem.eql(u8, k, "authorization");
-            if (!signed) return "`headers` holds only the answer's signed headers";
-            try hs.append(.{ .name = k, .value = v });
-        }
-    };
-    std.mem.sort(authfetch.Header, hs.items, {}, authfetch.lessHeader);
-    const payload = try authfetch.responsePayload(a, request_id, @intCast(status), hs.items, body);
-    const key_id = try std.fmt.allocPrint(a, "{s} {s}", .{ theirs, ours });
-    const sg = w orelse return "this host has no signer to check the signature with";
-    const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return "the signature does not verify";
-    if (res.len == 0 or res[0] != 0) return "the signature does not verify";
-    return null;
+/// `signed` (SPEC 2 [P]): BRC-169's message signing — [2, "metanet handles envelope"], key "send",
+/// counterparty anyone — by `sender` over signedPreimage; `recipient` is this instance. Anyone can
+/// check it; no signer needed.
+fn signed(a: std.mem.Allocator, identity: []const u8, sig: Value, payload: Value) !Verified {
+    const MALFORMED = "ERR_AUTH_MALFORMED";
+    const sender = Value.bytesOf(sig.get("sender")) orelse return refused(400, MALFORMED, "signed: sender: want 33 bytes");
+    if (!secp.isKey(sender)) return refused(400, MALFORMED, "signed: sender is not a key");
+    const recipient = Value.bytesOf(sig.get("recipient")) orelse return refused(400, MALFORMED, "signed: recipient: want 33 bytes");
+    const nonce = Value.bytesOf(sig.get("nonce")) orelse return refused(400, MALFORMED, "signed: nonce: want bytes");
+    const der = Value.bytesOf(sig.get("signature")) orelse return refused(400, MALFORMED, "signed: no signature");
+    if (!std.mem.eql(u8, recipient, identity)) return refused(401, "ERR_AUTH_FAILED", "signed: the request is addressed to another key");
+    const pre = try signedPreimage(a, sender, recipient, nonce, payload);
+    if (!secp.verifyAnyoneKey(sender, 2, MESSAGE_PROTOCOL, MESSAGE_KEY_ID, pre, der)) return refused(401, "ERR_AUTH_FAILED", "signed: the signature does not verify");
+    return .{ .ok = .{ .principal = sender, .scheme = SIGNED } };
 }
+
+pub const MESSAGE_PROTOCOL = "metanet handles envelope";
+pub const MESSAGE_KEY_ID = "send";
 
 /// The bytes an envelope stands for (beef.zig `wire`), its pointer record and blocks from the store.
 fn wireOf(a: std.mem.Allocator, s: Store, env: Value) ![]u8 {

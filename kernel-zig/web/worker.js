@@ -54,13 +54,12 @@ const methods = {
     return writeBundle(s);
   },
   open(id) { kernel.open(id); return true; },
-  modules() { return kernel.modulesList(); },
   hasBlock(id, cid) { return stores[id].hasBlock(cid); },
   putBlock(cid, bytes) { kernel.putBlock(cid, bytes); return true; },
   getBlock(cid) { return kernel.getBlock(cid); },
   call(frame) { return kernel.call(frame); },
-  /** The one call in: admitted and durable before the answer (the host then acknowledges its source). */
-  async admit(frame) { const r = kernel.admit(frame); await flushAll(); return r; },
+  /** An op that writes (`commit`: the entry and its step) is durable before the answer. */
+  async write(frame) { const r = kernel.call(frame); await flushAll(); return r; },
   async start() { const r = kernel.start(); await flushAll(); return r; },
   async drain() { const r = kernel.drain(); await flushAll(); return r; },
   state() { return kernel.state(); },

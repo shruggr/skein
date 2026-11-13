@@ -1,11 +1,5 @@
-// BRC-104's HTTP framing (#126, #157): the payloads a request and a response
-// sign — @bsv/sdk's SimplifiedFetchTransport's, as the front door's server side
-// (skein-sdk lib/brc104.zig) — which the door checks: kernel.brc104 a request's
-// signature, door.zig deliveryAnswer the answer to a `deliver` intention.
-// Before #157 this file was also the kernel's in-step BRC-103/104 client (the
-// `authfetch` import); that is gone: the host carries a delivery's exchange
-// (a step never waits on the outside world), and a log that made an authfetch
-// replays it from its witness (scheduler.zig hAuthfetch).
+// BRC-104's HTTP framing: the payload a request signs — @bsv/sdk's SimplifiedFetchTransport's —
+// which the brc104 scheme checks (door.zig). The name is historical (the in-step authfetch is gone).
 const std = @import("std");
 const cbor = @import("cbor");
 const Value = cbor.Value;
@@ -74,22 +68,6 @@ pub fn requestPayload(a: std.mem.Allocator, request_id: []const u8, method: []co
     const signed = try signedRequestHeaders(a, headers);
     try varint(&w, signed.len);
     for (signed) |h| {
-        try varint(&w, h.name.len);
-        try w.appendSlice(h.name);
-        try varint(&w, h.value.len);
-        try w.appendSlice(h.value);
-    }
-    try writeField(&w, body);
-    return w.toOwnedSlice();
-}
-
-/// The payload a response signs: requestId, status, the signed headers, the body.
-pub fn responsePayload(a: std.mem.Allocator, request_id: []const u8, status: u64, headers: []const Header, body: []const u8) ![]u8 {
-    var w = std.array_list.Managed(u8).init(a);
-    try w.appendSlice(request_id);
-    try varint(&w, status);
-    try varint(&w, headers.len);
-    for (headers) |h| {
         try varint(&w, h.name.len);
         try w.appendSlice(h.name);
         try varint(&w, h.value.len);

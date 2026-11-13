@@ -1,9 +1,9 @@
 // `skein-kernel host` (#158): one kernel process for the whole host. It holds
 // every instance of the host, each a set of one RocksDB database (#96,
 // rocksdb_store.zig), and runs them on a pool of worker threads; the router
-// (src/host/kernel.ts KernelHost) speaks to it over stdin/stdout in the frames
-// `serve` speaks (ipc.zig; serve.zig is one instance per process and stays),
-// each instance-scoped frame tagged with its handle, `h`.
+// (src/host/kernel.ts KernelHost) speaks to it over stdin/stdout (ipc.zig frames), each
+// instance-scoped frame tagged with its handle, `h`. The frames are listed in kernel-zig/README.md
+// ("The host surface").
 //
 // Threads:
 //   - the I/O thread (main): reads stdin (and the host-read socket), writes
@@ -20,18 +20,19 @@
 //     set holds (a checkpoint's extras).
 //   - workers (SKEIN_WORKERS, default the CPU count): take a runnable instance
 //     off the run queue, run its inbox to empty (each frame as serve's
-//     handleOp does: `admit` steps the runtime there and then), put it down. An
-//     instance is on one worker at a time (`running`, under the queue lock):
-//     a frame for a running instance waits in its inbox. A `call` (#40) runs on
-//     any worker against the set as committed (rocksdb_store.zig View), never
-//     the instance's working state, so a read runs beside its instance's step.
+//     handleOp does: `commit` writes the entry and runs its step there and then),
+//     put it down. An instance is on one worker at a time (`running`, under the
+//     queue lock): a frame for a running instance waits in its inbox. A `check`
+//     (SPEC 4: CHECK reads only) and a `call` (#40) run on any worker against the
+//     set as committed (rocksdb_store.zig View), never the instance's working
+//     state, so any number of them run beside the instance's step; `commit` is
+//     the instance's, in its inbox (the one writer).
 //   - the kernel's own requests (`wallet`, `http`): the worker writes the
 //     request frame (tagged `h`) and waits for the I/O thread to hand it the
 //     answer (`Requests`). No nesting: the I/O thread serves the host's other
 //     frames meanwhile, and this instance's wait in its inbox.
-//   - `answer` waits (#66): per instance, answered from the step's
-//     `on_answer`; their bounds kept by the I/O thread's poll timeout, which
-//     queues an `expire` for the instance whose bound came.
+//   - a request's thread that waits and comes to rest after its `commit` was
+//     answered: the `answered` notice (scheduler.zig on_answer).
 //
 // The host-read socket (`<db dir>/kernel.sock`): the same ungated reads
 // (`get`, `has`, `state`) for the host's synchronous store reader
@@ -51,10 +52,8 @@ const cidm = @import("cid");
 const ipc = @import("ipc.zig");
 const logm = @import("log.zig");
 const dispatchm = @import("dispatch.zig");
-const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
-const replay = @import("replay.zig");
 const storem = @import("store.zig");
 const rocks = @import("rocksdb_store.zig");
 const any = @import("any_store.zig");
@@ -297,8 +296,6 @@ pub fn RunQueue(comptime T: type, comptime R: type) type {
 
 // ------------------------------------------------------------------ an instance
 
-const Waiter = struct { id: i64, entry: []u8, until: i64 };
-
 const Inst = struct {
     host: *Host,
     handle: []u8,
@@ -310,23 +307,10 @@ const Inst = struct {
     queued: bool = false,
     running: bool = false,
     refs: usize = 0,
-    expire_queued: bool = false,
     // The worker holding the instance's:
     store: ?*rocks.RocksStore = null,
     rt: ?*scheduler.Runtime = null,
     idle_waiters: std.ArrayListUnmanaged(i64) = .empty,
-    // Under `wmu` (the worker adds and answers them; the I/O thread reads the bounds):
-    wmu: Io.Mutex = .init,
-    waiters: std.ArrayListUnmanaged(Waiter) = .empty,
-
-    fn earliest(t: *Inst) ?i64 {
-        const io = t.host.io;
-        t.wmu.lockUncancelable(io);
-        defer t.wmu.unlock(io);
-        var until: ?i64 = null;
-        for (t.waiters.items) |w| until = if (until) |u| @min(u, w.until) else w.until;
-        return until;
-    }
 };
 
 const Read = struct { inst: *Inst, bytes: []u8 };
@@ -450,7 +434,7 @@ const Host = struct {
         }
         const t = had orelse return h.reply(a, hd, id, null, "not open", null);
         if (t.state == .closing) return h.reply(a, hd, id, null, "closed", null);
-        if (eq(u8, op, "call") and t.state == .open) {
+        if ((eq(u8, op, "call") or eq(u8, op, "check")) and t.state == .open) {
             t.refs += 1;
             return h.q.pushReadLocked(.{ .inst = t, .bytes = try h.gpa.dupe(u8, bytes) });
         }
@@ -494,29 +478,10 @@ const Host = struct {
         return m.value();
     }
 
-    /// Bounds that came: an `expire` queued for each instance with a waiter past its bound. The
-    /// poll's timeout: the earliest bound left (-1: none).
+    /// The poll's timeout: none (-1), or a short one while quitting.
     fn bounds(h: *Host, quitting: bool) i32 {
-        var earliest: ?i64 = null;
-        const now = nowMs();
-        h.q.lock();
-        defer h.q.unlock();
-        var it = h.insts.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
-            const u = t.earliest() orelse continue;
-            if (u <= now) {
-                if (!t.expire_queued and t.state != .closing) {
-                    t.expire_queued = true;
-                    h.q.pushLocked(t, .{ .bytes = null }) catch {};
-                }
-                continue;
-            }
-            earliest = if (earliest) |e| @min(e, u) else u;
-        }
-        if (quitting) return 50;
-        const e = earliest orelse return -1;
-        return @intCast(std.math.clamp(e - now, 0, std.math.maxInt(i32)));
+        _ = h;
+        return if (quitting) 50 else -1;
     }
 
     // ------------------------------------------------ the workers
@@ -545,7 +510,11 @@ const Host = struct {
         const a = arena.allocator();
         const f = cbor.decode(a, r.bytes) catch return;
         const id: i64 = @intCast(Value.intOf(f.get("id")) orelse 0);
-        h.doCall(a, r.inst, id, f.get("v") orelse .null) catch |err| h.reply(a, r.inst.handle, id, null, @errorName(err), null);
+        const v = f.get("v") orelse .null;
+        const op = Value.str(f.get("op")) orelse "";
+        if (std.mem.eql(u8, op, "check")) {
+            h.doCheck(a, r.inst, id, v) catch |err| h.reply(a, r.inst.handle, id, null, @errorName(err), null);
+        } else h.doCall(a, r.inst, id, v) catch |err| h.reply(a, r.inst.handle, id, null, @errorName(err), null);
     }
 
     const Ran = enum { kept, freed };
@@ -554,13 +523,7 @@ const Host = struct {
         var arena = std.heap.ArenaAllocator.init(h.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const bytes = item.bytes orelse {
-            h.q.lock();
-            t.expire_queued = false;
-            h.q.unlock();
-            h.expire(a, t);
-            return .kept;
-        };
+        const bytes = item.bytes orelse return .kept;
         defer h.gpa.free(bytes);
         const f = cbor.decode(a, bytes) catch return .kept;
         const op = Value.str(f.get("op")) orelse return .kept;
@@ -591,7 +554,6 @@ const Host = struct {
         t.spec = try h.gpa.dupe(u8, spec);
         const st = try rocks.RocksStore.openIn(h.gpa, h.db, t.handle);
         errdefer st.close();
-        try replay.install(h.gpa, h.io, AnyStore{ .rocksdb = st }, sayRaw);
         t.store = st;
         t.rt = try scheduler.Runtime.init(h.gpa, st.store(), h.runner, .{
             .ctx = t,
@@ -630,8 +592,7 @@ const Host = struct {
             h.gpa.free(b);
         };
         h.gpa.free(left);
-        // Whoever waits on it (an `answer`, an `idle`) is answered: it is gone.
-        for (t.waiters.items) |w| h.reply(a, t.handle, w.id, null, "closed", null);
+        // Whoever waits on it (an `idle`) is answered: it is gone.
         for (t.idle_waiters.items) |w| h.reply(a, t.handle, w, .null, null, null);
         const handle = a.dupe(u8, t.handle) catch "";
         h.dispose(t);
@@ -642,8 +603,6 @@ const Host = struct {
     fn dispose(h: *Host, t: *Inst) void {
         if (t.rt) |rt| rt.deinit();
         if (t.store) |st| st.close();
-        for (t.waiters.items) |w| h.gpa.free(w.entry);
-        t.waiters.deinit(h.gpa);
         t.idle_waiters.deinit(h.gpa);
         t.inbox.deinit(h.gpa);
         if (t.domain.len > 0) h.gpa.free(t.domain);
@@ -659,13 +618,8 @@ const Host = struct {
         defer view.close();
         const vs = view.store();
         const g: ?Value = if ((try vs.logTip(a)) != null) logm.genesisOf(a, vs) catch null else null;
-        const gv = g orelse return h.reply(a, t.handle, id, null, "call: no genesis", null);
-        const prog: []const u8 = Value.cidOf(v.get("program")) orelse blk: {
-            const name = Value.str(v.get("program")) orelse return error.BadRequest;
-            const progs: Value = gv.get("programs") orelse .null;
-            break :blk Value.cidOf(if (progs == .map) progs.get(name) else null) orelse
-                return h.reply(a, t.handle, id, null, try std.fmt.allocPrint(a, "call: no program {s} in the genesis", .{name}), null);
-        };
+        if (g == null) return h.reply(a, t.handle, id, null, "call: no genesis", null);
+        const prog = Value.cidOf(v.get("program")) orelse return h.reply(a, t.handle, id, null, "call: `program` is a program record's CID", null);
         const func = Value.str(v.get("fn")) orelse return error.BadRequest;
         const arg = Value.bytesOf(v.get("arg")) orelse "";
         const now = Value.intOf(v.get("now")) orelse nowMs();
@@ -677,7 +631,18 @@ const Host = struct {
         h.reply(a, t.handle, id, m.value(), null, null);
     }
 
-    // ------------------------------------------------ an instance's frames (serve.zig handleOp)
+    /// CHECK (SPEC 4) over the set as committed (#158: a view at its state pointer): reads only, on
+    /// any worker, beside the instance's step.
+    fn doCheck(h: *Host, a: std.mem.Allocator, t: *Inst, id: i64, v: Value) !void {
+        const rt = t.rt orelse return h.reply(a, t.handle, id, null, "not open", null);
+        const view = try rocks.View.open(h.gpa, h.db, t.handle);
+        defer view.close();
+        const out = try rt.checkOver(a, view.store(), v);
+        if (try scheduler.checkOutValue(a, out)) |x| return h.reply(a, t.handle, id, x, null, null);
+        h.reply(a, t.handle, id, null, out.invalid, null);
+    }
+
+    // ------------------------------------------------ an instance's frames
 
     fn handleOp(h: *Host, a: std.mem.Allocator, t: *Inst, op: []const u8, id: i64, v: Value) !void {
         const eq = std.mem.eql;
@@ -707,70 +672,31 @@ const Host = struct {
         } else if (eq(u8, op, "append")) {
             switch (try rt.appendGenesis(a, v)) {
                 .ok => |c| h.reply(a, hd, id, cbor.cidv(c), null, null),
-                .answered => h.reply(a, hd, id, null, "append: the genesis is not a request", null),
                 .rejected => |r| h.reply(a, hd, id, null, r.message, r.reason.text()),
                 .invalid => |m| h.reply(a, hd, id, null, m, null),
             }
-        } else if (eq(u8, op, "programs")) {
-            var m = cbor.MapBuilder.init(a);
-            for (programsm.program_names) |name| {
-                if (v == .array) {
-                    var wanted = false;
-                    for (v.array) |x| wanted = wanted or std.mem.eql(u8, Value.str(x) orelse "", name);
-                    if (!wanted) continue;
-                }
-                try m.put(name, cbor.cidv(try s.put(a, try programsm.program(a, name))));
-            }
-            h.reply(a, hd, id, m.value(), null, null);
         } else if (eq(u8, op, "head")) {
             const name = Value.str(v) orelse return error.BadRequest;
             h.reply(a, hd, id, cbor.optCid(try s.headTree(a, name)) orelse .null, null, null);
         } else if (eq(u8, op, "genesis")) {
             h.reply(a, hd, id, logm.genesisOf(a, s) catch .null, null, null);
-        } else if (eq(u8, op, "dispatch")) {
+        } else if (eq(u8, op, "routes")) {
             const rows = (try dispatchm.current(a, s)) orelse &.{};
             var m = cbor.MapBuilder.init(a);
             try m.put("tip", cbor.optCid(try s.chainTip(a, try dispatchm.origin(a))) orelse .null);
             try m.put("rows", try dispatchm.valueOf(a, rows));
             h.reply(a, hd, id, m.value(), null, null);
-        } else if (eq(u8, op, "boxes")) {
-            const bs = try rt.boxes(a);
-            const arr = try a.alloc(Value, bs.len);
-            for (bs, 0..) |b, i| arr[i] = cbor.string(b);
-            h.reply(a, hd, id, .{ .array = arr }, null, null);
-        } else if (eq(u8, op, "byEnvelope")) {
-            const c = Value.cidOf(v) orelse return error.BadRequest;
-            h.reply(a, hd, id, cbor.optCid(try s.byEnvelope(a, c)) orelse .null, null, null);
-        } else if (eq(u8, op, "admit")) {
-            const entry = v.get("entry") orelse return error.BadRequest;
-            const res = try rt.admit(a, entry, v.get("request") orelse v.get("event")); // #164: an event record with the frame too
-            switch (res) {
-                .ok => |c| h.reply(a, hd, id, cbor.cidv(c), null, null),
-                .answered => |x| {
-                    var m = cbor.MapBuilder.init(a);
-                    try m.put("answered", try x.value(a));
-                    h.reply(a, hd, id, m.value(), null, null);
-                },
-                .rejected => |r| h.reply(a, hd, id, null, r.message, r.reason.text()),
-                .invalid => |m| h.reply(a, hd, id, null, m, null),
-            }
-            // Processed here and now: the step runs on this worker (the instance's only one).
-            if (res == .ok) rt.kick();
+        } else if (eq(u8, op, "check")) {
+            // A check queued behind the open (it came before the instance was open): the same view.
+            try h.doCheck(a, t, id, v);
+        } else if (eq(u8, op, "commit")) {
+            // COMMIT (SPEC 4): the instance's one writer — the entry written and its step run here and now.
+            const out = try rt.commit(a, v);
+            if (try scheduler.commitOutValue(a, out)) |x| h.reply(a, hd, id, x, null, null) else h.reply(a, hd, id, null, out.invalid, null);
             h.afterDrain(a, t);
         } else if (eq(u8, op, "call")) {
             // A call queued behind the open (it came before the instance was open): the same view.
             try h.doCall(a, t, id, v);
-        } else if (eq(u8, op, "answer")) {
-            const entry = Value.cidOf(v.get("entry")) orelse return error.BadRequest;
-            const wait = Value.intOf(v.get("wait")) orelse 120_000;
-            if (try rt.requestThread(a, entry)) |th| {
-                const r = try rt.answerOf(a, th);
-                if (eq(u8, r.state, "finished") or eq(u8, r.state, "errored")) return h.reply(a, hd, id, try answerValue(rt, a, th), null, null);
-            }
-            t.wmu.lockUncancelable(h.io);
-            defer t.wmu.unlock(h.io);
-            try t.waiters.append(h.gpa, .{ .id = id, .entry = try h.gpa.dupe(u8, entry), .until = nowMs() + @as(i64, @intCast(@max(0, wait))) });
-            h.wakeIo();
         } else if (eq(u8, op, "idle")) {
             try t.idle_waiters.append(h.gpa, id);
             h.afterDrain(a, t);
@@ -792,48 +718,6 @@ const Host = struct {
         if (t.rt.?.draining) return;
         for (t.idle_waiters.items) |w| h.reply(a, t.handle, w, .null, null, null);
         t.idle_waiters.clearRetainingCapacity();
-    }
-
-    fn answerValue(rt: *scheduler.Runtime, a: std.mem.Allocator, thread: ?[]const u8) !Value {
-        var m = cbor.MapBuilder.init(a);
-        const th = thread orelse {
-            try m.put("state", cbor.string("pending"));
-            return m.value();
-        };
-        const r = try rt.answerOf(a, th);
-        try m.put("thread", cbor.cidv(th));
-        try m.put("state", cbor.string(r.state));
-        if (std.mem.eql(u8, r.state, "finished")) try m.put("answer", .{ .bytes = r.stdout });
-        if (std.mem.eql(u8, r.state, "errored")) try m.put("error", cbor.string(r.err));
-        return m.value();
-    }
-
-    /// Waiters past their bound: answered with the thread's state as it stands (serve.zig expire).
-    fn expire(h: *Host, a: std.mem.Allocator, t: *Inst) void {
-        const rt = t.rt orelse return;
-        const now = nowMs();
-        var due = std.array_list.Managed(Waiter).init(a);
-        {
-            t.wmu.lockUncancelable(h.io);
-            defer t.wmu.unlock(h.io);
-            var i: usize = 0;
-            while (i < t.waiters.items.len) {
-                if (t.waiters.items[i].until > now) {
-                    i += 1;
-                    continue;
-                }
-                due.append(t.waiters.orderedRemove(i)) catch {};
-            }
-        }
-        for (due.items) |w| {
-            defer h.gpa.free(w.entry);
-            const th = rt.requestThread(a, w.entry) catch null;
-            const v = answerValue(rt, a, th) catch |err| {
-                h.reply(a, t.handle, w.id, null, @errorName(err), null);
-                continue;
-            };
-            h.reply(a, t.handle, w.id, v, null, null);
-        }
     }
 
     // ------------------------------------------------ the runtime's peers
@@ -887,33 +771,15 @@ const Host = struct {
         h.notify(a, t.handle, "emit", m.value());
     }
 
+    /// A request's thread came to rest after its `commit` was answered: the `answered` notice.
     fn pOnAnswer(p: *anyopaque, thread: []const u8, entry: []const u8) void {
         const t = inst(p);
         const h = t.host;
         var arena = std.heap.ArenaAllocator.init(h.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        var hit = std.array_list.Managed(Waiter).init(a);
-        {
-            t.wmu.lockUncancelable(h.io);
-            defer t.wmu.unlock(h.io);
-            var i: usize = 0;
-            while (i < t.waiters.items.len) {
-                if (!std.mem.eql(u8, t.waiters.items[i].entry, entry)) {
-                    i += 1;
-                    continue;
-                }
-                hit.append(t.waiters.orderedRemove(i)) catch {};
-            }
-        }
-        for (hit.items) |w| {
-            defer h.gpa.free(w.entry);
-            const v = answerValue(t.rt.?, a, thread) catch |err| {
-                h.reply(a, t.handle, w.id, null, @errorName(err), null);
-                continue;
-            };
-            h.reply(a, t.handle, w.id, v, null, null);
-        }
+        const v = scheduler.answeredValue(t.rt.?, a, thread, entry) catch return;
+        h.notify(a, t.handle, "answered", v);
     }
 
     /// 0.9.1: the monotonic clock for a step line's duration (never recorded).

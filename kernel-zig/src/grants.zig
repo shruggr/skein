@@ -1,33 +1,23 @@
-// Roles, grants and the gate (#143). Routing is the route table's
-// (dispatch.zig); who may run a function is this file's.
+// Roles, grants and the gate (#143; skein next, SPEC.md section 3). Routing is the route table's
+// (dispatch.zig); who may send what a row takes is the row's `role`, checked here.
 //
-// A role is a name. The standard roles: `root` — Unix semantics, it passes
-// every check (any function, any route, any grant; several holders) — and
-// `user`, any principal at all (a request an identity filter let through).
-// An app's roles are declared in its manifest, each listing the functions it
-// gates (the app record's `roles: {<role>: [<fn>…]}`, a standard role usable
-// there by name) and granted as `<app>.<role>`. A genesis's own programs'
-// functions are gated by the genesis's `roles: {<role>: ["<program>.<fn>"…]}`
-// (the explorer: `{root: ["frontdoor.explore"]}`). "An individual key is a
-// role with one holder": there is no other way to name a key.
+// A role is a name, held by keys. Every request and read row names one:
 //
-// The grants are kernel state, replay-derived: the head `grants` (the
-// kernel's own — no `head` message and no program's `advance` reaches it),
+//   anyone          no proven sender required (a content-proven arrival, an open read)
+//   user            any proven sender
+//   root            the keys holding `root` — just a role: the name written on the rows that change
+//                   routes and grants. No bypass: root passes only a row that names root.
+//   <app>.<role>    the keys holding it (the app record's `roles` map only declares the names)
+//
+// An event row names none (an event has no principal). The grants are kernel state, replay-derived:
+// the head `grants` (the kernel's own — no `head` request and no program's `advance` reaches it),
 // its root the record
 //
-//   {kind: "grants", roles: {<role>: [bytes(33) …]}}      keys in byte order, no empty role
+//   {kind: "grants", roles: {<role>: [bytes(33) …]}, calls?, services?}   keys in byte order, no empty role
 //
-// written by the genesis's `root` (the initial root holders), the claim (root
-// to the claimant, #89/#127) and the kernel's admin operation `grant` {op:
-// "add" | "remove", role, principal} — gated by root, as every admin
-// operation is (v1: only root grants).
-//
-// The gate (the dispatcher's, scheduler.zig): the route matched, its filters
-// run, the principal they yielded is checked against the roles that gate the
-// handler's function — root passes anything; `user` passes any principal;
-// an app role passes its holders; no principal fails closed — and only then
-// does the handler run as the logged step. A function no role gates is open
-// to whatever the route's filters let through.
+// written by the genesis's `grants` (the starting grants: whoever builds the image decides), the
+// claim (root to the claimant) and the kernel's `grant` operation {op: "add" | "remove", role,
+// principal} on a root row.
 const std = @import("std");
 const cbor = @import("cbor");
 const secp = @import("secp");
@@ -39,10 +29,12 @@ const Value = cbor.Value;
 pub const HEAD = "grants";
 pub const ROOT = "root";
 pub const USER = "user";
+/// No proven sender required (a row's role only; never granted).
+pub const ANYONE = "anyone";
 /// The kernel's admin operation.
 pub const OP = "grant";
 
-/// Whether `role` may be granted: `root`, or `<app>.<role>` (`user` is any principal, never granted).
+/// Whether `role` may be granted: `root`, or `<app>.<role>` (`user` and `anyone` are never granted).
 pub fn isGrantable(role: []const u8) bool {
     if (std.mem.eql(u8, role, ROOT)) return true;
     const dot = std.mem.indexOfScalar(u8, role, '.') orelse return false;
@@ -151,8 +143,7 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, role: []const u8, k
 //   calls?:    {<caller>: {<callee>: [<name> …]}}   names sorted, unique; "*" among them: any name
 //   services?: {<caller>: [<service> …]}           sorted, unique; the one defined: "signer"
 //
-// A caller or callee is an installed app's name, or `genesis:<program name>` for a genesis-wired
-// program (or a program a dispatch row names with no app). Written by root's `grant` operation
+// A caller or callee is an installed app's name. Written by root's `grant` operation
 // ({op, calls: {caller, callee, name}} / {op, service: {caller, service}}) and by the genesis's
 // `calls` / `services` when it is processed. The kernel compares names byte for byte and never
 // reads them.
@@ -161,18 +152,16 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, role: []const u8, k
 pub const ANY = "*";
 /// How long a call's name may be (bytes).
 pub const MAX_NAME = 256;
-/// A genesis-wired program's party name: `genesis:<its name>`.
-pub const GENESIS_PREFIX = "genesis:";
 /// The raw signer import (the `wallet` import), granted as a kernel service.
 pub const SIGNER = "signer";
 /// The kernel services that may be granted.
 pub const services_known = [_][]const u8{SIGNER};
 
-/// Whether `s` names a caller or callee: an app's name, or `genesis:<program name>` — the manifest's
-/// name grammar (src/host/manifest.ts NAME, PARTY): [a-z0-9][a-z0-9._-]*. (Roles keep `isName`, with no
-/// dot: a role is `<app>.<role>`.) The record keys a party whole; nothing splits it.
+/// Whether `s` names a caller or callee: an app's name — the manifest's name grammar
+/// (src/host/manifest.ts NAME): [a-z0-9][a-z0-9._-]*. (Roles keep `isName`, with no dot: a role is
+/// `<app>.<role>`.) The record keys a party whole; nothing splits it.
 pub fn isParty(s: []const u8) bool {
-    return isAppName(if (std.mem.startsWith(u8, s, GENESIS_PREFIX)) s[GENESIS_PREFIX.len..] else s);
+    return isAppName(s);
 }
 
 fn isAppName(s: []const u8) bool {
@@ -295,44 +284,19 @@ pub fn applyService(a: std.mem.Allocator, s: Store, op: []const u8, caller: []co
 
 pub const Verdict = enum {
     pass,
-    /// gated, and the filters yielded no principal (fail closed)
+    /// the role needs a proven sender, and there is none (fail closed)
     no_principal,
-    /// gated, and the principal holds none of the roles
+    /// the principal does not hold the role
     not_granted,
 };
 
-/// The gate: `gating` the roles that gate the function (full names: root, user, <app>.<role>);
-/// `principal` what the filters yielded. Root passes anything.
-pub fn gate(rec: ?Value, gating: []const []const u8, principal: ?[]const u8) Verdict {
-    if (gating.len == 0) return .pass;
+/// The gate: `role` the row's (anyone, user, root, <app>.<role>); `principal` the proven sender,
+/// if any. No bypass: a key passes a role only by holding that role.
+pub fn gate(rec: ?Value, role: []const u8, principal: ?[]const u8) Verdict {
+    if (std.mem.eql(u8, role, ANYONE)) return .pass;
     const p = principal orelse return .no_principal;
-    if (holds(rec, ROOT, p)) return .pass;
-    for (gating) |role| {
-        if (std.mem.eql(u8, role, USER)) return .pass;
-        if (std.mem.eql(u8, role, ROOT)) continue;
-        if (holds(rec, role, p)) return .pass;
-    }
-    return .not_granted;
-}
-
-/// The roles that gate `func` in a role map {<role>: [<fn>…]} (an app record's `roles`, or the
-/// genesis's with each fn as `<program>.<fn>`). `app`: an app's own role names are `<app>.<role>`
-/// (a standard role is itself); null: the map's names are full already (the genesis's).
-pub fn gatingRoles(a: std.mem.Allocator, roles: ?Value, app: ?[]const u8, func: []const u8) ![]const []const u8 {
-    const m = roles orelse return &.{};
-    if (m != .map) return &.{};
-    var out = std.array_list.Managed([]const u8).init(a);
-    for (m.map) |e| {
-        if (e.value != .array) continue;
-        var gates = false;
-        for (e.value.array) |f| if (Value.str(f)) |s| if (std.mem.eql(u8, s, func)) {
-            gates = true;
-        };
-        if (!gates) continue;
-        const standard = std.mem.eql(u8, e.key, ROOT) or std.mem.eql(u8, e.key, USER);
-        try out.append(if (standard or app == null) e.key else try std.fmt.allocPrint(a, "{s}.{s}", .{ app.?, e.key }));
-    }
-    return out.items;
+    if (std.mem.eql(u8, role, USER)) return .pass;
+    return if (holds(rec, role, p)) .pass else .not_granted;
 }
 
 /// A key given as bytes or hex (a JSON-era client's), if it is an identity key.
@@ -368,7 +332,7 @@ test "grants: add and remove keep keys in order and drop an emptied role" {
     try std.testing.expect(!hasRoot(null));
 }
 
-test "the gate: root passes anything, user any principal, an app role its holders; no principal fails closed" {
+test "the gate: anyone passes, user any principal, root and an app role their holders only — no root bypass" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -377,43 +341,24 @@ test "the gate: root passes anything, user any principal, an app role its holder
     const stranger = [_]u8{2} ++ [_]u8{9} ** 32;
     var rec = (try changed(a, null, "add", ROOT, &root)).?;
     rec = (try changed(a, rec, "add", "amm.admin", &admin)).?;
-    // Ungated: open to whatever the filters let through, a principal or none.
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &.{}, null));
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &.{}, &stranger));
-    // An app role.
-    const by_admin = [_][]const u8{"amm.admin"};
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &by_admin, &admin));
-    try std.testing.expectEqual(Verdict.not_granted, gate(rec, &by_admin, &stranger));
-    try std.testing.expectEqual(Verdict.no_principal, gate(rec, &by_admin, null));
-    // Root bypasses every role.
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &by_admin, &root));
-    const root_only = [_][]const u8{ROOT};
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &root_only, &root));
-    try std.testing.expectEqual(Verdict.not_granted, gate(rec, &root_only, &admin));
+    // anyone: with or without a principal.
+    try std.testing.expectEqual(Verdict.pass, gate(rec, ANYONE, null));
+    try std.testing.expectEqual(Verdict.pass, gate(rec, ANYONE, &stranger));
+    // An app role: its holders.
+    try std.testing.expectEqual(Verdict.pass, gate(rec, "amm.admin", &admin));
+    try std.testing.expectEqual(Verdict.not_granted, gate(rec, "amm.admin", &stranger));
+    try std.testing.expectEqual(Verdict.no_principal, gate(rec, "amm.admin", null));
+    // Root is just a role: it does not pass another role's row.
+    try std.testing.expectEqual(Verdict.not_granted, gate(rec, "amm.admin", &root));
+    try std.testing.expectEqual(Verdict.pass, gate(rec, ROOT, &root));
+    try std.testing.expectEqual(Verdict.not_granted, gate(rec, ROOT, &admin));
     // user: any principal; none fails closed.
-    const users = [_][]const u8{USER};
-    try std.testing.expectEqual(Verdict.pass, gate(rec, &users, &stranger));
-    try std.testing.expectEqual(Verdict.no_principal, gate(rec, &users, null));
-    // No grants at all (an unclaimed image): a gated function runs for no one.
-    try std.testing.expectEqual(Verdict.not_granted, gate(null, &root_only, &root));
-}
-
-test "gating roles: an app's role names are <app>.<role>; the standard ones are themselves" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var roles = cbor.MapBuilder.init(a);
-    try roles.put("admin", .{ .array = try a.dupe(Value, &.{ cbor.string("config"), cbor.string("pause") }) });
-    try roles.put("user", .{ .array = try a.dupe(Value, &.{cbor.string("call")}) });
-    const config = try gatingRoles(a, roles.value(), "amm", "config");
-    try std.testing.expectEqual(@as(usize, 1), config.len);
-    try std.testing.expectEqualStrings("amm.admin", config[0]);
-    try std.testing.expectEqualStrings("user", (try gatingRoles(a, roles.value(), "amm", "call"))[0]);
-    try std.testing.expectEqual(@as(usize, 0), (try gatingRoles(a, roles.value(), "amm", "quote")).len);
-    try std.testing.expect(isGrantable("root"));
-    try std.testing.expect(isGrantable("amm.admin"));
-    try std.testing.expect(!isGrantable("user"));
-    try std.testing.expect(!isGrantable("admin"));
+    try std.testing.expectEqual(Verdict.pass, gate(rec, USER, &stranger));
+    try std.testing.expectEqual(Verdict.no_principal, gate(rec, USER, null));
+    // No grants at all (an unclaimed image): a root row runs for no one.
+    try std.testing.expectEqual(Verdict.not_granted, gate(null, ROOT, &root));
+    try std.testing.expect(isGrantable("root") and isGrantable("amm.admin"));
+    try std.testing.expect(!isGrantable("user") and !isGrantable("anyone") and !isGrantable("admin"));
 }
 
 test "call permissions: names per (caller, callee), any, removal, and roles kept apart" {
@@ -432,8 +377,8 @@ test "call permissions: names per (caller, callee), any, removal, and roles kept
     try std.testing.expect(!mayCall(rec, "swap", "signer", "1/amm pool"));
     const names = callNames(rec, "amm", "signer");
     try std.testing.expectEqualStrings("1/amm commission", Value.str(names[0]).?); // sorted
-    rec = (try callsChanged(a, rec, "add", "genesis:frontdoor", "signer", ANY)).?;
-    try std.testing.expect(mayCall(rec, "genesis:frontdoor", "signer", "anything at all"));
+    rec = (try callsChanged(a, rec, "add", "swap", "signer", ANY)).?;
+    try std.testing.expect(mayCall(rec, "swap", "signer", "anything at all"));
     // Roles still work beside calls, and survive a calls change.
     try std.testing.expect(hasRoot(rec));
     rec = (try changed(a, rec, "add", "amm.admin", &k1)).?;
@@ -442,12 +387,12 @@ test "call permissions: names per (caller, callee), any, removal, and roles kept
     rec = (try callsChanged(a, rec, "remove", "amm", "signer", "1/amm pool")).?;
     rec = (try callsChanged(a, rec, "remove", "amm", "signer", "1/amm commission")).?;
     try std.testing.expect(rec.?.get("calls").?.get("amm") == null);
-    rec = (try callsChanged(a, rec, "remove", "genesis:frontdoor", "signer", ANY)).?;
+    rec = (try callsChanged(a, rec, "remove", "swap", "signer", ANY)).?;
     try std.testing.expect(rec.?.get("calls") == null);
     rec = (try changed(a, rec, "remove", "amm.admin", &k1)).?;
     try std.testing.expectEqualSlices(u8, roots_only, try cbor.encode(a, rec.?)); // as it was: roles only
-    try std.testing.expect(isParty("amm") and isParty("genesis:frontdoor") and !isParty("genesis:") and !isParty("Amm"));
-    try std.testing.expect(isParty("foo.bar") and isParty("genesis:wire-probe") and !isParty("foo bar") and !isParty(".foo"));
+    try std.testing.expect(isParty("amm") and !isParty("genesis:frontdoor") and !isParty("Amm"));
+    try std.testing.expect(isParty("foo.bar") and isParty("wire-probe") and !isParty("foo bar") and !isParty(".foo"));
     // Removing "*" leaves the explicit names.
     var r2: ?Value = (try callsChanged(a, null, "add", "amm", "signer", "1/amm pool")).?;
     r2 = (try callsChanged(a, r2, "add", "amm", "signer", ANY)).?;
@@ -461,14 +406,14 @@ test "kernel services: granted per caller, only known ones" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var rec: ?Value = (try serviceChanged(a, null, "add", "genesis:frontdoor", SIGNER)).?;
-    try std.testing.expect(holdsService(rec, "genesis:frontdoor", SIGNER));
-    try std.testing.expect(!holdsService(rec, "genesis:wallet", SIGNER));
-    try std.testing.expect(!holdsService(null, "genesis:frontdoor", SIGNER));
-    try std.testing.expect((try serviceChanged(a, rec, "add", "genesis:frontdoor", SIGNER)) == null);
+    var rec: ?Value = (try serviceChanged(a, null, "add", "swap", SIGNER)).?;
+    try std.testing.expect(holdsService(rec, "swap", SIGNER));
+    try std.testing.expect(!holdsService(rec, "wallet", SIGNER));
+    try std.testing.expect(!holdsService(null, "swap", SIGNER));
+    try std.testing.expect((try serviceChanged(a, rec, "add", "swap", SIGNER)) == null);
     try std.testing.expect(rec.?.get("roles") != null); // a grants record always has its roles map
-    rec = (try serviceChanged(a, rec, "remove", "genesis:frontdoor", SIGNER)).?;
-    try std.testing.expect(!holdsService(rec, "genesis:frontdoor", SIGNER));
+    rec = (try serviceChanged(a, rec, "remove", "swap", SIGNER)).?;
+    try std.testing.expect(!holdsService(rec, "swap", SIGNER));
     try std.testing.expect(rec.?.get("services") == null);
     try std.testing.expect(isService("signer") and !isService("http"));
 }

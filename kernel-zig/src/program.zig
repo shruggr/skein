@@ -6,15 +6,17 @@
 // the result is held for take(out, cap). n < 0 is an error; error(out, cap)
 // returns its message.
 //
-//   emit(msg, len, out, cap) → n   (#70) the one outbound primitive: dag-cbor {to:
-//                                  bytes(33), box, body: <dag-cbor bytes>, subject?:
-//                                  <cid>} → the signed message's CID (binary). The
-//                                  recipient must be in the address book (head
-//                                  `peers`); the kernel signs the message through
-//                                  the signer (a recorded call), lists it on the
-//                                  step's update (`emitted`) and sends it by the
-//                                  recipient's transport when the step ends without
-//                                  error. The answer is an entry (await the CID)
+//   emit(msg, len, out, cap) → n   the one outbound primitive: an event, dag-cbor {event:
+//                                  "broadcast", tx: <cid>, beef?: bytes} | {event: <a name under
+//                                  the app's>, …fields} | a membership declaration (subscribe,
+//                                  beacon, liveness, …) → the record's CID (binary). Listed on the
+//                                  step's update (`emitted`) and handed to the host when the step
+//                                  ends without error. A message to a key: refused (skein next)
+//   launch(prog, len, args, len, out, cap) → n   a thread of `prog` on the record `args`, kicked
+//                                  off when the step ends (the launcher does not wait) → its origin
+//   await(x, len) → 0              x a thread's identity (a binary CID) or a fact's name (text):
+//                                  this thread resumes once — input `resolved` when the thread
+//                                  comes to rest, `event` when the fact lands; the step ends waiting
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
 //   edges(to, len, rel, rel_len, out, cap) → n   (#42) the edges into `to` (a binary CID)
@@ -44,8 +46,9 @@
 //   off(name, len, fn, fn_len) → 0 (0.5.3) the calling app's one subscription of `fn` to
 //                                  `name` ends (the same two arguments as `on`; its others to
 //                                  `name` stay), when the step ends without error
-// putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
-// await also takes a record in the store: the subject of a plain entry to come.
+// putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs. The `deadline` and
+// `authfetch` imports are gone (skein next): a module importing them still links (wasi.zig `bind`:
+// an unknown name), and a call answers 52.
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -69,11 +72,13 @@ pub const Host = struct {
     putBlock: *const fn (imp: *Imports, c: []const u8, bytes: []const u8) Err!void,
     keep: *const fn (imp: *Imports, c: []const u8) Err!void,
     launch: *const fn (imp: *Imports, prog: []const u8, args: []const u8) Err![]const u8,
-    awaitReply: *const fn (imp: *Imports, c: []const u8) Err!void,
+    /// `await(x)` (skein next): x a thread's identity (a binary CID) or a fact's name (text): this
+    /// thread resumes once, when the thread comes to rest or the fact lands.
+    awaitOn: *const fn (imp: *Imports, x: []const u8) Err!void,
     head: *const fn (imp: *Imports, name: []const u8) Err!?[]const u8,
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
     wallet: *const fn (imp: *Imports, frame: []const u8) Err![]const u8,
-    /// Emit a signed message (#70): dag-cbor {to, box, body, subject?} → its CID.
+    /// Emit an event: dag-cbor {event: <name>, …} → its record's CID.
     emit: *const fn (imp: *Imports, message: []const u8) Err![]const u8,
     /// An in-VM call (#40): run `prog` (a program record) as a function — its
     /// entry with `input()` = {kind: "call", fn, arg, …} — and return what it
@@ -394,7 +399,7 @@ pub const Imports = struct {
             },
             .launch => return imp.out(p, try h.launch(imp, try imp.cidAt(p, a[0], a[1]), try imp.cidAt(p, a[2], a[3])), a[4], a[5]),
             .@"await" => {
-                try h.awaitReply(imp, try imp.cidAt(p, a[0], a[1]));
+                try h.awaitOn(imp, try imp.alloc.dupe(u8, p.slice(a[0], a[1]) catch return error.OutOfMemory));
                 return 0;
             },
             .head => return imp.out(p, (try h.head(imp, try imp.strAt(p, a[0], a[1]))) orelse "", a[2], a[3]),

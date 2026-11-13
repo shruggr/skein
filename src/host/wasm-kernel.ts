@@ -27,7 +27,7 @@ import { decode, encode } from "../runtime/cid.ts";
 import { CHAIN_SET, parseSqliteSpec } from "../runtime/index-store.ts";
 import { Rejected } from "../runtime/store.ts";
 import { hashTree } from "../runtime/tree.ts";
-import { KernelSurface, type HostChainTip, type KernelOptions } from "./kernel.ts";
+import { KernelSurface, type Answered, type HostChainTip, type KernelOptions } from "./kernel.ts";
 import { openHostDb, SqliteSetStore } from "./store-sqlite.ts";
 import type { Outgoing } from "./providers.ts";
 
@@ -38,8 +38,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolvePath(HERE, "../..");
 /** The wasm kernel: $SKEIN_KERNEL_WASM, else kernel-zig's `zig build web` output (the package ships it there). */
 export const KERNEL_WASM = process.env.SKEIN_KERNEL_WASM || join(ROOT, "kernel-zig/zig-out/web/skein-kernel.wasm");
-/** The pinned modules (the boundary programs): $SKEIN_WASM_DIR, else the repo's (the package's) wasm/. */
-export const WASM_DIR = process.env.SKEIN_WASM_DIR || join(ROOT, "wasm");
 const WORKER = new URL(`./wasm-worker${extname(fileURLToPath(import.meta.url))}`, import.meta.url);
 
 type Pending = { resolve(v: unknown): void; reject(e: Error): void };
@@ -57,7 +55,7 @@ class Machine {
   private data = new SharedArrayBuffer(1 << 16, { maxByteLength: 1 << 30 });
 
   constructor(module: WebAssembly.Module, w: { db: string; set: string; mode: "instance" | "chain"; network?: string }, o: { onNotify(op: string, v: Uint8Array): void; onRequest(op: string, v: Uint8Array): Promise<Uint8Array>; log?(line: string): void }) {
-    this.worker = new Worker(WORKER, { workerData: { module, ...w, wasmDir: WASM_DIR, control: this.control, data: this.data } });
+    this.worker = new Worker(WORKER, { workerData: { module, ...w, control: this.control, data: this.data } });
     let ready!: () => void, fail!: (e: Error) => void;
     this.ready = new Promise<void>((res, rej) => { ready = res; fail = rej; });
     this.ready.catch(() => {});
@@ -144,7 +142,7 @@ export class WasmHost {
 
   private constructor(db: string, o: WasmHostOptions) { this.db = db; this.o = o; }
 
-  /** Hydrate an instance: its machine on a worker of its own (the store's pinned modules installed). */
+  /** Hydrate an instance: its machine on a worker of its own. */
   async open(o: KernelOptions): Promise<WasmKernel> {
     const p = parseSqliteSpec(o.db);
     if (!p) throw new Error(`kernel ${o.handle}: ${o.db} is not a SQLite set`);
@@ -274,6 +272,7 @@ export class WasmKernel extends KernelSurface {
 
   private onNotify(op: string, v: Uint8Array): void {
     if (op === "emit") { this.o.emit?.(decode<Outgoing>(v)); return; }
+    if (op === "answered") { this.o.answered?.(decode<Answered>(v)); return; }
     if (op === "say" || op === "panic") this.o.log?.(String(v));
   }
 

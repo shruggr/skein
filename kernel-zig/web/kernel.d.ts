@@ -45,11 +45,9 @@ export declare class Kernel {
   result(n: number): Uint8Array;
   check(r: number): number;
   open(id: number): void;
-  modulesList(): Uint8Array;
   putBlock(cid: Uint8Array, bytes: Uint8Array): void;
   getBlock(cid: Uint8Array): Uint8Array | undefined;
   call(frame: Uint8Array): Uint8Array;
-  admit(frame: Uint8Array): Uint8Array;
   start(): Uint8Array;
   drain(): Uint8Array;
   state(): Uint8Array;

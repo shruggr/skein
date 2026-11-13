@@ -1,26 +1,17 @@
-// `skein-kernel replay <source.db> <out.db>`: the log alone into a fresh store
-// (either backend: a path, or rocksdb:<db dir>#<set>, any_store.zig),
-// a runtime with no wallet, attested answers served from the source's records
-// (the replay path the TypeScript runtime had, deleted in #55). The fresh
-// store first gets the pinned modules (from $SKEIN_WASM_DIR
-// or the repo's wasm/) and every module (raw block) the source holds, so an
-// old log runs the handlers it ran. Prints {lines, state, index} as
-// JSON: the runtime's log lines, the emits handed to the outbox, the log tip,
-// and the index's costs and final state record (#30). The source may be in
-// either store format (sqlite_store.zig imports the old one in memory).
-// equiv/replays.ts compares a replay with its source.
+// `skein-kernel replay <source.db> <out.db>`: the log alone into a fresh store (either backend: a
+// path, or rocksdb:<db dir>#<set>, any_store.zig), a runtime with no wallet, the signer's answers
+// served from the source's records (review point 24: run by hand and by tests, not by the host).
+// The fresh store first gets every module (raw block) the source holds, so the log runs the
+// handlers it ran; each entry's `door` says what CHECK established, so nothing is verified again
+// (copylog.zig). Prints {lines, state, index} as JSON: the runtime's log lines, the log tip, and the
+// index's costs and final state record (#30).
 const std = @import("std");
 const envm = @import("env.zig");
-const cbor = @import("cbor");
 const cidm = @import("cid");
-const logm = @import("log.zig");
-const programs = @import("programs.zig");
+const copylog = @import("copylog.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
-const tree = @import("tree.zig");
-const beefm = @import("beef.zig");
 const AnyStore = @import("any_store.zig").AnyStore;
-const Value = cbor.Value;
 
 const Capture = struct {
     gpa: std.mem.Allocator,
@@ -34,191 +25,9 @@ const Capture = struct {
     }
 };
 
-pub fn wasmDir(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
-    if (envm.get("SKEIN_WASM_DIR")) |d| return d;
-    const exe = try std.process.executableDirPathAlloc(io, gpa);
-    return std.fs.path.join(gpa, &.{ exe, "..", "..", "..", "wasm" });
-}
-
-/// The pinned modules from the wasm directory, checked against their CIDs.
-pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: AnyStore, say: ?*const fn (line: []const u8) void) !void {
-    const s = ss.store();
-    const dir = try wasmDir(gpa, io);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    for (programs.modules) |m| {
-        const c = try cidm.parse(a, m.cid);
-        if (try s.has(c)) continue;
-        const file = try std.fmt.allocPrint(a, "{s}.wasm", .{m.name});
-        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, file });
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
-        if (!std.mem.eql(u8, try cidm.ofRaw(a, bytes), c)) {
-            std.debug.print("wasm/{s} does not match the pinned {s}\n", .{ file, m.cid });
-            return error.ModuleMismatch;
-        }
-        try s.putBlock(c, bytes);
-        if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ m.name, m.cid }));
-    }
-    // SKEIN_EXTRA_MODULES=<file>:<file>…: modules that are not pinned, installed
-    // under their raw CIDs — how equiv/fetch.ts runs its component (issue #34)
-    // without pinning it. Not for live instances.
-    if (envm.get("SKEIN_EXTRA_MODULES")) |list| {
-        var it = std.mem.tokenizeScalar(u8, list, ':');
-        while (it.next()) |path| {
-            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
-            const c = try cidm.ofRaw(a, bytes);
-            if (try s.has(c)) continue;
-            try s.putBlock(c, bytes);
-            if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ path, try cidm.format(a, c) }));
-        }
-    }
-}
-
-/// log.ts copyLog: the entries exactly as written and the records they name.
+/// The log copied (copylog.zig), the records it names beside it.
 pub fn copyLog(a: std.mem.Allocator, from: AnyStore, to: AnyStore) !void {
-    const src = from.store();
-    const dst = to.store();
-    const g = try logm.genesisOf(a, src);
-    for (g.get("programs").?.map) |p| {
-        const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
-        try dst.putBlock(p.value.cid, b);
-    }
-    // Programs the genesis's dispatch rows name that are not among its programs (a
-    // route handler the middleware's steps call, #68): replay needs them as the source holds them.
-    if (g.get("dispatch")) |rs| if (rs == .array) for (rs.array) |r| {
-        const h = Value.cidOf(r.get("program")) orelse continue;
-        if (try dst.has(h)) continue;
-        const b = (try src.bytes(a, h)) orelse continue;
-        try dst.putBlock(h, b);
-    };
-    // The system tree the genesis booted from (issue #4): pre-filled, not carried by any entry.
-    if (Value.cidOf(g.get("tree"))) |t| try copyTree(a, src, dst, t);
-    // #141: the records the genesis's heads name (an image's installed apps), pre-filled too: each
-    // record and every record it links (program records); git trees and raw modules as above.
-    if (g.get("heads")) |hs| if (hs == .map) for (hs.map) |h| if (Value.cidOf(h.value)) |c| try copyRecords(a, src, dst, c);
-    for (try src.logFrom(a, 0)) |c| {
-        const e = (try src.get(a, c)) orelse return error.NotFound;
-        if (!logm.isLogEntry(e)) {
-            std.debug.print("log: entry #{d} is not a format-5 entry (issue #68: requests; #40: messages as mail records)\n", .{Value.intOf(e.get("n")) orelse -1});
-            return error.BadSignature;
-        }
-        for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| {
-            const b = (try src.bytes(a, x)) orelse return error.NotFound;
-            try dst.putBlock(x, b);
-        };
-        // #156: a `chain` event names the host chain's record: it and the blocks it reaches (its map
-        // nodes, its headers), as the source reads them (the host/chain exception), beside it.
-        if (Value.cidOf(e.get("event"))) |x| if (src.getOpt(a, x)) |ev| if (std.mem.eql(u8, Value.str(ev.get("kind")) orelse "", "chain")) {
-            if (Value.cidOf(ev.get("root"))) |root| try copyHostChain(a, src, dst, root);
-        };
-        // A message's body (#40), beside its record.
-        if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
-            if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
-        };
-        // #121: what the door put for a request, beside it.
-        if (Value.cidOf(e.get("request"))) |rc| if (src.getOpt(a, rc)) |req| try copyDoor(a, src, dst, req);
-        // #164: an event the door validated (its route names kernel.beef): the pointer records its envelopes link, beside it.
-        if (Value.cidOf(e.get("event"))) |x| if (src.getOpt(a, x)) |ev| try copyLinked(a, src, dst, ev);
-        switch (try dst.logAppend(a, e)) {
-            .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
-            .rejected => |r| {
-                std.debug.print("{s}\n", .{r.message});
-                return error.Rejected;
-            },
-        }
-    }
-}
-
-/// What the door put for a request (#121), beside it: every pointer record the package's envelopes link (#146; and,
-/// for a signed message carried in, the body the door put — the package's `body` bytes — and the
-/// records it links), each with the blocks it names: its transactions, its BUMPs' bytes, and the
-/// merkle nodes each BUMP the door checked reveals.
-fn copyDoor(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, req: Value) !void {
-    try copyLinked(a, src, dst, req);
-    if (std.mem.eql(u8, Value.str(req.get("kind")) orelse "", "message")) if (Value.bytesOf(req.get("body"))) |bb| {
-        const body = cbor.decode(a, bb) catch return;
-        const bc = try cbor.cidOfValue(a, body);
-        if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
-        try copyLinked(a, src, dst, body);
-    };
-}
-
-fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
-    switch (v) {
-        .cid => |c| {
-            const rec = src.getOpt(a, c) orelse return;
-            if (!beefm.isRecord(rec)) return;
-            try dst.putBlock(c, (try src.bytes(a, c)).?);
-            if (rec.get("txs")) |ts| if (ts == .array) for (ts.array) |t| if (Value.cidOf(t)) |tc| {
-                if (try src.bytes(a, tc)) |b| try dst.putBlock(tc, b);
-            };
-            if (rec.get("bumps")) |bs| if (bs == .array) for (bs.array) |b| {
-                const pc = Value.cidOf(b.get("path")) orelse continue;
-                const pb = (try src.bytes(a, pc)) orelse continue;
-                try dst.putBlock(pc, pb);
-                if (Value.cidOf(b.get("block")) == null) continue;
-                const rev = beefm.reveal(a, beefm.bumpOf(a, pb) catch continue) catch continue;
-                for (rev.nodes) |n| {
-                    const nc = try beefm.txCid(a, n.hash);
-                    if (try src.bytes(a, nc)) |x| try dst.putBlock(nc, x);
-                }
-            };
-        },
-        .map => |m| for (m) |e| try copyLinked(a, src, dst, e.value),
-        .array => |xs| for (xs) |x| try copyLinked(a, src, dst, x),
-        else => {},
-    }
-}
-
-/// The host chain record `c` (#156) and every block it reaches — dag-cbor nodes and the headers
-/// (bitcoin-block) they link — not already in `dst` (a subtree held is held whole).
-fn copyHostChain(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, c: []const u8) anyerror!void {
-    if (try dst.has(c)) return;
-    const b = (try src.bytes(a, c)) orelse return error.NotFound;
-    try dst.putBlock(c, b);
-    if (cidm.codecOf(c) != cidm.DAG_CBOR) return;
-    try copyChainLinks(a, src, dst, cbor.decode(a, b) catch return);
-}
-
-fn copyChainLinks(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
-    switch (v) {
-        .cid => |c| try copyHostChain(a, src, dst, c),
-        .array => |xs| for (xs) |x| try copyChainLinks(a, src, dst, x),
-        .map => |es| for (es) |e| try copyChainLinks(a, src, dst, e.value),
-        else => {},
-    }
-}
-
-/// A git tree and everything under it (blobs, subtrees, gitlinked records the source holds).
-/// A dag-cbor record and every record it links, as the source holds them (git trees by copyTree; raw blocks are copied whole before).
-fn copyRecords(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, c: []const u8) anyerror!void {
-    const codec = cidm.codecOf(c);
-    if (codec == cidm.GIT_RAW) return copyTree(a, src, dst, c);
-    if (codec != cidm.DAG_CBOR or try dst.has(c)) return;
-    const b = (try src.bytes(a, c)) orelse return error.NotFound;
-    try dst.putBlock(c, b);
-    try copyLinks(a, src, dst, cbor.decode(a, b) catch return);
-}
-
-fn copyLinks(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
-    switch (v) {
-        .cid => |c| try copyRecords(a, src, dst, c),
-        .array => |xs| for (xs) |x| try copyLinks(a, src, dst, x),
-        .map => |es| for (es) |e| try copyLinks(a, src, dst, e.value),
-        else => {},
-    }
-}
-
-fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, t: []const u8) !void {
-    if (try dst.has(t)) return;
-    const b = (try src.bytes(a, t)) orelse return error.NotFound;
-    try dst.putBlock(t, b);
-    for (try tree.parseTree(a, b)) |e| switch (e.mode) {
-        .dir => try copyTree(a, src, dst, e.cid),
-        .module => if (try src.bytes(a, e.cid)) |x| try dst.putBlock(e.cid, x),
-        else => if (!(try dst.has(e.cid))) try dst.putBlock(e.cid, (try src.bytes(a, e.cid)) orelse return error.NotFound),
-    };
+    return copylog.copyLog(a, from.store(), to.store());
 }
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const u8) !u8 {
@@ -230,7 +39,6 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const
     defer arena.deinit();
     const a = arena.allocator();
 
-    try install(gpa, io, dst, null);
     for (try src.blocksOfCodec(a, cidm.RAW)) |b| try dst.store().putBlock(b[0], b[1]);
     try copyLog(a, src, dst);
 
