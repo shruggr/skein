@@ -120,6 +120,8 @@ fn kk() *const Keys {
 /// Every call is counted (a replay asks none).
 const Wallet = struct {
     calls: usize = 0,
+    /// KF1: when set, a signature verifies only over a payload holding this path (as the client signed it).
+    want_path: ?[]const u8 = null,
     last_key_id: [128]u8 = undefined,
     last_key_len: usize = 0,
 
@@ -134,6 +136,7 @@ const Wallet = struct {
         if (frame[0] == 16) {
             if (std.mem.indexOf(u8, frame, "GOOD") == null) return error.SignatureNotValid;
             if (std.mem.indexOf(u8, frame, "client-nonce ") == null) return error.WrongKeyId;
+            if (w.want_path) |p| if (std.mem.indexOf(u8, frame, p) == null) return error.SignatureNotValid;
             return a.dupe(u8, &.{0});
         }
         return error.Unexpected;
@@ -496,6 +499,30 @@ test "skein next: a content-proven arrival — no signature, a row naming anyone
     // An unsigned request at a row needing a sender: 401.
     const r = try w.check(try plain(a, "/user", ""));
     try testing.expect(r == .refused and r.refused.status == 401);
+}
+
+test "skein next (KF1): the path as signed — /@<own handle>/x matches the row /x and verifies over the signed path; /@other/x refused; bare /x matches" {
+    const w = try world(true);
+    defer w.deinit();
+    const a = w.a();
+    w.wallet.want_path = "/@t/admin";
+    const c = try w.arrive(try brc104By(a, kk().admin, "/@t/admin", 0xAA, "GOOD"));
+    try testing.expectEqualStrings("finished", c.state);
+    try testing.expectEqualStrings("/admin", Value.str((try bodyOf(a, c.answer)).get("path")).?);
+    const e = (try w.store().get(a, c.entry)).?;
+    try testing.expectEqualStrings("/admin", Value.str(e.get("door").?.get("row").?.get("path")).?);
+    // The signature is over the signed path: a request whose payload path differs does not verify.
+    const bad = try w.check(try brc104By(a, kk().admin, "/admin", 0xAA, "GOOD"));
+    try testing.expect(bad == .refused and bad.refused.status == 401);
+    w.wallet.want_path = null;
+    const other = try w.check(try brc104By(a, kk().admin, "/@other/admin", 0xAA, "GOOD"));
+    try testing.expect(other == .refused and other.refused.status == 404);
+    const prefix = try w.check(try brc104By(a, kk().admin, "/@tt/admin", 0xAA, "GOOD"));
+    try testing.expect(prefix == .refused and prefix.refused.status == 404);
+    _ = try w.arrive(try brc104By(a, kk().admin, "/admin", 0xAA, "GOOD"));
+    // A content-proven request follows the same rule.
+    _ = try w.arrive(try plain(a, "/@t/proven", "x"));
+    try testing.expect((try w.check(try plain(a, "/@other/proven", "x"))) == .refused);
 }
 
 // ---------------------------------------------------------------- refusals, roles

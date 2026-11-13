@@ -477,7 +477,8 @@ pub const Runtime = struct {
                 }
             }
             const payload = rec.get("payload").?;
-            const path = Value.str(payload.get("path")).?;
+            const signed_path = Value.str(payload.get("path")).?;
+            const path = routePath(g, signed_path) orelse return .{ .refused = .{ .status = 404, .code = "ERR_NOT_FOUND", .reason = "the path names another instance (/@<handle>/…)", .principal = principal } };
             const row = dispatch.forPath(rows, path) orelse return .{ .refused = .{ .status = 404, .code = "ERR_NOT_FOUND", .reason = "no row for this path", .principal = principal } };
             switch (grants.gate(gr, row.role.?, principal)) {
                 .pass => {},
@@ -562,7 +563,7 @@ pub const Runtime = struct {
         if (!recheck) try pkg.ran.append(cbor.string(name));
         const what = if (recheck) "recheck" else "check";
         const f = (try resolveFn(a, store, name)) orelse return refusal(500, "ERR_CHECK", try std.fmt.allocPrint(a, "{s} {s}: no such function (the app's record at <app>/app names no program for it)", .{ what, name }));
-        const arg = try checkArg(a, row, pkg);
+        const arg = try checkArg(a, g, row, pkg);
         var pending = std.StringHashMap([]const u8).init(a);
         var it = pkg.blocks.iterator();
         while (it.next()) |e| if (e.value_ptr.*) |b| try pending.put(e.key_ptr.*, b);
@@ -602,7 +603,7 @@ pub const Runtime = struct {
     /// {request: <the package as it stands>, row, principal?, caller?, method, path, query, headers,
     /// body} (the payload's fields as the package stands); an event's {event: <the record as it
     /// stands>, row}.
-    fn checkArg(a: std.mem.Allocator, row: dispatch.Row, pkg: *const Pkg) !Value {
+    fn checkArg(a: std.mem.Allocator, g: Value, row: dispatch.Row, pkg: *const Pkg) !Value {
         var m = cbor.MapBuilder.init(a);
         try m.put("row", row.value);
         if (row.kind == .event) {
@@ -614,7 +615,7 @@ pub const Runtime = struct {
             try m.put("principal", .{ .bytes = p });
             try m.put("caller", .{ .bytes = p });
         }
-        if (pkg.record.get("payload")) |p| if (p == .map) for ([_][]const u8{ "method", "path", "query", "headers", "body" }) |k| try m.put(k, p.get(k));
+        if (pkg.record.get("payload")) |p| if (p == .map) try putPayload(&m, g, p);
         return m.value();
     }
 
@@ -625,8 +626,7 @@ pub const Runtime = struct {
         const f = (try resolveFn(a, store, row.handler)) orelse return .{ .refused = refusal(500, "ERR_HANDLER", try std.fmt.allocPrint(a, "read {s}: no such function (the app's record names no program for it)", .{row.handler})) };
         var m = cbor.MapBuilder.init(a);
         if (principal) |p| try m.put("caller", .{ .bytes = p });
-        const p = rec.get("payload").?;
-        for ([_][]const u8{ "method", "path", "query", "headers", "body" }) |k| try m.put(k, p.get(k));
+        try putPayload(&m, g, rec.get("payload").?);
         try m.put("row", row.value);
         const res = try rt.callIn(a, store, g, f.program, f.func, try cbor.encode(a, m.value()), principal, at, .{ .read = true });
         if (!res.result.ok) return .{ .read = .{ .answer = try errAnswer(a, 500, res.result.err), .fuel = res.result.fuel, .principal = principal } };
@@ -638,6 +638,28 @@ pub const Runtime = struct {
         var m = cbor.MapBuilder.init(a);
         try m.put("error", cbor.string(why));
         return .{ .status = status, .type = "application/cbor", .body = try cbor.encode(a, m.value()) };
+    }
+
+    /// What the route table matches for a request's path (KF1): `payload.path` is the path exactly as
+    /// the client signed it; a leading `/@<this instance's handle>` (followed by `/` or the end) is
+    /// stripped ("/" when nothing is left). A path naming another instance (`/@<other>…`): null.
+    pub fn routePath(g: Value, path: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, path, "/@")) return path;
+        const handle = Value.str(g.get("handle")) orelse return null;
+        const rest = path[2..];
+        if (!std.mem.startsWith(u8, rest, handle)) return null;
+        const after = rest[handle.len..];
+        if (after.len == 0) return "/";
+        if (after[0] != '/') return null;
+        return after;
+    }
+
+    /// A payload's fields as a check, a read and a handler get them: method, path (as the route
+    /// table matched it: routePath), query, headers, body.
+    fn putPayload(m: *cbor.MapBuilder, g: Value, p: Value) !void {
+        for ([_][]const u8{ "method", "query", "headers", "body" }) |k| try m.put(k, p.get(k));
+        const sp = Value.str(p.get("path")) orelse "/";
+        try m.put("path", cbor.string(routePath(g, sp) orelse sp));
     }
 
     /// An app's function "<app>.<fn>" (dispatch.zig fnRef: "<app>.<role>.<fn>", or "<app>.<fn>" for an
@@ -961,7 +983,7 @@ pub const Runtime = struct {
         var args = cbor.MapBuilder.init(a);
         try args.put("fn", cbor.string(f.func));
         if (principal) |p| try args.put("caller", .{ .bytes = p });
-        for ([_][]const u8{ "method", "path", "query", "headers", "body" }) |k| try args.put(k, payload.get(k));
+        try putPayload(&args, rt.genesis.?, payload);
         try args.put("row", row.value);
         try args.put("request", cbor.cidv(pc));
         var origin = cbor.MapBuilder.init(a);
