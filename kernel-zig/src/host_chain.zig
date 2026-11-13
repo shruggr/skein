@@ -11,13 +11,16 @@
 //
 //   {kind: "host-chain", network, maps: {headers, heights}, tip: {height, hash}}
 //
-// The three frames (host.zig, serve.zig; no `h`):
+// The frames (host.zig, web.zig; no `h`):
 //
 //   headers {raws: [bytes]}         a run of headers, parents first → {root, height, hash, added, replaced}
 //   chain-import {set, root}        an image's chain/headers (the tree `root`, whose blocks the
 //                                   instance `set` holds) into an empty host chain → the same, or
 //                                   refused when the host chain has a tip
 //   chain                           → {root, height, hash} or null
+//   chain-holds {hash}              (skein next, SPEC 5: the tracker's lookups) whether the best chain
+//                                   holds the header `hash` (display hex) → {height} or null
+//   chain-at {height}               the best chain's header at `height` → {height, hash, raw} or null
 //
 // The network is the host's (SKEIN_NETWORK, default main): a record of another
 // network is refused. Writes serialize on one mutex (one writer: the host);
@@ -168,6 +171,28 @@ pub const HostChain = struct {
     }
 };
 
+/// The two lookups the tracker needs (SPEC 5 [P]): over the host chain as it stands.
+pub const Header = struct { height: u32, hash: [32]u8, raw: [80]u8 };
+
+pub fn holdsOf(hc: *HostChain, a: std.mem.Allocator, hash: [32]u8) !?u32 {
+    hc.lock();
+    defer hc.unlock();
+    var shim = HostChain.Shim{ .hc = hc };
+    const root = (try hc.pointer(a)) orelse return null;
+    var h = try lib.host.Host.open(a, shim.store(), root, hc.network);
+    return h.chain().heightOf(hash);
+}
+
+pub fn atOf(hc: *HostChain, a: std.mem.Allocator, height: u32) !?Header {
+    hc.lock();
+    defer hc.unlock();
+    var shim = HostChain.Shim{ .hc = hc };
+    const root = (try hc.pointer(a)) orelse return null;
+    var h = try lib.host.Host.open(a, shim.store(), root, hc.network);
+    const l = (try h.chain().at(height)) orelse return null;
+    return .{ .height = l.height, .hash = l.hash, .raw = l.raw };
+}
+
 /// An answer as the frame's value: {root, height, hash (display hex), added?, replaced?}.
 pub fn answerValue(a: std.mem.Allocator, ans: Answer, with_counts: bool) !Value {
     var m = cbor.MapBuilder.init(a);
@@ -190,13 +215,13 @@ pub fn rawsOf(a: std.mem.Allocator, v: Value) ![]const []const u8 {
     return out;
 }
 
-/// Whether `op` is one of the three frames.
+/// Whether `op` is one of the host chain's frames.
 pub fn isOp(op: []const u8) bool {
-    for ([_][]const u8{ "chain", "headers", "chain-import" }) |x| if (std.mem.eql(u8, op, x)) return true;
+    for ([_][]const u8{ "chain", "headers", "chain-import", "chain-holds", "chain-at" }) |x| if (std.mem.eql(u8, op, x)) return true;
     return false;
 }
 
-/// One of the three frames over `hc` (`from`: the reader of `chain-import`'s set): the answer value.
+/// One of the frames over `hc` (`from`: the reader of `chain-import`'s set): the answer value.
 pub fn run(hc: *HostChain, a: std.mem.Allocator, op: []const u8, v: Value, from: ?Reader) !Value {
     const eq = std.mem.eql;
     if (eq(u8, op, "chain")) {
@@ -206,6 +231,23 @@ pub fn run(hc: *HostChain, a: std.mem.Allocator, op: []const u8, v: Value, from:
     if (eq(u8, op, "chain-import")) {
         const root = Value.cidOf(v.get("root")) orelse return error.BadRequest;
         return answerValue(a, try hc.import(a, from, root), true);
+    }
+    if (eq(u8, op, "chain-holds")) {
+        const hash = lib.header.fromHex(Value.str(v.get("hash")) orelse return error.BadRequest) catch return error.BadRequest;
+        const height = (try holdsOf(hc, a, hash)) orelse return .null;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("height", cbor.int(height));
+        return m.value();
+    }
+    if (eq(u8, op, "chain-at")) {
+        const n = Value.intOf(v.get("height")) orelse return error.BadRequest;
+        if (n < 0 or n > std.math.maxInt(u32)) return error.BadRequest;
+        const h = (try atOf(hc, a, @intCast(n))) orelse return .null;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("height", cbor.int(h.height));
+        try m.put("hash", cbor.string(try a.dupe(u8, &lib.header.toHex(h.hash))));
+        try m.put("raw", .{ .bytes = try a.dupe(u8, &h.raw) });
+        return m.value();
     }
     return error.UnknownOp;
 }
@@ -341,6 +383,18 @@ test "host chain on RocksDB: headers into host/chain, read by every instance; no
     try testing.expectEqual(@as(u32, 10), imp.height);
     try testing.expectEqual(@as(u32, 11), imp.added);
     try testing.expectEqualSlices(u8, r1.root, imp.root);
+    // The tracker's two lookups: a header on the best chain by its hash, the header at a height.
+    try testing.expectEqual(@as(?u32, 7), try holdsOf(&hc, a, lib.header.hash(&hs[7])));
+    try testing.expectEqual(@as(?u32, 9), try holdsOf(&hc, a, lib.header.hash(&b9)));
+    try testing.expectEqual(@as(?u32, null), try holdsOf(&hc, a, lib.header.hash(&hs[9]))); // replaced by the heavier branch
+    try testing.expectEqualSlices(u8, &b10, &(try atOf(&hc, a, 10)).?.raw);
+    try testing.expect((try atOf(&hc, a, 12)) == null);
+    const hv = try run(&hc, a, "chain-holds", blk: {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("hash", cbor.string(try a.dupe(u8, &lib.header.toHex(lib.header.hash(&hs[3])))));
+        break :blk m.value();
+    }, null);
+    try testing.expectEqual(@as(?i128, 3), Value.intOf(hv.get("height")));
     // Another network: refused.
     var hc3 = HostChain.init(cs2.backend(), .main, testing.io);
     try testing.expectError(error.NetworkMismatch, hc3.add(a, &.{&b9}));

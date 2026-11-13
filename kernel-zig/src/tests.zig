@@ -23,8 +23,7 @@ test {
     _ = @import("dispatch.zig");
     _ = @import("subscriptions.zig");
     _ = @import("log.zig");
-    _ = @import("beef.zig");
-    _ = @import("door_test.zig");
+    _ = @import("door.zig");
     _ = @import("runtime_test.zig");
     _ = @import("authfetch.zig");
     _ = @import("grants.zig");

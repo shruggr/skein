@@ -13,9 +13,9 @@
 // the browser build.
 // The codecs (cid, cbor, mst, secp) are the SDK's (shruggr/skein-sdk, a Zig
 // package dependency by URL+hash in build.zig.zon, #75; with -Dwallet=false).
-// Both builds also take the SDK's `chain` module (as `chainlib`: the door's
-// BEEF parser and SPV verifier, door.zig, #121; natively also the host
-// chain's tracker, host_chain.zig, #156), which brings bsvz (the SDK's lazy
+// Both builds also take the SDK's `chain` module (as `chainlib`: the host
+// chain's tracker, host_chain.zig, #156 — skein next: the BEEF check is the
+// chain app's, no longer the kernel's), which brings bsvz (the SDK's lazy
 // dependency, fetched by URL+hash). scripts/sdk-local.sh overrides it with
 // a sibling checkout for development.
 //
@@ -107,8 +107,8 @@ fn sdkImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTar
     for ([_][]const u8{ "cid", "cbor", "mst", "secp" }) |name| m.addImport(name, sdk.module(name));
 }
 
-/// The SDK's chain module, as `chainlib`: the door's BEEF verifier (door.zig, #121) in both builds,
-/// and natively the host chain's tracker (host_chain.zig, #156). It brings bsvz (the SDK's lazy
+/// The SDK's chain module, as `chainlib`: the host chain's tracker (host_chain.zig, #156), in both
+/// builds (the browser build's chain holder too). It brings bsvz (the SDK's lazy
 /// dependency); skein-sdk 0.21.2 registers a placeholder `chain` module in the first configure pass,
 /// before bsvz is fetched, so a clean clone builds without a guard here.
 fn chainImport(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
