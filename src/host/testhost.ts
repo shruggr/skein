@@ -90,7 +90,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 export interface InboxHost { base: string; db: HostDb; router: Router; origin(handle: string): string; entries(handle: string): Promise<number>; register(key: PrivateKey, handle: string): Promise<string> }
 
 /** A host with instances, each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; teranode?: Router["o"]["teranode"]; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; teranode?: Router["o"]["teranode"]; headersUrl?: string; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
@@ -122,6 +122,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // #156: the Teranode headers tracker (a fake mesh and hub in the tests).
     ...(o.teranode ? { teranode: o.teranode } : {}),
+    // SPEC 8: an HTTP header source (SKEIN_HEADERS_URL) into the one intake.
+    ...(o.headersUrl ? { headersUrl: o.headersUrl } : {}),
     ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : {}),
     // The settled split: the wasm kernel over the host's one SQLite database (SKEIN_TEST_STORE=sqlite: every test host so).
     ...(sqlite ? { sqliteStore: join(home, "store.sqlite") } : {}),

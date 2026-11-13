@@ -120,6 +120,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, txCid } from "./feeds.ts";
 import { hashOf, TeranodeTracker } from "./teranode.ts";
+import { HttpHeaders } from "./headers-source.ts";
 import { takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
 import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
 import { WasmHost } from "./wasm-kernel.ts";
@@ -168,6 +169,12 @@ export interface RouterOptions {
    * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key): the source of the one header intake
    * (skein next, SPEC 8). Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
    */
+  /**
+   * SKEIN_HEADERS_URL (skein next, SPEC 8: "Headers are headers"): an SSE stream of block headers feeding the one
+   * intake, with its history endpoint, when it has one, for a fill at start (headers-source.ts). Beside the
+   * tracker or alone.
+   */
+  headersUrl?: string;
   teranode?: { bootstrap: string[]; hub?: string; peersFile?: string; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
@@ -458,6 +465,8 @@ export class Router {
   /** The control socket (control.ts), while this router listens on one. */
   private control?: { server: NetServer; path: string };
 
+  /** SKEIN_HEADERS_URL's source (headers-source.ts), when the host has one. */
+  headersSource?: HttpHeaders;
   /** #156: the headers tracker over the Teranode mesh (teranode.ts), when the host runs one. */
   tracker?: TeranodeTracker;
   /** #156: the libp2p the host node runs on: the instances' (`p2p`), else one for the tracker alone. */
@@ -637,6 +646,15 @@ export class Router {
       await this.startTracker().catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
       if (this.tracker?.o.hub) await this.tracker.ready;
     }
+    // SPEC 8: an HTTP source feeds the same intake (beside the tracker or alone): its history fill awaited, then its stream.
+    if (this.o.headersUrl && !this.headersSource && !this.stopped) {
+      this.headersSource = new HttpHeaders({
+        url: this.o.headersUrl, take: (raws, at) => this.takeHeaders(raws, at), find: (hash) => this.findHeader(hash),
+        tip: async () => { const x = await this.hostTip(); return x ? { height: x.height, hash: x.hash } : undefined; },
+        backoff: this.o.feeds?.backoff, log: (l) => this.say("router", l),
+      });
+      await this.headersSource.start();
+    }
     // SPEC 8: the holder map, rebuilt from the instances' stores (their `chain/tx/` facts), no kernel started.
     await this.rebuildHolders().catch((e) => this.say("router", `holders: not rebuilt: ${(e as Error).message}`));
     // #138: the stored liveness beats older than the longest window (a day) go before any instance reloads them.
@@ -696,7 +714,7 @@ export class Router {
     this.control = undefined;
     this.providers.stop();
     this.events.stop();
-    await Promise.all([this.arc?.stop(), this.tracker?.stop()]);
+    await Promise.all([this.arc?.stop(), this.tracker?.stop(), this.headersSource?.stop()]);
     await Promise.all([this.p2p?.stop(), this.hostP2p !== this.p2p ? this.hostP2p?.stop() : undefined]); // #156: the host node with them
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it

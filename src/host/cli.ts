@@ -118,6 +118,10 @@
 //                         made once and appended to $SKEIN_HOME/host.env, read from there after);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only)
+//   SKEIN_HEADERS_URL     an SSE stream of block headers (hex, or chaintracks' JSON: Arcade's
+//                         http://127.0.0.1:8083/chaintracks/v2/tip/stream) into the host's one header intake (SPEC 8,
+//                         headers-source.ts), beside the Teranode tracker or alone; a `…/tip/stream` URL's history
+//                         (`…/headers`) brings the host chain up to it at start
 //   SKEIN_TERANODE        #156: `off` turns the host's headers tracker over the Teranode P2P network off (teranode.ts;
 //                         `skein-host run` only). On by default where the network has bootstrap peers (main, test):
 //                         it joins the network's block topic (`teranode/bitcoin/1.0.0/<network>-block`), takes each
@@ -597,6 +601,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     ...((s) => (s ? { sqliteStore: s } : {}))(sqliteStoreOf(v, home)), // the settled split: the wasm kernel
     // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
     ...(v.SKEIN_ROOT_INSTANCE ? { rootInstance: v.SKEIN_ROOT_INSTANCE } : {}),
+    ...(v.SKEIN_HEADERS_URL ? { headersUrl: v.SKEIN_HEADERS_URL } : {}),
     imagesDir: resolve(v.SKEIN_IMAGES_DIR || join(home, "images")),
     // #142: settings host.env may give (the environment's are read where they are used, too).
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),

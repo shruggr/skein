@@ -117,3 +117,67 @@ test("headers (SPEC 8): an app taking `chain` installed into a running instance 
   await until("the install event", async () => { await h.router.settled(); return (await chainEvents(k)).length === 1 || undefined; });
   assert.deepEqual(await chainEvents(k), [{ box: "chain", height: 1 }]);
 });
+
+test("headers (SPEC 8): an HTTP source alone (SKEIN_HEADERS_URL) — the history fill at start, then each streamed header: the host chain written once per header, each instance its pointer event; a gap filled from the history", { skip, timeout: 180_000 }, async (t) => {
+  const { createServer } = await import("node:http");
+  const chain = chainOf(8);
+  let served = 3; // what the history endpoint offers: the first `served` headers
+  const conns: Array<import("node:http").ServerResponse> = [];
+  const asked: string[] = [];
+  const server = createServer((req, res) => {
+    const u = new URL(req.url ?? "/", "http://x");
+    asked.push(`${u.pathname}${u.search}`);
+    if (u.pathname.endsWith("/tip/stream")) { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); return; }
+    if (u.pathname.endsWith("/headers")) {
+      const from = Number(u.searchParams.get("height")), n = Number(u.searchParams.get("count"));
+      return void res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.concat(chain.slice(from, Math.min(served, from + n))));
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => { for (const c of conns) c.end(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
+
+  const h = await testHost(t, { sqlite: true, ...regtest, headersUrl: url });
+  const tree = await chainTree(join(h.home, "tree-chain"));
+  await h.instance("a", tree);
+  await h.instance("b", tree);
+  const frames: number[] = [];
+  const headers = WasmHost.prototype.chainHeaders;
+  WasmHost.prototype.chainHeaders = function (raws: Uint8Array[]) { frames.push(raws.length); return headers.call(this, raws); };
+  t.after(() => { WasmHost.prototype.chainHeaders = headers; });
+  await h.router.start();
+  const tip = async () => (await h.router.hostChainTips())[0]?.tip?.height;
+  const k = async (x: string) => (await h.router.hydrate(x)).kernel;
+  const heights = async (x: string) => (await chainEvents(await k(x))).map((e) => e.height);
+
+  // The history fill, before the instances: one run, then each instance told inside its load.
+  assert.equal(await tip(), 2);
+  assert.deepEqual(frames, [3], "the history: one `headers` frame");
+  assert.ok(asked.includes("/chaintracks/v2/headers?height=0&count=100800"), asked.join(" "));
+  assert.deepEqual(await heights("a"), [2]);
+  assert.deepEqual(await heights("b"), [2]);
+
+  // The stream: a header as hex, then one as chaintracks' JSON fields.
+  await until("subscribed", () => conns[0]);
+  const display = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
+  conns[0]!.write(`data: ${Buffer.from(chain[3]!).toString("hex")}\n\n`);
+  await until("3 held", async () => (await tip()) === 3 || undefined);
+  const c4 = Buffer.from(chain[4]!);
+  conns[0]!.write(`data: ${JSON.stringify({ version: c4.readInt32LE(0), previousHash: display(c4.subarray(4, 36)), merkleRoot: display(c4.subarray(36, 68)), time: c4.readUInt32LE(68), bits: c4.readUInt32LE(72), nonce: c4.readUInt32LE(76), height: 4, hash: display(sha256d(c4)) })}\n\n`);
+  await until("4 held", async () => (await tip()) === 4 || undefined);
+  await h.router.settled();
+  assert.deepEqual(frames, [3, 1, 1], "each streamed header written once, whatever the number of instances");
+  await until("a and b told", async () => ((await heights("a")).length === 3 && (await heights("b")).length === 3) || undefined);
+  assert.deepEqual(await heights("a"), [2, 3, 4]);
+  assert.deepEqual(await heights("b"), [2, 3, 4]);
+
+  // A gap: 5 never streamed, 6 arrives — the history fills it in, through the same intake.
+  served = 7;
+  conns[0]!.write(`data: ${Buffer.from(chain[6]!).toString("hex")}\n\n`);
+  await until("6 held", async () => (await tip()) === 6 || undefined);
+  assert.equal(asked.filter((x) => x.startsWith("/chaintracks/v2/headers?")).length, 2, "the history asked again for the gap (from a little below the tip)");
+  await h.router.settled();
+  await until("a told 6", async () => (await heights("a")).at(-1) === 6 || undefined);
+  assert.equal(h.router.headersSource!.stats.taken, 2);
+});
