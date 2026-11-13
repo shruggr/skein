@@ -851,7 +851,12 @@ export class Router {
     });
     this.intake = p.catch(() => {});
     return p.then(() => {
-      for (const h of [...this.loaded.keys()]) void this.chainBirth(h).then(() => this.retryProofs(h)).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
+      for (const h of [...this.loaded.keys()]) {
+        // Followed by `settled` (the instances told before it returns).
+        const q = this.chainBirth(h).then(() => this.retryProofs(h)).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
+        this.syncing.add(q);
+        void q.finally(() => this.syncing.delete(q));
+      }
     });
   }
 
@@ -1704,9 +1709,12 @@ export class Router {
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
   }
 
-  /** The paths of `handle`'s overlays' sync rows (syncPath of each app that beacons): the host's own carrier's rows, not offered over HTTP (SPEC 7 [P]). */
+  /**
+   * The paths of `handle`'s sync rows: each app's `syncPath(app)` its table holds a request row at — where
+   * the host hands what it fetched from a peer (submitBeef), not offered over HTTP (SPEC 7 [P]).
+   */
   private syncRows(handle: string): Set<string> {
-    return new Set((this.loaded.get(handle)?.beacons ?? []).map((b) => syncPath(b.app)));
+    return new Set((this.loaded.get(handle)?.rows ?? []).filter((r) => r.kind === "request" && r.path === syncPath(rowApp(r) ?? "")).map((r) => r.path!));
   }
 
   /**
