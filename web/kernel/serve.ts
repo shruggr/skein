@@ -13,10 +13,34 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { browserOptions } from "../build.ts";
+import type { BuildOptions } from "esbuild";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "../..");
+/**
+ * The bundle's options (from the page client web/build.ts, removed in skein next): the node modules the
+ * shared code imports (node:crypto, node:fs/path, Buffer) mapped to web/kernel/shims.
+ */
+export function browserOptions(entry: string, outfile: string): BuildOptions {
+  return {
+    entryPoints: [entry],
+    outfile,
+    bundle: true,
+    format: "esm",
+    target: "es2022",
+    platform: "browser",
+    sourcemap: true,
+    logLevel: "warning",
+    alias: {
+      "node:crypto": join(HERE, "shims/crypto.ts"),
+      "node:fs": join(HERE, "shims/node-stub.ts"),
+      "node:path": join(HERE, "shims/node-stub.ts"),
+    },
+    inject: [join(HERE, "shims/buffer.ts")],
+    define: { "process.env.NODE_ENV": '"production"', global: "globalThis" },
+  };
+}
+
 const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".wasm": "application/wasm", ".map": "application/json", ".json": "application/json" };
 
 export async function buildPage(): Promise<void> {

@@ -7,7 +7,6 @@
 //                           $SKEIN_HOME/infer-peers.json (scripts/host/up.sh writes every agent's); read again
 //                           when it changes. A request from a key not in it has nowhere to go: dropped, one line.
 //   SKEIN_INFER_PROVIDERS   the provider map file, default $SKEIN_HOME/infer.json
-//   SKEIN_INFER_HANDLE      its handle, default infer@localhost
 //   SKEIN_INFER_CACHE       its conversation graph on disk (issue #12), default $SKEIN_HOME/infer-cache;
 //                           "" keeps it in memory only
 //   SKEIN_INFER_NODES       how many nodes it holds in memory, default 50000
@@ -45,7 +44,7 @@ const addressOf = (key: string): string | undefined => {
 };
 const outboxes = new Map<string, RawBox>();
 const peer = new InferPeer({
-  graph, wallet, providers: providers!, handle: env.SKEIN_INFER_HANDLE, log: say,
+  graph, wallet, providers: providers!, log: say,
   raw: {
     inbox: new RawBox(wallet, env.SKEIN_MAILBOX_URL!, { originator: "skein-infer" }),
     outbox: (url) => { let b = outboxes.get(url); if (!b) { b = new RawBox(wallet, url, { originator: "skein-infer" }); outboxes.set(url, b); } return b; },

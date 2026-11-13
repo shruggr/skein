@@ -12,8 +12,7 @@
 // each caller's calls (#40: the front door's reads, which the log never sees)
 // cost, per instance and op. And the broadcaster's three (#58, #65, arc.ts):
 // the last event id taken from Arcade's stream, the statuses already routed,
-// and the queue of broadcasts Arcade has not taken yet. And the cron
-// provider's one (#69, cron.ts): the schedules the instances asked for.
+// and the queue of broadcasts Arcade has not taken yet.
 // And the host's own settings (#90): which row is the host skein — the
 // operator's instance (`skein-host init`), whose identity alone reaches the
 // instance manager. And overlay sync's: the peers each
@@ -69,17 +68,6 @@ CREATE TABLE IF NOT EXISTS broadcast_queue (
   next_at           INTEGER NOT NULL,                 -- ms: when it is posted (again)
   since             INTEGER NOT NULL,                 -- ms: when it was first queued (given up a day on)
   last_error        TEXT
-) WITHOUT ROWID;
--- The cron provider's schedules (#69, cron.ts): what each instance asked to be ticked, by name, until it
--- says stop (an \`at\` one until it fired).
-CREATE TABLE IF NOT EXISTS cron_schedule (
-  instance          TEXT NOT NULL,                    -- the handle the ticks go to
-  name              TEXT NOT NULL,
-  recipient         TEXT NOT NULL,                    -- its identity key (hex): the ticks' recipient
-  spec              BLOB NOT NULL,                    -- dag-cbor {every | at, box, body?}
-  request           TEXT NOT NULL,                    -- the tick request's CID
-  next              INTEGER NOT NULL,                 -- ms: the next tick
-  PRIMARY KEY (instance, name)
 ) WITHOUT ROWID;
 -- The host's settings (#90): key → value. \`host_skein\`: the handle of the host skein. \`image\`, \`image_chain\` (#132):
 -- the default image's current root tree and its \`chain\` tree (image-chain.ts).
@@ -375,25 +363,6 @@ export class HostDb {
     return this.db.prepare("SELECT txid, attempts, next_at, last_error FROM broadcast_queue ORDER BY next_at, txid").all().map((r) => {
       const x = r as { txid: string; attempts: number; next_at: number; last_error: string | null };
       return { txid: x.txid, attempts: Number(x.attempts), next: Number(x.next_at), ...(x.last_error ? { error: x.last_error } : {}) };
-    });
-  }
-
-  /** Keep a cron schedule (#69): an instance's, by name (a later one replaces it). */
-  saveSchedule(s: { instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }): void {
-    this.db.prepare("INSERT INTO cron_schedule (instance, name, recipient, spec, request, next) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (instance, name) DO UPDATE SET recipient = excluded.recipient, spec = excluded.spec, request = excluded.request, next = excluded.next")
-      .run(s.instance, s.name, s.recipient, s.spec, s.request, s.next);
-  }
-
-  /** Drop an instance's schedule; false if it had none by that name. */
-  dropSchedule(instance: string, name: string): boolean {
-    return Number(this.db.prepare("DELETE FROM cron_schedule WHERE instance = ? AND name = ?").run(instance, name).changes) > 0;
-  }
-
-  /** Every kept schedule. */
-  schedules(): Array<{ instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }> {
-    return this.db.prepare("SELECT instance, name, recipient, spec, request, next FROM cron_schedule ORDER BY instance, name").all().map((r) => {
-      const x = r as { instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number };
-      return { instance: x.instance, name: x.name, recipient: x.recipient, spec: new Uint8Array(x.spec), request: x.request, next: Number(x.next) };
     });
   }
 

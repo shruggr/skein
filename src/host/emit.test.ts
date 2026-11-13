@@ -50,7 +50,7 @@ test("deadline: an event on the step, kept by the host's waker across a restart,
   const owner = PrivateKey.fromRandom().toPublicKey().toString();
   const lines: string[] = [];
   const make = () => new Router({
-    db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), owner, home, idleMs: 0, cron: false,
+    db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), owner, home, idleMs: 0,
     kernel: { env: { SKEIN_HOME: home } }, log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
   db.add("w", { store: join(home, "instances/w/runtime.db"), identity: signer.identity("w") });
@@ -60,8 +60,8 @@ test("deadline: an event on the step, kept by the host's waker across a restart,
   await router.bootRow("w", { kind: "tree", root: d.root, objects: d.objects });
   await router.start();
 
-  // A tick from the cron provider (#69: `skein-host event`'s message, a tick due now) starts cron-demo, which rests 4 s.
-  await router.cronEvent("w", "tick", { name: "one", rest: 4000 });
+  // A tick message (cron-demo's form, {kind: "cron", name, due, rest}) starts cron-demo, which rests 4 s.
+  await tick(router, "w", { name: "one", rest: 4000 });
   await router.settled();
   const k = (await router.hydrate("w")).kernel;
   const rested = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → waiting · emitted \S+ · awaits \S+ · \d+\.\d ms · fuel \d+$/.test(l));
@@ -120,17 +120,27 @@ test("0.9.1: a step's line on the wasm kernel (the one production runs) carries 
   db.add("w", { store: `sqlite:${sqliteStore}`, identity: signer.identity("w") });
   const router = new Router({
     db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), owner: PrivateKey.fromRandom().toPublicKey().toString(),
-    home, idleMs: 0, cron: false, sqliteStore, kernel: { env: { SKEIN_HOME: home } }, log: (s, l) => { lines.push(`[${s}] ${l}`); },
+    home, idleMs: 0, sqliteStore, kernel: { env: { SKEIN_HOME: home } }, log: (s, l) => { lines.push(`[${s}] ${l}`); },
   });
   t.after(() => router.stop());
   const d = await dirSource(dir);
   await router.bootRow("w", { kind: "tree", root: d.root, objects: d.objects });
   await router.start();
-  await router.cronEvent("w", "tick", { name: "one", rest: 4000 });
+  await tick(router, "w", { name: "one", rest: 4000 });
   await router.settled();
   const line = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → /.test(l));
   assert.match(line ?? "", /^\[w\] \S+ cron-demo step 1 → waiting · emitted \S+ · awaits \S+ · \d+\.\d ms · fuel [1-9]\d*$/, lines.filter((l) => l.startsWith("[w]")).join("\n"));
 });
+
+/**
+ * A message in box `tick` as cron-demo takes it ({kind: "cron", name, due, rest}): signed by a provider of
+ * the host's (the waker's key) and appended as a `local` request; the row takes the box from anyone. The
+ * cron provider that sent these is gone (skein next, SPEC 8): this is only the program's way in.
+ */
+async function tick(router: Router, handle: string, body: Record<string, unknown>): Promise<void> {
+  const id = (await router.hydrate(handle)).identity;
+  await router.providers.send(handle, "waker", Uint8Array.from(Buffer.from(id, "hex")), "tick", { ...body, kind: "cron", due: Date.now() });
+}
 
 /** The deadline event cron-demo's first step recorded: the CID its update lists in `emitted`, read from the store file. */
 async function deadlineOf(file: string): Promise<CID> {

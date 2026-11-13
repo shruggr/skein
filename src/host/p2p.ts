@@ -49,10 +49,8 @@
 //              uninstall added or removed libp2p rows, #72/#77): new topics are
 //              subscribed and new protocols handled; gone ones unsubscribed and
 //              unhandled; no topic or protocol left: the node stops. No restart.
-//   outbound   the `libp2p` provider's work (#70, providers.ts): publish, dial,
-//              send, close for the messages an instance emits to it, and each frame
-//              read from a dialled stream handed back (`frames`) to become a
-//              message to the instance — the next frame arrives as an entry.
+//   outbound   the `libp2p` provider's work (#70, providers.ts): publish for the
+//              messages an instance emits to it.
 //
 // The host node (#156, one node): the node of the HOST key (hostKey: on a one-key host the key
 // every instance's node uses, so the instances join it) runs whether or not an instance declares
@@ -98,7 +96,7 @@ import { peerIdFromPrivateKey, peerIdFromString } from "@libp2p/peer-id";
 import { ping } from "@libp2p/ping";
 import { tcp } from "@libp2p/tcp";
 import { uPnPNAT } from "@libp2p/upnp-nat";
-import { isPrivate, lpStream, type LengthPrefixedStream } from "@libp2p/utils";
+import { isPrivate, lpStream } from "@libp2p/utils";
 import { webSockets } from "@libp2p/websockets";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";
 import { PrivateKey } from "@bsv/sdk";
@@ -177,9 +175,6 @@ export interface InboundAnswer {
   close?: boolean;
   reason?: string;
 }
-
-/** A frame read from a dialled stream, or its end. */
-export type Frame = { body: Uint8Array } | { closed: true; error?: string };
 
 /** The stream protocol a signed message travels on to an instance (#70). */
 export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
@@ -563,15 +558,11 @@ const isCid = (x: unknown): x is CID => CID.asCID(x) !== null;
 //   listen     the host's listen addresses, once per node; an instance's own
 //              `listen` is honoured when its node has that one handle (a line
 //              otherwise).
-//   outbound   publish, dial, request: from the handle's node, as before.
+//   outbound   publish, request: from the handle's node, as before.
 
-/** A stream an instance dialled (the libp2p provider's). */
-interface OpenStream { stream: Stream; lp: LengthPrefixedStream }
-
-/** One handle on a node: its config, its dialled streams, its beacons' timers (#126, by "<app> <topic>"). */
+/** One handle on a node: its config, its beacons' timers (#126, by "<app> <topic>"). */
 interface Handle {
   config: P2PInstanceConfig;
-  streams: Map<number, OpenStream>;
   beats: Map<string, { beacon: Beacon; timer: ReturnType<typeof setInterval> }>;
 }
 
@@ -593,9 +584,6 @@ interface Node {
   /** The host's own topics on it (#156: the Teranode block topic): subscribed beside the handles', judged by their handler, never the front door, never advertised on the skein DHT. */
   hostTopics: Map<string, HostTopicHandler>;
 }
-
-/** Stream IDs unique across restarts (a thread's recorded stream never names a later stream). */
-let nextStream = Date.now() * 1000;
 
 const u64 = (n: bigint): Uint8Array => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n, false); return b; };
 
@@ -747,7 +735,7 @@ export class P2PHost {
     let h = n.handles.get(handle);
     const joined = !h;
     if (!h) {
-      n.handles.set(handle, (h = { config: { topics: [], protocols: [] }, streams: new Map(), beats: new Map() }));
+      n.handles.set(handle, (h = { config: { topics: [], protocols: [] }, beats: new Map() }));
       this.byHandle.set(handle, n);
       if (config.listen?.length) this.say(handle, `libp2p: its listen ${config.listen.join(" ")} not honoured: its key's node (${n.id}) carries ${n.handles.size} instances and listens on ${n.node.getMultiaddrs().map(String).join(" ") || "(nothing)"} (#160)`);
     }
@@ -848,7 +836,7 @@ export class P2PHost {
   private async start(key: string, pk: PrivateKey, handle: string | undefined, config: P2PInstanceConfig | undefined): Promise<Node | undefined> {
     const h = this.o.host;
     const n: Node = {
-      id: key, node: undefined as never, handles: new Map(handle && config ? [[handle, { config, streams: new Map(), beats: new Map() }]] : []),
+      id: key, node: undefined as never, handles: new Map(handle && config ? [[handle, { config, beats: new Map() }]] : []),
       seqnos: new Map(), subscribed: new Set(), handled: new Set(), hostTopics: new Map(), ...(key === this.hostId ? { host: true } : {}),
     };
     const listen = [...(config?.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
@@ -1121,30 +1109,6 @@ export class P2PHost {
     } finally { n.seqnos.delete(data); }
   }
 
-  /** Open a stream from `handle`'s node to a peer (a peer ID, or a multiaddr with /p2p/<id>): its id; each frame read from it, and its end, to `frames`. */
-  async dial(handle: string, peer: string, protocol: string, frames: (f: Frame) => void): Promise<number> {
-    const n = this.nodeOf(handle);
-    const hs = n.handles.get(handle)!;
-    const target = peer.startsWith("/") ? multiaddr(peer) : peerIdFromString(peer);
-    const stream = await n.node.dialProtocol(target, protocol, { signal: AbortSignal.timeout(15_000) });
-    const id = ++nextStream;
-    const s = { stream, lp: lpStream(stream) };
-    hs.streams.set(id, s);
-    void (async () => {
-      for (;;) {
-        try {
-          frames({ body: (await s.lp.read()).subarray() });
-        } catch (e) {
-          const name = (e as Error).name;
-          const clean = name === "UnexpectedEOFError" || name === "StreamClosedError" || name === "StreamResetError";
-          if (hs.streams.get(id) === s) frames({ closed: true, ...(clean ? {} : { error: (e as Error).message }) });
-          return;
-        }
-      }
-    })();
-    return id;
-  }
-
   /**
    * One request to a peer on `protocol` (a host protocol, shruggr/skein#150): a stream opened, one
    * frame written, one frame read back, the stream closed. → the answer's bytes.
@@ -1223,22 +1187,6 @@ export class P2PHost {
   subscribers(handle: string, topic: string): string[] {
     const n = this.byHandle.get(handle);
     return n ? this.pubsub(n).getSubscribers(topic).map((p) => p.toString()) : [];
-  }
-
-  /** Write one length-prefixed frame on a dialled stream. */
-  async send(handle: string, id: number, body: Uint8Array): Promise<void> {
-    const s = this.nodeOf(handle).handles.get(handle)!.streams.get(id);
-    if (!s) throw new Error(`send: no stream ${id}`);
-    await s.lp.write(body);
-  }
-
-  /** Close a dialled stream (our side), and forget it. */
-  async close(handle: string, id: number): Promise<void> {
-    const hs = this.nodeOf(handle).handles.get(handle)!;
-    const s = hs.streams.get(id);
-    if (!s) throw new Error(`close: no stream ${id}`);
-    hs.streams.delete(id);
-    await s.stream.close().catch(() => s.stream.abort(new Error("closed")));
   }
 
   // ---------------------------------------------------------------- lifecycle

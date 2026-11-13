@@ -1,9 +1,8 @@
 // The router's libp2p host (#51, p2p.ts) on its own, no kernel: the peer key
 // and its peer ID both ways, the host-wide settings, and two nodes on
 // loopback — a topic message judged by the validator (the front-door call is
-// a stand-in here), a stream round trip (the libp2p provider's publish, dial,
-// send, close; #70) whose frames come back through `frames`, and a frame on
-// /skein/message/1.0.0, which every node serves; a node declared again
+// a stand-in here), a stream round trip (a request: one frame and its answer),
+// and a frame on /skein/message/1.0.0, which every node serves; a node declared again
 // following its instance's config (#72: the routes an install adds and removes).
 
 import { test } from "node:test";
@@ -15,7 +14,7 @@ import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } f
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
-import { anyPort, bootstrapDials, OVERLAY_BOOTSTRAP, overlayBootstrap, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { anyPort, bootstrapDials, OVERLAY_BOOTSTRAP, overlayBootstrap, beaconBeat, beaconFrame, DEFAULT_LISTEN, DEFAULT_PORT, dhtClientMode, foldSubscriptions, upnpTold, hostP2PConfig, type DhtMode, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -89,13 +88,14 @@ test("p2p: host-wide settings from the environment, else host.env; an instance's
   assert.equal((await topicCid("hello")).toString(), CID.parse("bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq").toString());
 });
 
-test("p2p: two nodes — a topic message through the validator, a stream round trip whose frames come back through `frames`, a message on /skein/message/1.0.0 needing no declaration", async (t) => {
+test("p2p: two nodes — a topic message through the validator, a stream round trip (a request and its answer), a message on /skein/message/1.0.0 needing no declaration", async (t) => {
   const master = PrivateKey.fromHex("44".repeat(32));
   const o = new Signer(master);
   const calls: Array<{ handle: string; call: InboundCall }> = [];
   const inbound = async (handle: string, call: InboundCall): Promise<InboundAnswer> => {
     calls.push({ handle, call });
     if (call.protocol === "/skein/echo/1") return { verdict: "accept", body: new TextEncoder().encode(`echo: ${new TextDecoder().decode(call.body)}`) };
+    if (call.protocol === MESSAGE_PROTOCOL) return { verdict: "accept", body: new TextEncoder().encode("taken"), close: true };
     return { verdict: new TextDecoder().decode(call.body).startsWith("bad") ? "reject" : "accept" };
   };
   const mk = (bootstrap: string[] = []) => new P2PHost({
@@ -123,25 +123,17 @@ test("p2p: two nodes — a topic message through the validator, a stream round t
   assert.equal(new TextDecoder().decode(got.call.body), "hello");
   assert.ok(got.call.signature && got.call.signature.length > 60, "the GossipSub signature");
 
-  // A stream: dial, send; the echo's frame comes back through `frames` (the libp2p provider makes it a message, #70), then close.
-  const frames: Frame[] = [];
-  const id = await a.dial("alpha", b.peerId("beta"), "/skein/echo/1", (f) => frames.push(f));
-  assert.equal(typeof id, "number");
-  await a.send("alpha", id, new TextEncoder().encode("ping"));
-  await until(() => frames.length, "the echo's frame");
-  assert.equal(new TextDecoder().decode((frames[0] as { body: Uint8Array }).body), "echo: ping");
+  // A stream: one frame written, the echo's answer read back (a request).
+  const answer = await a.request("alpha", b.peerId("beta"), "/skein/echo/1", new TextEncoder().encode("ping"));
+  assert.equal(new TextDecoder().decode(answer), "echo: ping");
   const s = calls.find((c) => c.call.protocol === "/skein/echo/1");
   assert.equal(keyOfPeerId(s!.call.from), o.peerKey("alpha").toPublicKey().toString(), "a stream frame's from: the remote peer");
-  await a.close("alpha", id);
-  await assert.rejects(a.send("alpha", id, new Uint8Array([1])), /no stream/);
-  await assert.rejects(a.dial("alpha", "/ip4/127.0.0.1/tcp/1/p2p/" + b.peerId("beta"), "/x", () => {}));
+  await assert.rejects(a.request("alpha", b.peerId("beta"), "/x", new Uint8Array([1])));
   await assert.rejects(a.publish("nobody", "demo", new Uint8Array()), /no libp2p node/);
 
   // Every node serves MESSAGE_PROTOCOL (#70): a frame there goes to the front door with no protocol declared.
-  const m = await a.dial("alpha", b.peerId("beta"), MESSAGE_PROTOCOL, () => {});
-  await a.send("alpha", m, new TextEncoder().encode("a package"));
+  await a.request("alpha", b.peerId("beta"), MESSAGE_PROTOCOL, new TextEncoder().encode("a package"));
   await until(() => calls.find((c) => c.call.protocol === MESSAGE_PROTOCOL), "beta's front door gets the message frame");
-  await a.close("alpha", m);
 });
 
 test("p2p: subscriptions (#119) — the topics the apps subscribed; keyed by (app, topic), folded in order; a libp2p row is exact", () => {
@@ -188,7 +180,7 @@ test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #7
   const calls: InboundCall[] = [];
   const mk = (bootstrap: string[] = []) => new P2PHost({
     host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht: "off", relays: [], mdns: false },
-    keyOf: (h) => o.peerKey(h), inbound: async (_h, call) => { calls.push(call); return { verdict: "accept" }; }, discoveryMs: 300,
+    keyOf: (h) => o.peerKey(h), inbound: async (_h, call) => { calls.push(call); return { verdict: "accept", ...(call.protocol ? { body: new Uint8Array([1]), close: true } : {}) }; }, discoveryMs: 300,
   });
   const a = mk();
   t.after(() => a.stop());
@@ -208,16 +200,14 @@ test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #7
   await sleep(1200); // a heartbeat: beta in alpha's mesh for two
   await a.publish("alpha", "two", new TextEncoder().encode("on two"));
   await until(() => calls.find((c) => c.topic === "two"), "beta's validator is called on two");
-  const s = await a.dial("alpha", b.peerId("beta"), "/p/1", () => {});
-  await a.send("alpha", s, new TextEncoder().encode("frame"));
+  await a.request("alpha", b.peerId("beta"), "/p/1", new TextEncoder().encode("frame"));
   await until(() => calls.find((c) => c.protocol === "/p/1"), "beta serves /p/1");
-  await a.close("alpha", s).catch(() => {});
 
   // Declared again without them: unsubscribed, unhandled.
   await b.declare("beta", { topics: ["one"], protocols: [] });
   assert.deepEqual(b.served("beta"), { topics: ["one"], protocols: [] });
   await until(() => subs(a, "alpha", "two") === 0, "alpha sees beta leave two");
-  await assert.rejects(a.dial("alpha", b.peerId("beta"), "/p/1", () => {}), "/p/1 is no longer served");
+  await assert.rejects(a.request("alpha", b.peerId("beta"), "/p/1", new Uint8Array([1])), "/p/1 is no longer served");
 
   // No config: the node stops.
   await b.declare("beta", undefined);

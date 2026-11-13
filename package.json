@@ -12,10 +12,7 @@
     "skein-dev": "bin/skein-dev",
     "test": "node --experimental-strip-types --no-warnings --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit",
-    "web:build": "node --experimental-strip-types --no-warnings web/build.ts",
-    "web:serve": "scripts/host/web.sh",
-    "web:test": "node --experimental-strip-types --no-warnings --test 'web/*.test.ts'",
-    "web:typecheck": "tsc --noEmit -p web/tsconfig.json",
+    "web:typecheck": "tsc --noEmit -p web/kernel/tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
     "build:kernel": "cd kernel-zig && zig build web",
     "prepack": "npm run build && npm run build:kernel"

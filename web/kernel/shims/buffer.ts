@@ -1,5 +1,5 @@
 // Injected into the browser bundle for the free `Buffer` global that
-// src/envelope.ts (and friends) use. The `buffer` package, with node's
+// the shared modules use. The `buffer` package, with node's
 // leniency restored where the shared code relies on it: node's
 // buf.equals / Buffer.compare take any Uint8Array, the package only a Buffer
 // (brc78Decode compares against a Uint8Array constant).

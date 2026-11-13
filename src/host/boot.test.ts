@@ -215,7 +215,7 @@ test("SKEIN_NETWORK: the whole host's network, every genesis's defaults.walletNe
   const routers: Router[] = [];
   t.after(async () => { for (const r of routers) await r.close(); db.close(); });
   const router = (vars: Record<string, string>) => {
-    const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, cron: false, network: hostNetwork(vars) });
+    const r = new Router({ db, walletFor: (row) => signer.wallet(row.handle), owner: key(), home, idleMs: 0, network: hostNetwork(vars) });
     routers.push(r);
     return r;
   };
