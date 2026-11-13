@@ -623,9 +623,20 @@ export class Router {
     return h.split(".")[0];
   }
 
-  /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label. */
+  /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label — unless it is the root instance's (ownLabelInstance). */
   reserved(handle: string): boolean {
-    return RESERVED_HANDLES.has(handle) || handle === this.ownLabel();
+    return RESERVED_HANDLES.has(handle) || (handle === this.ownLabel() && !this.ownLabelInstance(handle));
+  }
+
+  /**
+   * The router's own first label as an instance (skein next: the planner's call, David to review): only the
+   * instance SKEIN_ROOT_INSTANCE names (`rootInstance`, the instance the bare hostname is routed to) may take
+   * it — Open Exchange's `swap` at swap.skein.nexus. Its hostname then serves the instance; the router keeps
+   * /.well-known/skein-host, /skeins and /arc/callback there. Any other handle like the router's label is
+   * reserved. (At v0.9.1 SKEIN_MANAGER_FOR granted this, beside the manager message form; both are gone.)
+   */
+  ownLabelInstance(handle: string): boolean {
+    return handle === this.ownLabel() && handle === this.o.rootInstance;
   }
 
   /** This host's BRC-169 domain: its origin's host name (hostDomain). */
@@ -1891,7 +1902,7 @@ export class Router {
     if (m) { const h = decodeURIComponent(m[1]!); return enabled(h) ? { handle: h, route: m[2] ?? "/" } : undefined; }
     const name = url.hostname.toLowerCase();
     const label = name.includes(".") ? name.split(".")[0]! : "";
-    if (label && HANDLE.test(label) && label !== this.ownLabel() && enabled(label)) return { handle: label, route: url.pathname }; // #161: a path-only handle never by hostname
+    if (label && HANDLE.test(label) && (label !== this.ownLabel() || this.ownLabelInstance(label)) && enabled(label)) return { handle: label, route: url.pathname }; // #161: a path-only handle never by hostname
     return undefined;
   }
 
@@ -1929,6 +1940,11 @@ export class Router {
       return json(200, { origin: this.origin(), domain: await this.handleDomain() });
     }
     const t = this.target(url);
+    // The router's own paths at its own hostname stay the router's when the root instance takes that label (ownLabelInstance).
+    if (t && !/^\/@/.test(url.pathname) && this.ownLabelInstance(t.handle)) {
+      if (req.method === "GET" && url.pathname === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
+      if (url.pathname === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, url.pathname);
+    }
     // #161: an overlay request routed by its topic goes to the token instance it names, at an instance's
     // hostname too (one public name for the pages and the wallets' provider URL, 2026-10-28).
     if (req.method === "POST" && (url.pathname === "/submit" || url.pathname === "/lookup") && (!t || t.route === url.pathname)) {

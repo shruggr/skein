@@ -238,3 +238,19 @@ test("GET /.well-known/skein: an unclaimed image instance answers claimed:false;
   assert.deepEqual(await held(second), [], "a second claim is refused: root unchanged");
   assert.deepEqual((await held(first)).map((x) => x.handle), ["ex"]);
 });
+
+test("skein next (planner's call): createInstance of the router's own first label succeeds for the root instance (Open Exchange's swap at swap.skein.nexus, SKEIN_ROOT_INSTANCE=swap), and is refused for any other", { skip, timeout: 120_000 }, async (t) => {
+  const h = await testHost(t);
+  h.router.o.origin = "https://swap.example.test";
+  assert.equal(h.router.ownLabel(), "swap");
+  await assert.rejects(h.router.createInstance("swap", h.ownerId, { owned: true }), /handle swap is reserved/, "no root instance: reserved");
+  h.router.o.rootInstance = "swap";
+  const c = await h.router.createInstance("swap", h.ownerId, { owned: true });
+  assert.equal(c.handle, "swap");
+  assert.equal(h.db.get("swap")!.status, "enabled");
+  assert.deepEqual(h.router.target(new URL("https://swap.example.test/amm/x")), { handle: "swap", route: "/amm/x" }, "its hostname routes to it");
+  // The router's own paths there stay the router's.
+  const sk = await h.router.dispatch({ method: "GET", url: `https://swap.example.test/skeins?key=${h.ownerId}`, headers: {}, body: new Uint8Array() });
+  assert.equal(sk.status, 200);
+  assert.deepEqual((JSON.parse(new TextDecoder().decode(sk.body)) as Array<{ handle: string }>).map((x) => x.handle), ["swap"]);
+});

@@ -48,14 +48,24 @@ test("handles: one grammar for add and create; the reserved names and the router
   assert.equal(router.target(new URL(`https://${tok}.example.test/x`)), undefined, "never by host name");
   for (const bad of [`${"AB".repeat(32)}_0`, `${"ab".repeat(31)}_0`, `${"ab".repeat(32)}_`, `${"ab".repeat(32)}.0`]) assert.throws(() => db.add(bad, { store: join(home, "x.db") }), /hostname label/, `add ${bad}`);
 
-  // The router's own label is never an instance's (skein next, SPEC 8: SKEIN_MANAGER_FOR, which let one take it, is gone).
+  // The router's own label as an instance: only the root instance's (SKEIN_ROOT_INSTANCE; skein next — SKEIN_MANAGER_FOR is gone).
   db.add("swap", { store: join(home, "swap.db") });
+  const own = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", rootInstance: "swap", idleMs: 0, ledgerMs: 60_000 });
+  t.after(() => own.stop());
+  assert.equal(own.ownLabel(), "swap");
+  assert.ok(!own.reserved("swap") && own.ownLabelInstance("swap"), "the root instance may take the router's own label");
+  assert.ok(own.reserved("id") && own.reserved("host"));
+  assert.deepEqual(own.target(new URL("https://swap.example.test/amm/tokens")), { handle: "swap", route: "/amm/tokens" });
+  assert.deepEqual(own.target(new URL(`https://swap.example.test/@${tok}/x`)), { handle: tok, route: "/x" }, "/@<handle> at the shared name");
+  const otherRoot = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", rootInstance: "tokens", idleMs: 0, ledgerMs: 60_000 });
+  t.after(() => otherRoot.stop());
+  assert.ok(otherRoot.reserved("swap") && !otherRoot.ownLabelInstance("swap"), "another root instance: the label stays reserved");
   const notNamed = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://swap.example.test", idleMs: 0, ledgerMs: 60_000 });
   t.after(() => notNamed.stop());
   assert.ok(notNamed.reserved("swap"));
   assert.equal(notNamed.ownLabel(), "swap");
   assert.ok(notNamed.reserved("id") && notNamed.reserved("host"));
-  assert.equal(notNamed.target(new URL("https://swap.example.test/amm/tokens")), undefined, "the router's own label: never routed");
+  assert.equal(notNamed.target(new URL("https://swap.example.test/amm/tokens")), undefined, "no root instance: the router's own label is never routed");
   assert.deepEqual(notNamed.target(new URL(`https://swap.example.test/@${tok}/x`)), { handle: tok, route: "/x" }, "/@<handle> at the router's name");
 
   // A router at a loopback address has no label of its own.
