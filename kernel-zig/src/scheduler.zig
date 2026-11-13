@@ -777,17 +777,21 @@ pub const Runtime = struct {
         // Written: the blocks, the record as received, the package as handed back, the entry.
         var pit = pending.iterator();
         while (pit.next()) |e| if (!(try rt.store.has(e.key_ptr.*))) try rt.store.putBlock(e.key_ptr.*, e.value_ptr.*);
-        _ = try rt.store.put(a, rec);
+        // KF3: the entry names the package as the checks handed it back, and only that record is
+        // stored; the record as received (a BEEF's raw bytes in it) is not — `door.received` keeps
+        // its content hash (the unique mark of a signed request keys on it; an auditor holding the
+        // original bytes can match them). Not rewritten: the record as received, as it is.
+        const named = if (handed) |h| try rt.store.put(a, h) else try rt.store.put(a, rec);
         var d = cbor.MapBuilder.init(a);
         if (principal) |p| try d.put("principal", .{ .bytes = p });
         try d.put("scheme", ready.get("scheme"));
         try d.put("row", row_v);
         try d.put("checks", ready.get("checks") orelse Value{ .array = &.{} });
         if (blocks.items.len > 0) try d.put("blocks", .{ .array = blocks.items });
-        if (handed) |h| try d.put(kind, cbor.cidv(try rt.store.put(a, h)));
+        if (handed != null) try d.put("received", cbor.cidv(rc));
         var body = cbor.MapBuilder.init(a);
         try body.put("time", time);
-        try body.put(kind, cbor.cidv(rc));
+        try body.put(kind, cbor.cidv(named));
         if (name) |n| try body.put("name", cbor.string(n));
         try body.put("door", d.value());
         const entry = switch (try rt.store.logAppend(a, try rt.extend(a, body.value()))) {
@@ -972,7 +976,7 @@ pub const Runtime = struct {
     /// {fn, caller?, method, path, query, headers, body, row, request: <the package's CID>} (the
     /// package as the checks handed it back, else as received), launched by the request record.
     fn processRequest(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, rc: []const u8, d: Value, row: dispatch.Row, at: i64) !void {
-        const pc = Value.cidOf(d.get("request")) orelse rc;
+        const pc = rc;
         const pkg = rt.store.getOpt(a, pc) orelse return error.NotFound;
         const principal = Value.bytesOf(d.get("principal"));
         const payload = pkg.get("payload") orelse .null;
@@ -1040,7 +1044,8 @@ pub const Runtime = struct {
     /// record's CID (as the checks handed it back, else as received)>, box: <the event's name>}.
     fn processEvent(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, ev: []const u8, d: Value, row: dispatch.Row, at: i64) !void {
         const name = Value.str(ctx.e.get("name")).?;
-        const rc = Value.cidOf(d.get("event")) orelse ev;
+        _ = d;
+        const rc = ev;
         const rec = rt.store.getOpt(a, rc);
         const kind = if (rec) |r| Value.str(r.get("kind")) orelse "?" else "?";
         const what = try std.fmt.allocPrint(a, "#{d} {s} {s} in {s}", .{ n, kind, short(a, rc), name });

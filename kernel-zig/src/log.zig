@@ -5,14 +5,17 @@
 // route's checks). The kernel checks it (CHECK), then writes it (COMMIT) — scheduler.zig.
 //
 //   entry    {kind: "log", prev, n, time, genesis | request: <cid> + door | event: <cid> + name + door}
+//            (the cid: the package as the checks handed it back, else as received — door, below)
 //            The kernel appends every entry but the genesis (#163): the host hands over the arrival
 //            and its stamp (`time`), COMMIT assigns `prev` and `n` from its tip and raises `time` to
 //            the tip's when it is behind. The genesis (n = 0, no prev) is the host's (`append`).
 //   door     what CHECK established, so a replay never needs the signer or a re-verification:
 //            {principal?: bytes(33), scheme?: text, row: <the matched row>, checks: [<names that
-//            ran>], blocks?: [<cids the checks stored>], request?: <cid> (a request entry: the
-//            package as the checks handed it back) | event?: <cid> (an event entry: likewise)}.
-//            An arrival CHECK refuses writes nothing.
+//            ran>], blocks?: [<cids the checks stored>], received?: <cid>}. When a check handed the
+//            package back rewritten, the entry's `request` (or `event`) names the REWRITTEN record,
+//            the only one stored, and `received` is the content hash of the record as received (not
+//            stored: a BEEF's raw bytes are not kept beside its blocks); else the entry names the
+//            record as received. An arrival CHECK refuses writes nothing.
 //   request  {kind: "request", payload: {method, path, query, headers: {name: text}, body: bytes},
 //             signature?: {scheme, …}}
 //            `path` is what the route table matches. `signature` absent: a content-proven arrival
@@ -25,8 +28,9 @@
 //                       signature: bytes} — BRC-169's message signing ([2, "metanet handles
 //                       envelope"], key "send", counterparty anyone) over dag-cbor {sender,
 //                       recipient, nonce, payload}; `recipient` is this instance
-//            A signed request record is admitted once: the `unique` map keys it by its CID
-//            (index.zig uniqueOf), so an identical one is refused at CHECK and at COMMIT.
+//            A signed request record is admitted once: the `unique` map keys it by its CID as
+//            received (index.zig uniqueOf: door.received, else the entry's), so an identical one is
+//            refused at CHECK and at COMMIT.
 //   event    any map: the host's own fact (the chain pointer {kind: "chain", root, height}, a merkle
 //            proof, a deploy BEEF), routed by its `name` to an event row.
 //   genesis  {kind: "genesis", identity: bytes(33), handle, domain, routes: [<row>],

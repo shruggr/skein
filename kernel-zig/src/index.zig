@@ -999,13 +999,16 @@ pub const Index = struct {
         return out;
     }
 
-    /// The key an entry holds in the `unique` map: a request entry's record, when it is signed (SPEC 2:
-    /// an identical signed request is admitted once). A content-proven arrival needs none.
+    /// The key an entry holds in the `unique` map: a SIGNED request's (its door names a `scheme`,
+    /// kernel-written) record as received — `door.received` when a check rewrote the package (KF3:
+    /// that record is not stored), else the record the entry names. A content-proven arrival: none.
     fn uniqueOf(ix: *Index, a: std.mem.Allocator, entry: Value) !?[]const u8 {
+        _ = ix;
+        _ = a;
         const rc = Value.cidOf(entry.get("request")) orelse return null;
-        const b = (try ix.backend.vt.get(ix.backend.ctx, a, rc)) orelse return null;
-        const rec = cbor.decode(a, b) catch return null;
-        return if (rec == .map and rec.get("signature") != null) rc else null;
+        const d = entry.get("door") orelse return null;
+        if (d != .map or Value.str(d.get("scheme")) == null) return null;
+        return Value.cidOf(d.get("received")) orelse rc;
     }
 
     fn logAppendFn(ctx: *anyopaque, a: std.mem.Allocator, entry: Value) anyerror!storem.AppendResult {

@@ -608,11 +608,15 @@ test "skein next (KF2): COMMIT refuses a READY whose row changed or went since C
     try testing.expect(o2 == .refused and std.mem.eql(u8, o2.refused.code.?, "ERR_ROUTE_CHANGED"));
 }
 
-test "skein next: blocks a check names are carried in READY and written only at COMMIT; the handler sees the package as handed back" {
+test "skein next (KF3): blocks a check names are carried in READY and written only at COMMIT; the entry names the package as handed back, the record as received is not stored" {
     const w = try world(true);
     defer w.deinit();
     const a = w.a();
-    const c = try w.check(try plain(a, "/stored", "raw"));
+    // The raw bytes the check replaces (a BEEF's, in the real chain.beef; here the test check's stand-in).
+    const raw = "RAW-BEEF-BYTES-" ** 4;
+    const received = try plain(a, "/stored", raw);
+    const rc = try cbor.cidOfValue(a, received);
+    const c = try w.check(received);
     try testing.expect(c == .ready);
     const bs = c.ready.get("blocks").?.array;
     try testing.expectEqual(@as(usize, 1), bs.len);
@@ -625,12 +629,28 @@ test "skein next: blocks a check names are carried in READY and written only at 
     const e = (try w.store().get(a, o.committed.entry)).?;
     const d = e.get("door").?;
     try testing.expectEqualSlices(u8, bc, Value.cidOf(d.get("blocks").?.array[0]).?);
-    // The package as the check handed it back: its own record, named by the door; the handler got its body.
-    const handed = (try w.store().get(a, Value.cidOf(d.get("request")).?)).?;
+    // The entry names the rewritten record (stored); door.received the one as received (NOT stored).
+    const named = Value.cidOf(e.get("request")).?;
+    try testing.expect(!std.mem.eql(u8, named, rc));
+    const handed = (try w.store().get(a, named)).?;
     try testing.expectEqualSlices(u8, bc, Value.cidOf(handed.get("payload").?.get("body")).?);
+    try testing.expectEqualSlices(u8, rc, Value.cidOf(d.get("received")).?);
+    try testing.expect(!(try w.store().has(rc)));
+    try testing.expect(d.get("request") == null);
+    // No block of the store holds the raw bytes.
+    var it = w.mem.blocks.iterator();
+    while (it.next()) |b| try testing.expect(std.mem.indexOf(u8, b.value_ptr.*, raw) == null);
     try testing.expectEqualSlices(u8, bc, Value.cidOf((try bodyOf(a, o.committed.answer)).get("body")).?);
-    // The record as received is stored too: the entry names it.
-    try testing.expect(try w.store().has(Value.cidOf(e.get("request")).?));
+    // A signed request a check rewrites: admitted once all the same (the unique mark keys on what arrived).
+    const sr = try signedBy(a, kk().stranger, "/stored", raw, "kf3");
+    _ = try w.arrive(sr);
+    const again = try w.check(sr);
+    try testing.expect(again == .refused and again.refused.status == 409);
+    // Not rewritten: the entry names the record as received, no `received`.
+    const p = try w.arrive(try plain(a, "/proven", "kept"));
+    const pe = (try w.store().get(a, p.entry)).?;
+    try testing.expect(pe.get("door").?.get("received") == null);
+    try testing.expect(try w.store().has(Value.cidOf(pe.get("request")).?));
 }
 
 test "skein next: a read row answers from CHECK; nothing is written" {
@@ -699,6 +719,7 @@ test "skein next: a replay of the log reproduces the same state without a signer
     _ = try w.arrive(try brc104By(a, kk().admin, "/admin", 0xAA, "GOOD"));
     _ = try w.arrive(try signedBy(a, kk().stranger, "/user", "x", "r1"));
     _ = try w.arrive(try plain(a, "/stored", "raw"));
+    _ = try w.arrive(try signedBy(a, kk().stranger, "/stored", "raw2", "r3"));
     _ = try w.arrive(try plain(a, "/spend", "s"));
     _ = try w.arrive(try signedBy(a, kk().stranger, "/launch", "", "r2"));
     try w.store().commit();

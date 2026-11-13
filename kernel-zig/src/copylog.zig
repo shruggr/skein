@@ -31,15 +31,12 @@ pub fn copyLog(a: std.mem.Allocator, src: Store, dst: Store) !void {
         if (Value.cidOf(e.get("event"))) |x| if (src.getOpt(a, x)) |ev| if (std.mem.eql(u8, Value.str(ev.get("kind")) orelse "", "chain")) {
             if (Value.cidOf(ev.get("root"))) |root| try copyHostChain(a, src, dst, root);
         };
-        // What CHECK established: the blocks the checks stored, the package as they handed it back.
+        // What CHECK established: the blocks the checks stored (the record the entry names is the
+        // package as they handed it back; the one as received, `door.received`, is not stored).
         if (e.get("door")) |d| if (d == .map) {
             if (d.get("blocks")) |bs| if (bs == .array) for (bs.array) |b| if (Value.cidOf(b)) |bc| {
                 const bytes = (try src.bytes(a, bc)) orelse return error.NotFound;
                 try dst.putBlock(bc, bytes);
-            };
-            for ([_][]const u8{ "request", "event" }) |k| if (Value.cidOf(d.get(k))) |x| {
-                const b = (try src.bytes(a, x)) orelse return error.NotFound;
-                try dst.putBlock(x, b);
             };
         };
         switch (try dst.logAppend(a, e)) {

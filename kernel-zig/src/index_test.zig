@@ -281,14 +281,14 @@ test "index: a kept bitcoin transaction's inputs are edges from the block (#42);
     try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
 }
 
-fn appendRequest(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, request: []const u8) !@import("store.zig").AppendResult {
+fn appendRequest(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, request: []const u8, door: Value) !@import("store.zig").AppendResult {
     var e = cbor.MapBuilder.init(a);
     try e.put("kind", cbor.string("log"));
     try e.put("prev", prev.*);
     try e.put("n", cbor.int(n.*));
     try e.put("time", .{ .array = try a.dupe(Value, &.{ cbor.int(1), cbor.int(n.*) }) });
     try e.put("request", .{ .cid = request });
-    try e.put("door", .{ .map = &.{} });
+    try e.put("door", door);
     const r = try s.logAppend(a, e.value());
     if (r == .ok) {
         prev.* = .{ .cid = r.ok };
@@ -297,7 +297,7 @@ fn appendRequest(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, reques
     return r;
 }
 
-test "index (skein next): a signed request record is admitted once — a replay refused, nothing written; an unsigned one may recur" {
+test "index (skein next): a signed request record is admitted once — keyed on what arrived (door.received when a check rewrote it); a replay refused, nothing written; an unsigned one may recur" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -322,20 +322,29 @@ test "index (skein next): a signed request record is admitted once — a replay 
     const plain = try cbor.block(a, uq.value());
     try s.putBlock(plain.cid, plain.bytes);
 
+    var sd = cbor.MapBuilder.init(a);
+    try sd.put("scheme", cbor.string("signed"));
+    const signed_door = sd.value();
+    const none: Value = .{ .map = &.{} };
     var prev: Value = .null;
     var n: i64 = 0;
-    try std.testing.expect((try appendRequest(a, s, &prev, &n, signed.cid)) == .ok);
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, signed.cid, signed_door)) == .ok);
     const puts = mem.puts;
-    const again = try appendRequest(a, s, &prev, &n, signed.cid);
+    const again = try appendRequest(a, s, &prev, &n, signed.cid, signed_door);
     try std.testing.expect(again == .rejected);
     try std.testing.expectEqualStrings("duplicate-envelope", again.rejected.reason.text());
     try std.testing.expectEqual(puts, mem.puts); // nothing written
     try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .log)).len);
     try std.testing.expect((try s.byUnique(a, signed.cid)) != null);
     // A content-proven (unsigned) arrival is not unique: its row's checks and the chain app judge it.
-    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid)) == .ok);
-    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid)) == .ok);
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid, none)) == .ok);
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid, none)) == .ok);
     try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .log)).len);
+    // A rewritten signed request: keyed on door.received, whatever record the entry names.
+    var rd = cbor.MapBuilder.init(a);
+    try rd.put("scheme", cbor.string("signed"));
+    try rd.put("received", .{ .cid = signed.cid });
+    try std.testing.expect((try appendRequest(a, s, &prev, &n, plain.cid, rd.value())) == .rejected);
 }
 
 fn evRec(a: std.mem.Allocator, name: []const u8, app: ?[]const u8, v: i64) !Value {
