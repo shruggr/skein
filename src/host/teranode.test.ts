@@ -1,8 +1,8 @@
 // #156: the headers tracker over the Teranode P2P network (teranode.ts), on a
 // fake mesh (fake-teranode.ts: one gossipsub publisher on the regtest block
 // topic and a data hub serving a mined regtest chain), through the router's
-// one intake into the image chain and the host chain (the wasm kernel's
-// holder over the host's SQLite database).
+// one intake (SPEC 8) into the host chain (the wasm kernel's holder over the
+// host's SQLite database); the image carries no chain.
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -64,27 +64,26 @@ test("teranode: an empty host syncs the whole chain from the hub before an insta
   await h.instance("alice");
   await h.router.start();
   const tips = async () => (await h.router.hostChainTips())[0]?.tip;
-  // (iii) the first sync, then the host chain imported, then alice hydrated.
-  assert.equal(h.router.image.tip()?.height, 3000);
-  assert.equal(h.router.image.tip()?.hash, display(sha256d(f.chain[3000]!)));
-  assert.equal((await tips())?.height, 3000, "the host chain filled from the image chain at start");
+  // (iii) the first sync into the host chain (the one intake), then alice hydrated.
+  assert.equal((await tips())?.height, 3000, "the host chain filled by the first sync at start");
+  assert.equal((await tips())?.hash, display(sha256d(f.chain[3000]!)));
   const at = (re: RegExp) => h.lines.findIndex((l) => re.test(l));
   assert.ok(at(/headers: initial sync 1000\/3001/) >= 0, "a progress line per page");
   assert.ok(at(/headers: initial sync done: 3001 headers to 3000/) >= 0);
-  assert.ok(at(/host chain: 3001 headers imported from the image chain \(tip 3000/) > at(/headers: initial sync 3001\/3001/), "imported once the sync had the whole chain");
-  assert.ok(at(/hydrated alice/) > at(/imported from the image chain/), "and before alice was hydrated");
+  assert.ok(at(/host chain: 3001 headers from 0 \(tip 3000/) > at(/headers: initial sync 3001\/3001/), "taken once the sync had the whole chain");
+  assert.ok(at(/hydrated alice/) > at(/host chain: 3001 headers from 0/), "and before alice was hydrated");
   // (i) an announcement extends both.
   await until("the tracker on the block topic", () => f.subscribers() > 0 || undefined, 15_000);
   f.mineTo(3001);
   await f.announce(3001);
-  await until("3001 held", async () => ((await tips())?.height === 3001 && h.router.image.tip()?.height === 3001) || undefined, 10_000);
+  await until("3001 held", async () => (await tips())?.height === 3001 || undefined, 10_000);
   assert.equal((await tips())?.hash, display(sha256d(f.chain[3001]!)));
   assert.equal(h.router.tracker!.stats.taken, 1);
   // (ii) a gap: 3002 and 3003 never announced; 3004's parent unknown → crawled back from its hub.
   f.mineTo(3004);
   await f.announce(3004);
   await until("3004 held", async () => (await tips())?.height === 3004 || undefined, 10_000);
-  assert.equal(h.router.image.tip()?.hash, display(sha256d(f.chain[3004]!)));
+  assert.equal((await tips())?.hash, display(sha256d(f.chain[3004]!)));
   assert.ok(f.asked.includes(`/headers/${display(sha256d(f.chain[3004]!))}?n=2000`), `crawled from the hub: ${f.asked.slice(-2).join(" ")}`);
   assert.equal(h.router.tracker!.stats.crawled, 3, "3002…3004");
   // Known again: nothing.
@@ -100,27 +99,25 @@ test("teranode: an empty host syncs the whole chain from the hub before an insta
   f.chain = [...f.chain.slice(0, 3004), alt4, alt5];
   await f.announce(3005);
   await until("the branch held", async () => (await tips())?.hash === display(sha256d(alt5)) || undefined, 10_000);
-  assert.equal(h.router.image.tip()?.height, 3005);
-  assert.equal(h.router.image.tip()?.hash, display(sha256d(alt5)), "the image chain replaced from 3004");
+  assert.equal((await tips())?.height, 3005, "the host chain replaced from 3004");
 });
 
 test("teranode: a host whose host chain stayed empty (an instance created with no chain) fills it at its next start; a host that was down catches up from the hub at start", async (t) => {
   const f = await FakeTeranode.start();
   t.after(() => f.stop());
   f.mineTo(500);
-  // Tonight's case: no headers source at all when the instance was made — the image chain and the host chain empty.
+  // Tonight's case: no headers source at all when the instance was made — the host chain empty.
   const h1 = await testHost(t, { sqlite: true, ...regtest });
   await h1.instance("alice");
   await h1.router.start();
   await h1.router.hydrate("alice");
-  assert.equal(h1.router.image.tip(), undefined);
   assert.equal((await h1.router.hostChainTips())[0]?.tip, undefined, "empty");
   await h1.router.stop();
-  // The next start, with the tracker: the first sync, then the empty host chain imports it, then alice.
+  // The next start, with the tracker: the first sync into the empty host chain, then alice.
   const h2 = await testHost(t, { sqlite: true, ...regtest, ownerKey: h1.ownerKey, reuse: { home: h1.home, keyOf: h1.keyOf }, teranode: { bootstrap: [f.addr()], hub: f.hub, discoveryMs: 300 } });
   await h2.router.start();
   assert.equal((await h2.router.hostChainTips())[0]?.tip?.height, 500);
-  assert.ok(h2.lines.findIndex((l) => /hydrated alice/.test(l)) > h2.lines.findIndex((l) => /imported from the image chain/.test(l)));
+  assert.ok(h2.lines.findIndex((l) => /hydrated alice/.test(l)) > h2.lines.findIndex((l) => /headers: initial sync done/.test(l)));
   // Down while ten blocks came (and no announcement reached it): the next start catches up from the hub.
   await h2.router.stop();
   f.mineTo(510);
@@ -136,12 +133,11 @@ test("teranode: no hub for the network: the first sync waits for the first annou
   f.mineTo(100);
   const h = await testHost(t, { sqlite: true, ...regtest, teranode: { bootstrap: [f.addr()], discoveryMs: 300 } });
   await h.router.start();
-  assert.equal(h.router.image.tip(), undefined, "nothing yet");
+  assert.equal((await h.router.hostChainTips())[0]?.tip, undefined, "nothing yet");
   assert.ok(h.lines.some((l) => /waiting for the first block announcement/.test(l)));
   await until("the tracker on the block topic", () => f.subscribers() > 0 || undefined, 15_000);
   await f.announce(100);
   await until("synced from its hub", async () => (await h.router.hostChainTips())[0]?.tip?.height === 100 || undefined, 15_000);
-  assert.equal(h.router.image.tip()?.height, 100);
 });
 
 test("teranode: one node, one DHT — B's Teranode bootstrap is S (a Teranode node, no DHT), whose announced block B follows over GossipSub; its skein bootstrap is A (the skein DHT's server), through which it finds an overlay-topic provider D; the block topic is not on the skein DHT", async (t) => {
@@ -168,8 +164,8 @@ test("teranode: one node, one DHT — B's Teranode bootstrap is S (a Teranode no
   const tracker = new TeranodeTracker({
     network: "regtest", bootstrap: [f.addr()], p2p: B, discoveryMs: 300,
     chain: {
-      tip: () => ({ height: held.length - 1, hash: held.at(-1)! }),
-      find: (hash) => { const i = held.indexOf(hash); return i < 0 ? undefined : i; },
+      tip: async () => ({ height: held.length - 1, hash: held.at(-1)! }),
+      find: async (hash) => { const i = held.indexOf(hash); return i < 0 ? undefined : i; },
       take: async (at, raws) => { held.length = at; held.push(...raws.map((r) => display(sha256d(r)))); },
     },
   });

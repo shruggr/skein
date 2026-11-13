@@ -95,13 +95,13 @@
 // handed it (`settle`), the router reads the head (a kernel read), and when
 // it moved, declares the instance's libp2p config again — an install's
 // topics subscribed, an uninstall's unsubscribed, live (`syncDispatch`).
-// The host's headers feed (#102, `headersFeed`, SKEIN_HEADERS_URL; feeds.ts)
-// follows the table the same way: an enabled instance is subscribed while
-// a row of it takes events in box `chain` (the chain app's), else not. The
-// router itself listens to it too (#132, image-chain.ts): the default image
-// carries the whole header chain and grows with every header the feed
-// brings (filled from genesis at start from the feed's chaintracks history),
-// and createInstance boots each new skein from the image as it stands.
+// The host's headers (skein next, SPEC 8): ONE intake (`takeHeaders`) — the
+// Teranode tracker (teranode.ts) is its source — validates and updates the
+// host chain once (the kernel's, per database: hostHolders), then every
+// loaded instance whose table takes events in box `chain` gets the pointer
+// event {kind: "chain", root, height} (`chainBirth`); an instance is sent the
+// first one inside its load, before it is handed to anyone. No instance has a
+// header source of its own, and the image carries no chain.
 //
 // Nothing here is an instance's clock but its providers (#69): the waker
 // answers a step's deadline.
@@ -118,7 +118,7 @@ import { rootIdentity } from "../runtime/identity.ts";
 import { short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
-import { BACKFILL_RUN, DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { DEFAULT_BOX, txCid } from "./feeds.ts";
 import { hashOf, TeranodeTracker } from "./teranode.ts";
 import { takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
 import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
@@ -129,9 +129,8 @@ import { OVERLAY_ROLE } from "./manifest.ts";
 import { appHead } from "./plan.ts";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { bootStore, imageSource, isOverlayImage, type BootSource, type Booted } from "./boot.ts";
-import { chainHeader, chainHolds, historyOf, ImageChain, skeinTip } from "./image-chain.ts";
-import { admitOf, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
+import { bootStore, imageSource, isOverlayImage, namedImageSource, type BootSource, type Booted } from "./boot.ts";
+import { admitOf, chainHeader, chainHolds, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
 import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, keyHex, type AddressSeed, type Genesis2Config } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
@@ -160,16 +159,14 @@ export interface RouterOptions {
   inferHandle?: Named;
   fuelPerStep?: string;
   /** A new genesis's defaults: what a tree's config leaves unset (genesis.ts mergeDefaults). */
-  genesis?: { defaults?: Record<string, string>; feeds?: FeedSpec[] };
-  /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
-  feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
-  /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
-  headersFeed?: string;
+  genesis?: { defaults?: Record<string, string> };
+  /** The broadcaster's subscription's reconnect backoff (feeds.ts SseStream). */
+  feeds?: { backoff?: { min: number; max: number } };
   /**
    * #156: the host's headers tracker over the Teranode P2P network (teranode.ts): its bootstrap
    * peers (the network's, SKEIN_TERANODE_BOOTSTRAP), its first-sync hub (the network's default,
-   * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key). Beside the headers feed or alone:
-   * both feed the same intake. Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
+   * SKEIN_HEADERS_HUB), its key file ($SKEIN_HOME/teranode.key): the source of the one header intake
+   * (skein next, SPEC 8). Absent (SKEIN_TERANODE=off, or a network with neither): no tracker.
    */
   teranode?: { bootstrap: string[]; hub?: string; peersFile?: string; page?: number; bulkPage?: number; maxCrawl?: number; discoveryMs?: number };
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
@@ -308,6 +305,9 @@ export interface RouterResponse {
   stream?(send: (chunk: string) => void, end: () => void): () => void;
 }
 
+/** Headers per `headers` frame of the one intake (a long run, the first sync's, goes in runs of this many). */
+export const HEADERS_RUN = 2016;
+
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
 /** #148: an app's event stream, at an instance's origin. */
@@ -425,7 +425,6 @@ function errorOf(body: Uint8Array): string {
 
 export class Router {
   readonly o: RouterOptions;
-  readonly feeds: Feeds;
   /** The host's broadcaster (#58, #65): present when the host has an Arcade. */
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
@@ -465,14 +464,12 @@ export class Router {
   /** The control socket (control.ts), while this router listens on one. */
   private control?: { server: NetServer; path: string };
 
-  /** The default image (#89), with its chain part (#132): what createInstance boots a new skein from. */
-  readonly image: ImageChain;
   /** #156: the headers tracker over the Teranode mesh (teranode.ts), when the host runs one. */
   tracker?: TeranodeTracker;
   /** #156: the libp2p the host node runs on: the instances' (`p2p`), else one for the tracker alone. */
   hostP2p?: P2PHost;
   private readonly p2pConfig: P2PHostConfig;
-  /** #156: the header intake, one run at a time (the image chain, then the host chains). */
+  /** The one header intake (SPEC 8), one run at a time: the host chains, then the instances' pointer events. */
   private intake: Promise<unknown> = Promise.resolve();
   /** The host's provider keys. */
   private readonly providerKey: (name: ProviderName) => PrivateKey;
@@ -504,12 +501,7 @@ export class Router {
   constructor(o: RouterOptions) {
     this.o = o;
     if (o.rocksStore) this.kernelHost(o.rocksStore); // started with the router: the host's reads go through it (stores.ts)
-    this.image = new ImageChain({ db: o.db, history: historyOf(o.headersFeed), log: (l) => this.say("router", l) });
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
-    this.feeds = new Feeds({
-      headers: (h, box, raws) => this.chainHeaders(h, box, raws), log: (s, l) => this.say(s, l),
-      maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
-    });
     if (o.arc) {
       this.arc = new Broadcaster({
         arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, ...(o.arcRetry ? { retry: o.arcRetry } : {}), log: (s, l) => this.say(s, l),
@@ -656,22 +648,12 @@ export class Router {
 
   /** Hydrate every enabled row once (recovery at hydrate time: what a waiting thread awaits is handed to the providers again), then let them idle out. */
   async start(): Promise<void> {
-    // #132, #156: the host's headers — the feed's and the Teranode tracker's — into one intake: the image's chain part, then the host chains.
-    const key = this.headersKey();
-    if (key) this.feeds.listen(key, (raws, at) => this.takeHeaders(raws, at));
-    // #132: the image's chain part, filled from the feed's history (from genesis once; then from near its tip), then grown by the feed.
-    if (this.o.headersFeed) {
-      const started = this.image.start();
-      void started.then(() => this.syncHolders()).catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
-      // With a feed, its history makes the first sync; the tracker follows the mesh once that is done.
-      if (this.o.teranode) void started.then(() => this.startTracker()).catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
-    } else if (this.o.teranode) {
-      // #156: the tracker is the source: its first sync (a hub's, when the network has one) before any instance steps.
+    // SPEC 8: the Teranode tracker is the one source of the header intake; its first sync (a hub's, when the network
+    // has one) before any instance is hydrated, so each is told the chain as the host knows it inside its load.
+    if (this.o.teranode) {
       await this.startTracker().catch((e) => this.say("router", `headers: the Teranode tracker not started: ${(e as Error).message}`));
       if (this.tracker?.o.hub) await this.tracker.ready;
     }
-    // #156: a host chain that is empty (or behind) filled from the image chain, before any instance is hydrated.
-    await this.syncHolders().catch((e) => this.say("router", `host chain: not filled from the image chain: ${(e as Error).message}`));
     // #138: the stored liveness beats older than the longest window (a day) go before any instance reloads them.
     this.o.db.pruneBeats(stampMs(this.now()) - LIVENESS_MAX_MS);
     for (const row of this.o.db.list("enabled")) {
@@ -683,8 +665,8 @@ export class Router {
    * Stop everything this router started (#61), once: the providers' (the
    * waker's), the idle reaper's and the ledger's timers
    * (the owed fuel written first), its
-   * servers and their connections, the control socket (its file removed), the header feeds' and the broadcaster's
-   * SSE clients, the libp2p nodes, and every kernel process it spawned — one
+   * servers and their connections, the control socket (its file removed), the broadcaster's
+   * SSE client, the headers tracker, the libp2p nodes, and every kernel process it spawned — one
    * still hydrating included. Afterwards nothing of it keeps the process
    * alive: `skein-host run`'s shutdown and every one-shot command that builds
    * a router (`add --boot/--packet`) end with it.
@@ -729,7 +711,7 @@ export class Router {
     this.control = undefined;
     this.providers.stop();
     this.events.stop();
-    await Promise.all([this.feeds.stop(), this.arc?.stop(), this.tracker?.stop()]);
+    await Promise.all([this.arc?.stop(), this.tracker?.stop()]);
     await Promise.all([this.p2p?.stop(), this.hostP2p !== this.p2p ? this.hostP2p?.stop() : undefined]); // #156: the host node with them
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
@@ -1008,16 +990,14 @@ export class Router {
 
   // ---------------------------------------------------------------- the host chain (#156)
 
-  /** #156: the key the host's headers arrive under (feeds.ts): the feed's URL, else the tracker's own. */
-  headersKey(): string | undefined {
-    return this.o.headersFeed ?? (this.o.teranode ? `teranode:${this.chainNetwork() ?? "main"}` : undefined);
-  }
-
-  /** #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). */
+  /**
+   * #156: the Teranode tracker started: its node on the mesh, its first sync begun (`tracker.ready`). Its
+   * lookups (`tip`, `find`) read the host chain's tip and the recent index below; what it takes goes to the
+   * one intake (takeHeaders).
+   */
   private async startTracker(): Promise<void> {
     const t = this.o.teranode;
     if (!t || this.tracker || this.stopped) return;
-    const key = this.headersKey()!;
     // #156: no instance libp2p (no peer keys: a test's host): the host's libp2p for the tracker alone.
     this.hostP2p ??= new P2PHost({
       host: this.p2pConfig, ...(this.o.hostPeerKey ? { hostKey: this.o.hostPeerKey } : {}), discoveryMs: this.o.libp2pDiscoveryMs,
@@ -1028,39 +1008,71 @@ export class Router {
     this.tracker = new TeranodeTracker({
       network: this.chainNetwork() ?? "main", ...t, p2p: this.hostP2p,
       chain: {
-        tip: () => this.image.tip(),
-        find: (hash) => this.image.find(hash),
-        // A long run (a first sync, a deep catch-up): into the image and the host chains, then each running instance its chain event; a short one as the feed's headers go.
-        take: async (at, raws) => {
-          if (raws.length <= 4 * BACKFILL_RUN) return await this.feeds.inject(key, raws, at);
-          await this.takeHeaders(raws, at);
-          for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
-        },
+        tip: async () => { const x = await this.hostTip(); return x ? { height: x.height, hash: x.hash } : undefined; },
+        find: async (hash) => await this.findHeader(hash),
+        take: (at, raws) => this.takeHeaders(raws, at),
       },
       log: (l) => this.say("router", l),
     });
-    this.image.ready = this.tracker.ready;
     await this.tracker.start();
-    this.image.ready = this.tracker.ready;
   }
 
   /**
-   * #156: a run of headers from either source (the feed's, `at` undefined: image-chain.ts places
-   * each; the tracker's, at height `at`): into the image's chain part, then every host chain synced
-   * from it. One run at a time.
+   * The headers the tracker fed the intake in this run, by height and by hash, within RECENT_DEPTH of the
+   * highest — what the tracker's `find` looks a hash up in (the image chain's `find` window did this before).
+   * // until the host chain answers holds/at (SPEC 5): build K adds the kernel lookups holds(hash) and
+   * at(height); then `find` asks the host chain and this index goes.
    */
-  takeHeaders(raws: Uint8Array[], at?: number): Promise<void> {
+  private recent = { byHeight: new Map<number, string>(), byHash: new Map<string, number>() };
+  /** How far below the highest header the recent index keeps (two retarget periods, the image chain's window). */
+  static readonly RECENT_DEPTH = 2 * 2016;
+
+  /** The run `raws` at `at` into the recent index: what it replaces from `at` up dropped first (a reorg), then pruned below the window. // until the host chain answers holds/at (SPEC 5) */
+  private remember(at: number, raws: Uint8Array[]): void {
+    const r = this.recent;
+    for (const [h, hash] of r.byHeight) if (h >= at) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
+    const top = at + raws.length - 1;
+    for (let i = Math.max(0, raws.length - 1 - Router.RECENT_DEPTH); i < raws.length; i++) { const hash = hashOf(raws[i]!); r.byHeight.set(at + i, hash); r.byHash.set(hash, at + i); }
+    for (const [h, hash] of r.byHeight) if (h < top - Router.RECENT_DEPTH) { r.byHeight.delete(h); if (r.byHash.get(hash) === h) r.byHash.delete(hash); }
+  }
+
+  /** The tracker's `find`: a hash's height from the recent index, else the host chain's tip when it is that hash. // until the host chain answers holds/at (SPEC 5) */
+  private async findHeader(hash: string): Promise<number | undefined> {
+    const h = this.recent.byHash.get(hash);
+    if (h !== undefined) return h;
+    const tip = await this.hostTip();
+    return tip?.hash === hash ? tip.height : undefined;
+  }
+
+  /** The host chain's tip (the first host chain this host keeps: hostHolders), with its hash; undefined when empty or none is kept. */
+  private async hostTip(): Promise<HostChainTip | undefined> {
+    const h = this.hostHolders()[0];
+    return h ? await h.tip() : undefined;
+  }
+
+  /**
+   * SPEC 8: the ONE header intake — a run of headers, parents first, at height `at` (the tracker's): into
+   * every host chain this host keeps (the kernel validates and keeps them: `headers` frames, runs of
+   * HEADERS_RUN), once; then every loaded instance its pointer event (chainBirth). One run at a time.
+   */
+  takeHeaders(raws: Uint8Array[], at: number): Promise<void> {
     const p = this.intake.then(async () => {
-      if (at === undefined) await this.image.headers(raws);
-      else await this.image.put(at, raws);
-      await this.syncHolders(at);
+      const holders = this.hostHolders();
+      if (!holders.length) { this.say("router", `host chain: ${raws.length} header${raws.length === 1 ? "" : "s"} at ${at}: this host keeps no host chain (no SQLite or RocksDB store): not taken`); return; }
+      for (const h of holders) {
+        const t0 = Date.now();
+        let tip: HostChainTip | undefined;
+        for (let i = 0; i < raws.length; i += HEADERS_RUN) tip = await h.headers(raws.slice(i, i + HEADERS_RUN));
+        if (raws.length > HEADERS_RUN) this.say("router", `host chain: ${raws.length} headers from ${at} (tip ${tip?.height}, ${Date.now() - t0} ms)`);
+      }
+      this.remember(at, raws);
     });
     this.intake = p.catch(() => {});
-    return p;
+    return p.then(() => { for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`)); });
   }
 
   /** #156: the host chains this host keeps once per database (its SQLite one, its RocksDB one, and those its rows name). */
-  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }> {
+  private hostHolders(): Array<{ name: string; tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip> }> {
     const sq = new Set<string>(), rocks = new Set<string>();
     if (this.o.sqliteStore) sq.add(this.o.sqliteStore);
     if (this.o.rocksStore) rocks.add(this.o.rocksStore);
@@ -1071,7 +1083,7 @@ export class Router {
       if (q) sq.add(q.db);
     }
     return [
-      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws), importChain: w.importChain.bind(w) }; }),
+      ...[...sq].map((db) => { const w = this.wasmHost(db); return { name: db, tip: () => w.chainTip(), headers: (raws: Uint8Array[]) => w.chainHeaders(raws) }; }),
       ...[...rocks].map((dir) => { const k = this.kernelHost(dir); return { name: dir, tip: () => k.chainTip(), headers: (raws: Uint8Array[]) => k.chainHeaders(raws) }; }),
     ];
   }
@@ -1079,47 +1091,6 @@ export class Router {
   /** #156: each host chain this host keeps (by database) and its tip (undefined: empty). */
   async hostChainTips(): Promise<Array<{ name: string; tip: HostChainTip | undefined }>> {
     return await Promise.all(this.hostHolders().map(async (h) => ({ name: h.name, tip: await h.tip() })));
-  }
-
-  /** #156: every host chain brought to the image chain's tip (from `from` when a run replaced from there). */
-  private async syncHolders(from?: number): Promise<void> {
-    for (const h of this.hostHolders()) await this.syncHolder(h.name, h, from).catch((e) => this.say("router", `host chain ${h.name}: not synced from the image chain: ${(e as Error).message}`));
-  }
-
-  /**
-   * #156: a host chain brought to the image chain: an EMPTY one imports the image's chain part
-   * (`chain-import`, as an instance born with it would bring it: one frame) where its kernel can
-   * read it (the wasm kernel's SQLite database), else takes the image's headers from genesis in
-   * `headers` runs; one behind takes the headers it lacks; one the image does not hold at its
-   * height (a fork) from a little below it, or from `from`.
-   */
-  private async syncHolder(name: string, h: { tip(): Promise<HostChainTip | undefined>; headers(raws: Uint8Array[]): Promise<HostChainTip>; importChain?: WasmHost["importChain"] }, from?: number): Promise<void> {
-    const top = this.image.height();
-    if (top < 0) return;
-    const tip = await h.tip();
-    const t0 = Date.now();
-    if (!tip && h.importChain) {
-      const part = this.image.chainPart();
-      if (part) {
-        const got = await h.importChain(part.chain, part.objects);
-        this.say("router", `host chain: ${got.added ?? 0} headers imported from the image chain (tip ${got.height}, ${Date.now() - t0} ms)`);
-        return;
-      }
-    }
-    let start = 0;
-    if (tip) {
-      const held = this.image.headerAt(tip.height);
-      start = held && hashOf(held) === tip.hash ? tip.height + 1 : Math.max(0, tip.height - 6);
-      if (from !== undefined) start = Math.min(start, from);
-    }
-    if (start > top) return;
-    let n = 0;
-    for (const run of this.image.runs(start, BACKFILL_RUN)) {
-      await h.headers(run);
-      n += run.length;
-      if (top - start > 10 * BACKFILL_RUN && n % (50 * BACKFILL_RUN) < BACKFILL_RUN) this.say("router", `host chain: ${start + n}/${top + 1} from the image chain`);
-    }
-    if (n > BACKFILL_RUN) this.say("router", `host chain: ${n} headers from the image chain (to ${top}, ${Date.now() - t0} ms)`);
   }
 
   /**
@@ -1137,28 +1108,6 @@ export class Router {
     return net ? { ...this.o.kernel?.env, SKEIN_NETWORK: net } : this.o.kernel?.env;
   }
 
-  /**
-   * A run of headers from a feed for `handle` (#156): into the host chain — the one kernel
-   * process's for a RocksDB set (an instance not running is not hydrated for it: it gets the
-   * chain at its next start), the instance's own serve kernel's otherwise — then, when the
-   * record changed for it, the `chain` event.
-   */
-  async chainHeaders(handle: string, box: string, raws: Uint8Array[]): Promise<void> {
-    const row = this.o.db.get(handle);
-    if (!row) return;
-    const rocks = parseRocksSpec(storeSpec(row));
-    const sq = parseSqliteSpec(storeSpec(row));
-    let tip: HostChainTip;
-    if (rocks || sq) {
-      tip = rocks ? await this.kernelHost(rocks.dir).chainHeaders(raws) : await this.wasmHost(sq!.db).chainHeaders(raws);
-      const l = this.loaded.get(handle);
-      if (!l || l.kernel.gone) return;
-    } else {
-      tip = await (await this.hydrate(handle)).kernel.chainHeaders(raws);
-    }
-    await this.chainEvent(handle, box, tip);
-  }
-
   /** The `chain` event (#156) for `handle` in `box`, unless it was sent that record already since its start. */
   private async chainEvent(handle: string, box: string, tip: HostChainTip): Promise<void> {
     const key = tip.root.toString();
@@ -1172,26 +1121,7 @@ export class Router {
     }
   }
 
-  /**
-   * Fresh-host bootstrap (#156): the host chain empty and the instance's tree (its head `main`,
-   * an image's) carrying `chain/headers`: those imported into the host chain before the
-   * instance's first event. A tree with none, or a host chain with a tip: nothing.
-   */
-  private async chainBootstrap(handle: string, kernel: KernelSurface): Promise<void> {
-    if (await kernel.chainTip()) return;
-    const tree = await kernel.call("head", "main") as CID | null;
-    if (!tree || tree.code !== 0x78) return;
-    try {
-      const t0 = Date.now();
-      const got = await kernel.chainImport(tree);
-      this.say("router", `host chain: ${got.added} headers imported from ${handle}'s image (tip ${got.height}, ${Date.now() - t0} ms)`);
-    } catch (e) {
-      const m = (e as Error).message;
-      if (!/NoChain|NotEmpty/.test(m)) this.say(handle, `host chain: the image's chain not imported: ${m}`);
-    }
-  }
-
-  /** At start (and once an app takes box `chain` — an install): the host chain's current record, as the `chain` event. */
+  /** The host chain's current record as the `chain` pointer event, unless sent already (a change of the host chain: the intake; an app taking box `chain` installed: syncDispatch). */
   private async chainBirth(handle: string): Promise<void> {
     const l = this.loaded.get(handle);
     if (!l || l.kernel.gone) return;
@@ -1199,6 +1129,21 @@ export class Router {
     if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
     const tip = await l.kernel.chainTip();
     if (tip) await this.chainEvent(handle, DEFAULT_BOX, tip);
+  }
+
+  /**
+   * SPEC 8: the first `chain` pointer event of a load — when the instance's table takes events in box `chain` and
+   * the host chain holds a tip — admitted directly into the kernel being loaded (its `admit`, then its drain is the
+   * kernel's), recorded as sent. Throws: the load fails (an instance not told the chain is not up).
+   */
+  private async firstChainEvent(handle: string, kernel: KernelSurface): Promise<void> {
+    const rows = (await kernel.dispatch()).rows;
+    if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
+    const tip = await kernel.chainTip();
+    if (!tip) return;
+    const event = { kind: "chain", root: tip.root, height: tip.height };
+    await kernel.admit({ box: DEFAULT_BOX, event: cidOf(event) } as never, { event }, this.now());
+    this.sentChain.set(handle, tip.root.toString());
   }
 
   // ---------------------------------------------------------------- hydration
@@ -1244,15 +1189,15 @@ export class Router {
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
-      // #156: after the start (the genesis processed: its tree is the head `main`), before any event is admitted.
-      await this.chainBootstrap(handle, kernel);
-      // #156: a serve kernel's own host chain still empty (born before the image held a chain): from the image chain now.
-      if (kernel instanceof Kernel) await this.syncHolder(handle, { tip: () => kernel.chainTip(), headers: (raws) => kernel.chainHeaders(raws) }).catch((e) => this.say(handle, `host chain: not synced from the image chain: ${(e as Error).message}`));
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
       { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
-      this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
+      // SPEC 8: not up until it has been told the chain as far as the host knows it — the first pointer event,
+      // straight to the kernel here, before the instance is handed to anyone (not through admitEvent/serial: that
+      // would hydrate, and wait on this load). Anything admitted after the load lands after it in the log.
+      this.sentChain.delete(handle);
+      await this.firstChainEvent(handle, kernel);
     } catch (e) {
       await kernel.stop(1000);
       throw e;
@@ -1267,9 +1212,6 @@ export class Router {
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
-    // #156: the host chain as it stands, once at each start (not awaited: an admit made here would wait on this load).
-    this.sentChain.delete(handle);
-    void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the start event not sent: ${(e as Error).message}`));
     // The settled sync design: the peers each overlay topic's beats came from (host.db), asked at once.
     if (this.sync) void this.askKnownPeers(l).catch((e) => this.say(handle, `sync: the known peers not asked: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
@@ -1329,7 +1271,7 @@ export class Router {
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
-      feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
+      defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
     };
   }
@@ -1345,10 +1287,10 @@ export class Router {
    * image/ reads `..` beside the repository's image, not beside the link).
    */
   private async namedImage(name: string | undefined, host: boolean | undefined): Promise<BootSource> {
-    if (host || name === undefined || name === "default") return await this.image.source({ host, ...(name ? { image: name } : {}) });
+    if (host || name === undefined || name === "default") return await namedImageSource({ host, ...(name ? { image: name } : {}) });
     const dir = this.imageDir(name);
     if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
-    return isOverlayImage(dir) ? await this.image.source({ overlay: dir }) : await imageSource(dir);
+    return isOverlayImage(dir) ? await namedImageSource({ overlay: dir }) : await imageSource(dir);
   }
 
   /** #162: an image by name: its directory under imagesDir (resolved), or undefined. */
@@ -1421,18 +1363,11 @@ export class Router {
     this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain(), ...(o.topics?.length ? { topics: JSON.stringify(o.topics) } : {}) }); // #137: the names it is routed by. H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
-      await this.image.ready; // #132: born with the chain as the host holds it
       // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
       // operator's key, `appConfig` merged.
       // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
       // #164: an owned instance's genesis names `owner` root (boot.ts then seeds no claim route), as the host skein's does.
-      // The image read from its root to the last object walked: a header taken meanwhile keeps the objects it replaces.
-      const release = this.image.hold();
-      try {
-        await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
-      } finally {
-        release();
-      }
+      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
@@ -1449,8 +1384,8 @@ export class Router {
         if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
       }
       if (o.host) this.o.db.setSetting("host_skein", handle);
-      if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
-      const tip = this.image.tip();
+      if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
+      const tip = this.sentChain.has(handle) ? await l.kernel.chainTip() : undefined;
       this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${owned ? `owned by ${short(owner)}${o.host ? "" : " (born owned, #164)"}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
@@ -1495,12 +1430,10 @@ export class Router {
       if (topics) this.o.db.setTopics(handle, topics);
       this.o.db.setStatus(handle, "enabled");
       await this.hydrate(handle);
-      await this.refollowHeaders(handle);
       this.say("router", `${handle}: started by the instance manager`);
       return { handle, started: true, url: this.originOf(handle) };
     }
     this.o.db.setStatus(handle, "disabled");
-    await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
     // skein-amm#4: off its libp2p node too, so a stopped instance's beacons stop beating; a start's hydrate declares it again.
@@ -1520,14 +1453,14 @@ export class Router {
     const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(row.handle), providers: Object.fromEntries(this.addressSeed(row.handle).filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
     return {
       identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-      feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn: (l) => this.say(row.handle, l), network: this.o.network, ...facts,
+      defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn: (l) => this.say(row.handle, l), network: this.o.network, ...facts,
     };
   }
 
   /**
    * The kernel counts as busy until it has processed what was just admitted
-   * (its `idle` answers after the drain); then the libp2p node and the host's
-   * headers feed follow the dispatch table (#72, #77, #102).
+   * (its `idle` answers after the drain); then the libp2p node and the chain
+   * pointer event follow the dispatch table (#72, #77).
    */
   private settle(l: Loaded): void {
     const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
@@ -1536,23 +1469,22 @@ export class Router {
   }
 
   /**
-   * What the host does by the instance's dispatch table (#72, #77, #102):
-   * read the table (the kernel's `dispatch` frame); when its chain's tip
-   * moved since it was last followed (or `first`), the host's headers feed
-   * subscribes or unsubscribes it (followHeaders), and its libp2p node is
-   * declared again as its genesis and the table ask (p2p.ts libp2pConfig) —
-   * started, reconfigured (topics subscribed and unsubscribed, protocols
-   * handled and unhandled) or stopped. A failure is logged, not fatal.
+   * What the host does by the instance's dispatch table (#72, #77): read the table (the kernel's `dispatch`
+   * frame); when it moved since it was last followed (or `first`), its libp2p node is declared again as its
+   * genesis and the table ask (p2p.ts libp2pConfig) — started, reconfigured (topics subscribed and
+   * unsubscribed, protocols handled and unhandled) or stopped — and (not `first`: the load sent it) an app
+   * that takes box `chain` installed into the running instance gets the chain pointer event now (chainBirth;
+   * one already sent is not sent again). A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
-    if ((!this.p2p && !this.headersKey()) || l.kernel.gone) return;
+    if (l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
     l.dispatchTip = key;
     l.rows = d.rows;
-    this.followHeaders(l.row.handle, d.rows);
+    if (!first && d.rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) void this.chainBirth(l.row.handle).catch((e) => this.say(l.row.handle, `host chain: the install event not sent: ${(e as Error).message}`));
     // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
     // removes every row naming the app and leaves its heads).
     if (l.beacons.length || l.live.length) {
@@ -1789,41 +1721,6 @@ export class Router {
     const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event}: ${(x as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
-  }
-
-  /**
-   * The host's headers feed (#102) for an instance whose dispatch table is
-   * `rows`: subscribed (box `chain`) while it is enabled and a row takes
-   * events in box `chain` by name (the chain app's `event` row; dispatch.zig
-   * forEvent) — a catch-all `*` row is not one —
-   * else not. One line when that changes.
-   */
-  private followHeaders(handle: string, rows: DispatchRow[]): void {
-    const url = this.headersKey();
-    if (!url) return;
-    const want = this.o.db.get(handle)?.status === "enabled" && rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX));
-    if (want === this.feeds.hosts(handle)) return;
-    // #141: on subscribing, the headers it lacks first — from its tip (its chain state's, else its image's) to the host's.
-    const backfill = async () => {
-      const row = this.o.db.get(handle);
-      if (!row || !storeExists(storeSpec(row))) return [];
-      const s = openStoreFile(storeSpec(row), { readOnly: true });
-      let tip: Awaited<ReturnType<typeof skeinTip>>;
-      try { tip = await skeinTip(s); } finally { s.close(); }
-      return await this.image.after(tip);
-    };
-    void this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined, want ? backfill : undefined);
-    this.say("router", `${handle}: ${want ? "subscribed to" : "unsubscribed from"} the host's headers feed ${url}`);
-    // #156: an app that takes box `chain` installed into a running instance: the host chain as it stands, now.
-    if (want) void this.chainBirth(handle).catch((e) => this.say(handle, `host chain: the install event not sent: ${(e as Error).message}`));
-  }
-
-  /** Follow the host's headers feed for an instance whose status changed (#102): its table read again. */
-  private async refollowHeaders(handle: string): Promise<void> {
-    if (!this.headersKey()) return;
-    const l = this.loaded.get(handle);
-    const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch((e) => { this.say(handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; }) : undefined;
-    this.followHeaders(handle, d?.rows ?? []);
   }
 
   /**

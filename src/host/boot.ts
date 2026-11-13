@@ -561,6 +561,20 @@ export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSour
 }
 
 /**
+ * An image by the names a create or `skein-host add --image` gives (skein next, SPEC 8: the image as the
+ * repository holds it — no live chain part, image-chain.ts is gone): `default` (images/default); `host`
+ * (images/host merged over it, #142); `overlay` a directory with no bin/ merged over it (#152). With the
+ * repo's pinned modules beside its objects (imageSource).
+ */
+export async function namedImageSource(o: { host?: boolean; image?: string; overlay?: string } = {}): Promise<BootSource & { kind: "tree" }> {
+  if (o.image !== undefined && o.image !== "default" && o.image !== "host") throw new Error(`image ${JSON.stringify(o.image)}: this host has default, host`);
+  const over = o.overlay ?? (o.host || o.image === "host" ? HOST_IMAGE : undefined);
+  if (over === undefined) return await imageSource(DEFAULT_IMAGE);
+  const s = await overlayImage(await imageDir(DEFAULT_IMAGE), over);
+  return { kind: "tree", root: s.root, objects: anyOf(s.objects, wasmDirObjects(WASM_DIR)), apps: s.apps };
+}
+
+/**
  * #152: an image directory scanned, and each app its etc/apps.json names by a directory outside it
  * (`..`, `../<dir>`, an absolute path) scanned from there as `skein install <dir>` reads it
  * (install.ts appIgnore): the trees by appKey (BootSource `apps`), their objects with the image's.

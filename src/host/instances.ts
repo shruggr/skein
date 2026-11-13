@@ -69,18 +69,11 @@ CREATE TABLE IF NOT EXISTS broadcast_queue (
   since             INTEGER NOT NULL,                 -- ms: when it was first queued (given up a day on)
   last_error        TEXT
 ) WITHOUT ROWID;
--- The host's settings (#90): key → value. \`host_skein\`: the handle of the host skein. \`image\`, \`image_chain\` (#132):
--- the default image's current root tree and its \`chain\` tree (image-chain.ts).
+-- The host's settings (#90): key → value. \`host_skein\`: the handle of the host skein.
 CREATE TABLE IF NOT EXISTS host_settings (
   key               TEXT PRIMARY KEY,
   value             TEXT NOT NULL
 ) WITHOUT ROWID;
--- The default image's chain part (#132, image-chain.ts): the git objects of its \`chain/\` (the header blocks, the tip,
--- their trees) and its root tree, as the host grows them; only the current ones (a replaced object is deleted).
-CREATE TABLE IF NOT EXISTS image_blocks (
-  cid               TEXT PRIMARY KEY,                 -- the object's CID (git-raw, sha1)
-  bytes             BLOB NOT NULL                     -- the git object ("blob <n>\\0…", "tree <n>\\0…")
-);
 -- Overlay sync (the settled design, David 2026-10-30): per instance and overlay topic, the peers whose beats on
 -- <topic>-live were kept, with the addresses the node knew for them; a restart dials them and asks at once.
 CREATE TABLE IF NOT EXISTS topic_peers (
@@ -380,28 +373,6 @@ export class HostDb {
 
   setSetting(key: string, value: string): void {
     this.db.prepare("INSERT INTO host_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
-  }
-
-  /** An object of the default image's chain part (#132), if held. */
-  imageBlock(cid: string): Uint8Array | undefined {
-    const r = this.db.prepare("SELECT bytes FROM image_blocks WHERE cid = ?").get(cid) as { bytes: Uint8Array } | undefined;
-    return r ? new Uint8Array(r.bytes) : undefined;
-  }
-
-  /** One write of the image's chain part (#132): objects put, objects dropped, settings set — all or nothing. */
-  writeImage(puts: Map<string, Uint8Array>, drops: Set<string>, settings: Record<string, string>): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const put = this.db.prepare("INSERT INTO image_blocks (cid, bytes) VALUES (?, ?) ON CONFLICT (cid) DO NOTHING");
-      const drop = this.db.prepare("DELETE FROM image_blocks WHERE cid = ?");
-      for (const c of drops) drop.run(c);
-      for (const [c, b] of puts) put.run(c, b);
-      for (const [k, v] of Object.entries(settings)) this.setSetting(k, v);
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
   }
 
   /** The host skein (#90): the operator's instance (`skein-host init`), the one row whose identity reaches the instance manager. */

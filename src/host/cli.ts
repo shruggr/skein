@@ -90,7 +90,7 @@
 //   SKEIN_NETWORK         the network the whole host runs on: main | test | regtest, default main (any other value:
 //                         skein-host refuses to start). Every genesis the host makes has it as defaults.walletNetwork,
 //                         under a tree's own config; the chain app takes its network from that default, so
-//                         SKEIN_HEADERS_URL must feed this network's headers or the chain app refuses them
+//                         the headers tracker must follow this network's chain or the chain app refuses them
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
 //   SKEIN_ANSWER_WAIT_MS  how long the front door holds a request waiting on its thread's answer (ms) before 503 +
 //                         Retry-After; default 120000 (two minutes; frontdoor.ts)
@@ -120,17 +120,11 @@
 //                         made once and appended to $SKEIN_HOME/host.env, read from there after);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only)
-//   SKEIN_HEADERS_URL     the host's headers feed (#102, feeds.ts): an SSE stream of block headers (hex, or chaintracks'
-//                         JSON: Arcade's http://127.0.0.1:8083/chaintracks/v2/tip/stream) that every enabled instance
-//                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to;
-//                         and the default image's chain part (#132, image-chain.ts): every header it brings is
-//                         appended to the image, which a chaintracks URL's history (`…/tip/stream` → `…/headers`)
-//                         fills from genesis at start
 //   SKEIN_TERANODE        #156: `off` turns the host's headers tracker over the Teranode P2P network off (teranode.ts;
 //                         `skein-host run` only). On by default where the network has bootstrap peers (main, test):
 //                         it joins the network's block topic (`teranode/bitcoin/1.0.0/<network>-block`), takes each
-//                         announced header into the same intake as SKEIN_HEADERS_URL's, crawls a gap back from the
-//                         announcer's data hub, and, with an empty image chain, syncs the whole chain first from the
+//                         announced header into the host's one header intake (SPEC 8), crawls a gap back from the
+//                         announcer's data hub, and, with an empty host chain, syncs the whole chain first from the
 //                         network's default hub (gorillanode). It rides the host node (the host key's, one per host:
 //                         the instances' overlay on the same node), its block-topic peers from the
 //                         bootstrap list and GossipSub (no Teranode DHT; the overlay's on its skein DHT, /skein/kad/<network>/1.0.0)
@@ -145,7 +139,7 @@ import { tmpdir } from "node:os";
 import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, namedImageSource, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import { Kernel, KERNEL_BIN } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -245,13 +239,13 @@ export async function main(argv: string[], given: Env): Promise<number> {
           // A one-shot (#61): the router it boots through is closed before `add` returns, so the process exits.
           const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
-            // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
+            // `default`: the default image (images/default; skein next: it carries no chain part).
             // `host`: images/host merged over it (#142), unclaimed.
             // A directory with no bin/ (#152: an app repository's image/, etc/apps.json alone): merged over the
-            // default image as images/host is, with the same chain part. A directory with bin/: a complete image.
+            // default image as images/host is. A directory with bin/: a complete image.
             const overlay = v.image !== undefined && existsSync(v.image) && statSync(v.image).isDirectory() && isOverlayImage(v.image) ? resolve(v.image) : undefined;
-            const src = v.image === "default" || v.image === "host" ? await router.image.source({ image: v.image })
-              : overlay ? await router.image.source({ overlay })
+            const src = v.image === "default" || v.image === "host" ? await namedImageSource({ image: v.image })
+              : overlay ? await namedImageSource({ overlay })
               : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
             env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? ` · no owner: claim it (skein claim --instance ${handle})` : ""}`);
@@ -611,7 +605,6 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
     ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
     libp2p: hostP2PConfig(v, home),
-    headersFeed: v.SKEIN_HEADERS_URL || undefined,
     arc: hostArcConfig(v, home, { made: (f) => env.out(`skein-host: the host's Arcade callback token made and kept in ${f} (SKEIN_ARC_TOKEN)`) }),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };

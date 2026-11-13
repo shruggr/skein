@@ -90,7 +90,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 export interface InboxHost { base: string; db: HostDb; router: Router; origin(handle: string): string; entries(handle: string): Promise<number>; register(key: PrivateKey, handle: string): Promise<string> }
 
 /** A host with instances, each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; teranode?: Router["o"]["teranode"]; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; teranode?: Router["o"]["teranode"]; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
   // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
@@ -120,8 +120,6 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     idleMs: o.idleMs ?? 0, http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
     // A broadcaster (#58, #65): its Arcade, and so a `status` provider.
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
-    // The host's headers feed (#102).
-    ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
     // #156: the Teranode headers tracker (a fake mesh and hub in the tests).
     ...(o.teranode ? { teranode: o.teranode } : {}),
     ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : {}),

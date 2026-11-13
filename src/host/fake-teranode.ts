@@ -16,8 +16,7 @@ import { identify } from "@libp2p/identify";
 import type { Libp2p } from "@libp2p/interface";
 import { tcp } from "@libp2p/tcp";
 import { createLibp2p } from "libp2p";
-import { headerProblem } from "./image-chain.ts";
-import { blockTopic } from "./teranode.ts";
+import { blockTopic, headerProblem } from "./teranode.ts";
 
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 const display = (h: Uint8Array) => Buffer.from(h).reverse().toString("hex");

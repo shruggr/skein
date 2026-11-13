@@ -20,8 +20,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, isOverlayImage, MemBlocks, mergeImages, overlayImage, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
-import { ImageChain } from "./image-chain.ts";
+import { anyOf, checkImageApps, dirSource, imageSource, installAtBirth, isOverlayImage, MemBlocks, mergeImages, namedImageSource, overlayImage, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
 import { appIgnore, readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
 import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
@@ -261,10 +260,7 @@ test("#152: an image directory with no bin/ (an app repository's image/, etc/app
   await assert.rejects(imageSource(image).then((x) => readSystemTree(x.objects, x.root)), /etc\/dispatch\.json: missing/, "alone it is no system tree");
 
   // The loader's path (skein-host add --image <dir>): the host's image source, merged over the default image.
-  const db = new HostDb(join(work, "host.db"));
-  t.after(() => db.close());
-  const chain = new ImageChain({ db });
-  const src = await chain.source({ overlay: image });
+  const src = await namedImageSource({ overlay: image });
   assert.equal(src.kind, "tree");
   if (src.kind !== "tree") return;
   assert.deepEqual(Object.keys(src.apps ?? {}), [".."], "the app beside the image is read with it");
@@ -283,7 +279,7 @@ test("#152: an image directory with no bin/ (an app repository's image/, etc/app
   assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["one 0.1.0"], "the app installed at birth");
   assert.deepEqual((born.rows as Array<Record<string, any>>).filter((r) => r.app === undefined).map(showRow), ["root http / prefix [kernel.brc104] .call"], "root's own route");
   assert.ok((genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>).dispatch.some((r: { program: unknown; address: unknown }) => r.program === "kernel" && r.address === "claim"), "the genesis keeps the claim route");
-  assert.ok((await chain.source({ overlay: image }) as { root: CID }).root.equals(src.root), "the same tree again");
+  assert.ok((await namedImageSource({ overlay: image }) as { root: CID }).root.equals(src.root), "the same tree again");
 
   // A directory with bin/ is a complete image: not merged.
   const whole = join(work, "whole");
@@ -305,9 +301,9 @@ test("#152: an image directory with no bin/ (an app repository's image/, etc/app
   const conf = join(work, "conf");
   await fs.mkdir(join(conf, "etc"), { recursive: true });
   await fs.writeFile(join(conf, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest" } }));
-  await assert.rejects(chain.source({ overlay: conf }), /images: etc\/config\.json is in both images/, "the default image's config is not replaced");
+  await assert.rejects(namedImageSource({ overlay: conf }), /images: etc\/config\.json is in both images/, "the default image's config is not replaced");
   await fs.copyFile(join(DEFAULT, "etc/config.json"), join(conf, "etc/config.json"));
-  assert.ok(await chain.source({ overlay: join(work, "conf/") }), "the same blob is no collision");
+  assert.ok(await namedImageSource({ overlay: join(work, "conf/") }), "the same blob is no collision");
 });
 
 /** imageSource's static part, as overlayImage takes it. */

@@ -80,6 +80,10 @@ import { peerIdFromMultihash } from "@libp2p/peer-id";
 import * as Digest from "multiformats/hashes/digest";
 import type { InboundAnswer } from "./p2p.ts";
 import type { LiveBeat } from "./liveness.ts";
+import { createHash } from "node:crypto";
+import type { CID } from "multiformats/cid";
+import { headTree } from "../runtime/heads.ts";
+import type { Store } from "../runtime/store.ts";
 
 export const SYNC_PROTOCOL = "/skein/overlay/sync/1.0.0";
 const LIVE = "-live";
@@ -467,4 +471,51 @@ export class OverlaySync {
     if (r.verdict !== "accept") this.say(handle, `${topic}: ${txid} from ${peer}: ${r.verdict}${r.reason ? ` (${r.reason})` : ""}`);
     return r.verdict === "accept";
   }
+}
+
+// ---------------------------------------------------------------- reads of an instance's chain state (moved from image-chain.ts, skein next)
+
+const sha256dOf = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
+const displayOf = (h: Uint8Array) => Buffer.from(h).reverse().toString("hex");
+
+/**
+ * shruggr/skein#150: the chain app's best-chain header at `height` (the head `chain/state`, map
+ * `headers`: the MST height (u32 big-endian) → header): its hash (display hex) and merkle root
+ * (display hex); undefined when the chain state holds none there.
+ */
+export async function chainHeader(store: Store, height: number): Promise<{ hash: string; root: string } | undefined> {
+  const key = Buffer.alloc(4);
+  key.writeUInt32BE(height);
+  const found = await chainMapGet(store, "headers", key);
+  if (found === undefined) return undefined;
+  const raw = await store.bytes(found as CID);
+  return { hash: displayOf(sha256dOf(raw)), root: Buffer.from(raw.subarray(36, 68)).reverse().toString("hex") };
+}
+
+/**
+ * skein 0.6.0 (D3): whether the chain app's state (the head `chain/state`, map `txs`: txid (internal
+ * byte order) → its block) holds the transaction `txid` (display hex).
+ */
+export async function chainHolds(store: Store, txid: string): Promise<boolean> {
+  return (await chainMapGet(store, "txs", Buffer.from(txid, "hex").reverse())) !== undefined;
+}
+
+/** One key's value in a map of the chain app's state (a Merkle search tree), or undefined. */
+async function chainMapGet(store: Store, map: string, key: Buffer): Promise<unknown> {
+  const state = await headTree(store, "chain/state");
+  if (!state) return undefined;
+  const v = await store.get(state).catch(() => undefined) as { kind?: string; maps?: Record<string, CID | null> } | undefined;
+  let node = v?.kind === "chain-state" ? v.maps?.[map] ?? undefined : undefined;
+  while (node) {
+    const [left, es] = dagCbor.decode(await store.bytes(node)) as [CID | null, Array<[Uint8Array, unknown, CID | null]>];
+    let next: CID | null = left;
+    for (const [k, val, right] of es) {
+      const c = Buffer.compare(Buffer.from(k), key);
+      if (c === 0) return val ?? null;
+      if (c > 0) break;
+      next = right;
+    }
+    node = next ?? undefined;
+  }
+  return undefined;
 }
