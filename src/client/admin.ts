@@ -1,151 +1,69 @@
-// Root's admin messages (#124, #142, #143): building them is a library — installing an app, removing it,
-// a route, a read route, an address-book entry, a directory into `main`, a grant — each a
-// few messages from root to the kernel's admin boxes (docs/MESSAGES.md "The dispatch table and the
-// kernel's operations": objects, head, dispatch, peers, grant) and the app's own box (start/stop). The
-// management page builds the same messages with the same code (src/host/plan.ts) and sends them with the
-// browser's wallet. The client `skein` (admin-cli.ts) signs them with the operator's key and delivers them
-// (target.ts): over the host's control socket on the host machine, else on one BRC-104 session.
+// Root's requests (skein next, SPEC.md section 3): building them is a library — installing an app,
+// removing it, root's own row, a directory into `main`, a grant, the claim — each a few requests to the
+// kernel's operation rows (plan.ts KERNEL_PATHS: objects, head, route, grant; the claim's), each
+// returning data (done, or refused with the reason). The client `skein` (admin-cli.ts) signs each with
+// the operator's key under the `signed` scheme (raw.ts signRequest) and hands it to the running host
+// over its control socket (target.ts); an application host (Open Exchange) signs them with its own key
+// and hands them to its router (Router.messageLocal).
 //
-// A message is a box and a body (a record value: what the kernel's operation takes). `messageJson` is its
-// BRC-33 `/sendMessage` JSON form (what `--dry-run` prints):
-//
-//   {"message": {"recipient": "<the instance's identity key, hex>", "messageBox": "<box>", "body": <the body, DAG-JSON>}}
+// A request is a path and a body (a record value: what the kernel's operation takes; dag-cbor on the wire).
 
 import * as dagCbor from "@ipld/dag-cbor";
-import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
-import { type Rec } from "./bundle.ts";
-import { handlerCid, hashDir, recordBundles } from "./client.ts";
-import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
+import { hashDir, recordBundles, type Rec } from "./bundle.ts";
+import { rowProblem, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
-import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
-import { appHead, describe, mergeConfig, planInstall, planRootRoute, planUninstall, sendInstall, sendUninstall, showGrant, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
+import { DEFAULT_ONLY, onlyIgnore } from "../host/deploy.ts";
+import { describe, installRequests, KERNEL_PATHS, mergeConfig, planInstall, planRootRoute, planUninstall, showGrant, showRow, uninstallRequests, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
 import { isCallName, MAX_CALL_NAME, PARTY, SERVICES } from "../host/manifest.ts";
-import { lookup, readBlob } from "../runtime/tree.ts";
-
 import type { Objects } from "../host/boot.ts";
 
-/** One admin message: the box and the body (a record value: what the kernel's operation takes). */
-export interface AdminMessage { box: string; body: unknown }
+/** One of root's requests: the kernel operation row's path and the body (a record value). */
+export interface AdminRequest { path: string; body: unknown }
 
-/** What the admin commands build: the prompt (what the messages do, as the page shows it), the recipient, the messages in order. */
-export interface AdminPlan { prompt: string[]; recipient: string; messages: AdminMessage[] }
+/** What the admin commands build: the prompt (what the requests do), the recipient (the instance's identity, hex), the requests in order. */
+export interface AdminPlan { prompt: string[]; recipient: string; requests: AdminRequest[] }
 
 const isKey = (s: string) => /^0[23][0-9a-f]{64}$/.test(s);
 const keyBytes = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
-
-/** A message as the `/sendMessage` JSON body. */
-export function messageJson(recipient: string, m: AdminMessage): string {
-  return new TextDecoder().decode(dagJson.encode({ message: { recipient, messageBox: m.box, body: m.body } }));
-}
-
-/** Messages as `send(box, bytes)` calls make them (plan.ts sendInstall, sendUninstall), collected. */
-async function collect(run: (send: (box: string, body: Uint8Array) => Promise<void>) => Promise<unknown>): Promise<AdminMessage[]> {
-  const out: AdminMessage[] = [];
-  await run(async (box, body) => { out.push({ box, body: dagCbor.decode(body) }); });
-  return out;
-}
+const decoded = (rs: Array<{ path: string; body: Uint8Array }>): AdminRequest[] => rs.map((r) => ({ path: r.path, body: dagCbor.decode(r.body) }));
 
 /**
  * Install (or upgrade) the app `tree` into the instance `view` reads (docs/APPS.md §3): objects (≤ 1 MiB
- * bundles), the head `<app>/app`, a dispatch message per row that changes, the start. `config` is merged
- * over the manifest's (one level deep per program). `modules`: where a `bin/<x>.cid` module the instance
- * lacks is found (this repo's wasm/ directory, boot.ts wasmDirObjects).
+ * bundles), the head `<app>/app`, a route request per row that changes, the grants. `config` is merged
+ * over the manifest's. `modules`: where a `bin/<x>.cid` module the instance lacks is found.
  */
 export async function planInstallApp(tree: AppTree, view: InstanceView, o: { config?: Record<string, unknown>; modules?: Objects } = {}): Promise<AdminPlan & { app: string; version: string; recordCid: CID; record: AppRecord }> {
   if (o.config) tree.checked.manifest.config = mergeConfig(tree.checked.manifest.config, o.config);
   const plan = await planInstall(tree, view, { modules: o.modules ?? { get: async () => undefined } });
-  const messages = await collect((send) => sendInstall(plan, send));
-  return { prompt: describe(plan), recipient: view.identity, messages, app: plan.app, version: plan.version, recordCid: plan.recordCid, record: plan.record };
+  return { prompt: describe(plan), recipient: view.identity, requests: decoded(installRequests(plan)), app: plan.app, version: plan.version, recordCid: plan.recordCid, record: plan.record };
 }
 
-/** Uninstall: the app's `stop`, then every route the table holds for it removed; its heads are left. */
+/** Uninstall: every row the app's handler names removed, its grants taken back; its heads are left. */
 export async function planUninstallApp(name: string, view: InstanceView): Promise<AdminPlan> {
   const p = await planUninstall(name, view);
-  const messages = await collect((send) => sendUninstall(p, send));
-  const prompt = [`uninstall ${name} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length}${p.grants.length ? ` · grant remove ×${p.grants.length}` : ""} · head ${name}/app left`, ...p.rows.map((r) => `    dispatch remove ${r.row.transport} ${r.row.address}${r.row.prefix ? " prefix" : ""}`), ...p.grants.map((g) => `    grant ${showGrant(g)}`)];
-  return { prompt, recipient: view.identity, messages };
+  const prompt = [`uninstall ${name} ${p.record.version} · route remove ×${p.rows.length}${p.grants.length ? ` · grant remove ×${p.grants.length}` : ""} · head ${name}/app left`, ...p.rows.map((r) => `    route ${showRow(r)}`), ...p.grants.map((g) => `    grant ${showGrant(g)}`)];
+  return { prompt, recipient: view.identity, requests: decoded(uninstallRequests(p)) };
 }
 
-/** The fields of a route that are not a handler's settings. */
-const ROW_FIELDS = ["transport", "address", "prefix", "filters", "sender", "program", "fn", "app", "optional"];
+/** Root's own row (`skein routes`): one `route` add or remove of a row as the kernel takes it (a remove names the row as held). */
+export async function planRoute(view: InstanceView, op: "add" | "remove", row: DispatchRow): Promise<AdminPlan> {
+  if (op === "add") { const why = rowProblem(row); if (why) throw new Error(`row: ${why}`); }
+  const p = await planRootRoute(view, op, row);
+  return { prompt: p.prompt, recipient: view.identity, requests: p.rows.map((r) => ({ path: KERNEL_PATHS.route, body: { op: r.op, row: r.row } })) };
+}
 
-/** One of root's own routes as `skein routes` takes it (#143). */
-export interface RouteArgs {
-  op: "add" | "remove";
-  transport?: "mailbox" | "event" | "http" | "libp2p";
-  address: string;
-  prefix?: boolean;
-  filters?: string[];
-  /** A program record CID, a genesis program's name, or `<app>.<role>` (resolved by the caller into `programs`); none: an http read route. */
-  handler?: string;
-  fn?: string;
-  settings?: Record<string, unknown>;
+/** The claim (SPEC 3): one request to the image's claim row — its sender is granted root, the claim row removed. */
+export function planClaim(recipient: string, o: { handle?: string; domain?: string } = {}): AdminPlan {
+  const body = { ...(o.handle ? { handle: o.handle, ...(o.domain ? { domain: o.domain } : {}) } : {}) };
+  return { prompt: [`claim ${recipient}: root to the key that sends this${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, requests: [{ path: KERNEL_PATHS.claim, body }] };
 }
 
 /**
- * Root's own route (#125, #143; `skein routes`): one `dispatch` add or remove of a route with no `app` —
- * an app's upgrade or uninstall leaves it. A mailbox or event route at a box, an http route at a path
- * (with `filters` and a handler's `fn`, or filters only: a read route — the site at `/`: filters
- * ["site.get"], settings {root: "www"}), a libp2p route at a topic. No sender (#143). A remove names the
- * key (transport, address, prefix) only.
- */
-export async function planRoute(view: InstanceView, a: RouteArgs, programs: Record<string, CID> = {}): Promise<AdminPlan> {
-  const transport = a.transport ?? (a.address.startsWith("/") ? "http" : "mailbox");
-  if (!["mailbox", "event", "http", "libp2p"].includes(transport)) throw new Error(`--transport ${transport}: mailbox, event, http or libp2p`);
-  if (transport === "http" && (!a.address.startsWith("/") || /[\\\0?#]/.test(a.address) || a.address.split("/").some((x) => x === "." || x === ".."))) throw new Error(`http address ${JSON.stringify(a.address)}: a path (from /, no ".", "..", query or fragment)`);
-  if (transport !== "http" && a.prefix) throw new Error("--prefix: an http route's");
-  const settings = a.settings ?? {};
-  const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
-  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the route's own, not a setting`);
-  let row: Record<string, unknown> = { transport, address: a.address, ...(a.prefix ? { prefix: true } : {}) };
-  if (a.op === "add") {
-    if (a.handler === undefined) {
-      if (!(transport === "http" || (transport === "libp2p" && a.address.startsWith("/"))) || !a.filters?.length) throw new Error("a route names its handler; only an http or libp2p protocol (/…) read route (--filters, no handler) has none");
-      if (a.fn) throw new Error("--fn: a read route has no handler");
-    } else if (transport === "http" || transport === "libp2p") {
-      if (!a.fn) throw new Error(`an ${transport} route names its handler's function (--fn)`);
-    }
-    row = { ...settings, ...row, ...(a.filters?.length ? { filters: a.filters } : {}), ...(a.handler !== undefined ? { program: handlerCid(a.handler, programs), ...(a.fn ? { fn: a.fn } : {}) } : {}) };
-  }
-  const p = await planRootRoute(view, a.op, row as DispatchRow);
-  return { prompt: p.prompt, recipient: view.identity, messages: p.rows.map((r) => ({ box: "dispatch", body: { op: r.op, row: r.row } })) };
-}
-
-/**
- * The claim (#89, #127, #143): one message in box `claim` to an image (its claim route takes anyone) —
- * its sender (the wallet that sends it) is granted root; the body carries only the claimant's
- * mailbox entry, if any.
- */
-export function planClaim(recipient: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): AdminPlan {
-  const body = { ...(o.messagebox ? { messagebox: o.messagebox } : {}), ...(o.handle ? { handle: o.handle, ...(o.domain ? { domain: o.domain } : {}) } : {}) };
-  return { prompt: [`claim ${recipient}: root to the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
-}
-
-export type PeerChange = ({ op: "add" } & AddressEntry) | { op: "remove"; key: string };
-
-/** Address-book changes (#40, #70): one message to `peers` each. */
-export function planPeers(recipient: string, changes: PeerChange[]): AdminPlan {
-  const messages: AdminMessage[] = [];
-  const prompt: string[] = [];
-  for (const c of changes) {
-    if (!isKey(c.key)) throw new Error(`${c.key}: not an identity key (hex)`);
-    if (c.op === "remove") {
-      messages.push({ box: "peers", body: { op: "remove", key: keyBytes(c.key) } });
-      prompt.push(`peers remove ${c.key}`);
-      continue;
-    }
-    messages.push({ box: "peers", body: { op: "add", key: keyBytes(c.key), transport: c.transport, address: c.address, ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) } });
-    prompt.push(`peers add ${c.key} → ${c.transport} ${c.address}${c.handle ? ` (@${c.handle}${c.domain ? `@${c.domain}` : ""})` : ""}`);
-  }
-  return { prompt, recipient, messages };
-}
-
-/**
- * A directory into the instance's `main` (#23): its git objects in ≤ 1 MiB bundles to `objects`, the root
- * on the last (the kernel sets `main` when there is none), then `head {name: "main", tree}` when `main` is
- * another tree. `only` filters the directory (deploy.ts onlyIgnore; default DEFAULT_ONLY; [] for all of it).
- * Records the view's store has are not sent. With no view (`recipient` alone) everything is sent, and the head.
+ * A directory into the instance's `main` (#23): its git objects in ≤ 1 MiB bundles to `objects`, the
+ * root on the last (the kernel sets `main` when there is none), then `head {name: "main", tree}` when
+ * `main` is another tree. `only` filters the directory (deploy.ts onlyIgnore; default DEFAULT_ONLY; []
+ * for all of it). Records the view's store has are not sent.
  */
 export async function planDeploy(dir: string, target: InstanceView | { identity: string }, o: { only?: string[] } = {}): Promise<AdminPlan & { root: CID }> {
   const only = o.only ?? DEFAULT_ONLY;
@@ -154,130 +72,37 @@ export async function planDeploy(dir: string, target: InstanceView | { identity:
   const { records: n, bundles } = await recordBundles(root, records as Rec[], view ? { skip: (c) => view.store.has(c) } : {});
   const main = view?.heads.find((h) => h.name === MAIN)?.root;
   const head = !view || (main !== undefined && !main.equals(root));
-  const messages: AdminMessage[] = bundles.map((b) => ({ box: "objects", body: dagCbor.decode(b) }));
-  if (head) messages.push({ box: "head", body: { name: MAIN, tree: root } });
-  const prompt = [`deploy ${dir} → main ${root}${main?.equals(root) ? " (main is this tree already)" : ""}`, `  messages  objects ×${bundles.length} (${n} records)${head ? " · head main" : ""}`];
-  return { prompt, recipient: target.identity, messages, root };
+  const requests: AdminRequest[] = bundles.map((b) => ({ path: KERNEL_PATHS.objects, body: dagCbor.decode(b) }));
+  if (head) requests.push({ path: KERNEL_PATHS.head, body: { name: MAIN, tree: root } });
+  const prompt = [`deploy ${dir} → main ${root}${main?.equals(root) ? " (main is this tree already)" : ""}`, `  requests  objects ×${bundles.length} (${n} records)${head ? " · head main" : ""}`];
+  return { prompt, recipient: target.identity, requests, root };
 }
 
-// ---------------------------------------------------------------- the instance, read through its explorer
-
-/**
- * A read of the instance's explorer (`/explore…`; root's, #121, #143): the answer DAG-JSON decoded, undefined
- * for a 404 — the client's on its BRC-104 session (target.ts remoteTarget).
- */
-export type ExplorerRead = (path: string) => Promise<unknown>;
-
-/**
- * The instance as the install plan reads it (plan.ts InstanceView), from its explorer: heads, the genesis
- * (identity, programs), the address book, the route table, and the store by CID —
- * what the management page's view reads (shruggr/skein-site www/app.js `Skein.view`).
- */
-export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
-  const records = new Map<string, unknown>();
-  const record = async (cid: CID | string): Promise<unknown> => {
-    const k = cid.toString();
-    if (!records.has(k)) records.set(k, await read(`/record/${k}`));
-    return records.get(k);
-  };
-  const top = await read("") as { heads?: Record<string, CID> } | undefined;
-  if (!top) throw new Error("the explorer answered nothing (is it a skein?)");
-  const heads = Object.entries(top.heads ?? {}).map(([name, root]) => ({ name, root }));
-  const head = (name: string) => heads.find((x) => x.name === name)?.root;
-  const first = (await read("/log?before=1&limit=1") as { entries?: Array<{ record?: { genesis?: CID } }> } | undefined)?.entries?.[0]?.record;
-  const genesis = (first?.genesis ? await record(first.genesis) : {}) as { identity?: unknown; programs?: Record<string, CID> };
-  const hex = (k: unknown) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "");
-  const book: AddressEntry[] = [];
-  if (head("peers")) {
-    for (const e of ((await record(head("peers")!)) as { peers?: Array<{ key?: unknown; peer: CID }> })?.peers ?? []) {
-      const p = await record(e.peer) as { key?: unknown; transport?: AddressEntry["transport"]; address?: string; handle?: string; domain?: string; source?: string };
-      book.push({ key: hex(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
-    }
-  }
-  const chain = await read(`/thread/${dispatchOrigin()}`) as { updates?: Array<{ record?: { op: "add" | "remove"; row: DispatchRow } }> } | undefined;
-  const dispatch = fold((chain?.updates ?? []).map((u) => u.record!).filter((u) => u && u.row));
-  const store = {
-    get: async (cid: CID) => { const v = await record(cid); if (v === undefined) throw new Error(`not found: ${cid}`); return v; },
-    has: async (cid: CID) => (await record(cid)) !== undefined,
-    bytes: async (cid: CID) => { const v = await record(cid); if (!(v instanceof Uint8Array)) throw new Error(`not found: ${cid}`); return v; },
-    putBlock: async () => {},
-  } as unknown as InstanceView["store"];
-  return {
-    store, heads, dispatch, addressBook: book,
-    identity: hex(genesis.identity), programs: genesis.programs ?? {},
-  };
-}
-
-/**
- * A grant (#142, #143; `skein-host grant`): the kernel's `grant` operation — `role` (root by default,
- * or an app's `<app>.<role>`) to `key`, or with `remove` from it. One message to box `grant`, sent by
- * root. Nothing is sent when the grants already say so.
- */
+/** A grant (the kernel's `grant` operation): `role` (root by default, or `<app>.<role>`) to `key`, or with `remove` from it. Nothing is sent when the grants say so already. */
 export async function planGrant(view: InstanceView, key: string, o: { role?: string; remove?: boolean } = {}): Promise<AdminPlan> {
   if (!isKey(key)) throw new Error(`${key}: not an identity key (hex)`);
   const role = o.role ?? "root";
-  if (role !== "root" && !/^[a-z0-9][a-z0-9._-]*\.[a-z0-9][a-z0-9_-]*$/.test(role)) throw new Error(`${role}: a role is root or <app>.<role> (user is any principal: never granted)`);
+  if (role !== "root" && !/^[a-z0-9][a-z0-9_-]*\.[a-z0-9][a-z0-9_-]*$/.test(role)) throw new Error(`${role}: a role is root or <app>.<role> (user and anyone are never granted)`);
   const op = o.remove ? "remove" : "add";
   const root = view.heads.find((h) => h.name === "grants")?.root;
   const g = root ? await view.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined : undefined;
   const holds = (g?.roles?.[role] ?? []).some((k) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : String(k)) === key);
-  if (holds === (op === "add")) return { prompt: [`grant ${op} ${role} ${key}: the grants say so already`], recipient: view.identity, messages: [] };
-  return { prompt: [`grant ${op} ${role} ${key}`], recipient: view.identity, messages: [{ box: "grant", body: { op, role, principal: keyBytes(key) } }] };
+  if (holds === (op === "add")) return { prompt: [`grant ${op} ${role} ${key}: the grants say so already`], recipient: view.identity, requests: [] };
+  return { prompt: [`grant ${op} ${role} ${key}`], recipient: view.identity, requests: [{ path: KERNEL_PATHS.grant, body: { op, role, principal: keyBytes(key) } }] };
 }
 
-/**
- * A call permission or a kernel service (call permissions; `skein grant --calls | --service`): the
- * kernel's `grant` operation with `calls: {caller, callee, name}` ("*": any name) or `service:
- * {caller, service}`, root's choice without a manifest. A caller or callee is an app's name or
- * `genesis:<program name>`. One message to box `grant`.
- */
+/** A call permission (`skein grant --calls`): the kernel's `grant` with `calls: {caller, callee, name}` ("*": any name). */
 export function planGrantCalls(view: InstanceView, caller: string, callee: string, name: string, o: { remove?: boolean } = {}): AdminPlan {
-  for (const p of [caller, callee]) if (!PARTY.test(p)) throw new Error(`${p}: a caller or callee is an app's name or genesis:<program name>`);
+  for (const p of [caller, callee]) if (!PARTY.test(p)) throw new Error(`${p}: a caller or callee is an app's name`);
   if (!isCallName(name)) throw new Error(`${JSON.stringify(name)}: a call's name is 1 to ${MAX_CALL_NAME} bytes with no NUL ("*": any)`);
   const op = o.remove ? "remove" : "add";
-  return { prompt: [`grant ${op}: ${caller} calls ${callee} as ${name === "*" ? "ANY NAME (admin)" : JSON.stringify(name)}`], recipient: view.identity, messages: [{ box: "grant", body: { op, calls: { caller, callee, name } } }] };
+  return { prompt: [`grant ${op}: ${caller} calls ${callee} as ${name === "*" ? "ANY NAME (admin)" : JSON.stringify(name)}`], recipient: view.identity, requests: [{ path: KERNEL_PATHS.grant, body: { op, calls: { caller, callee, name } } }] };
 }
 
+/** A kernel service (`skein grant --service`): the kernel's `grant` with `service: {caller, service}`. */
 export function planGrantService(view: InstanceView, caller: string, service: string, o: { remove?: boolean } = {}): AdminPlan {
-  if (!PARTY.test(caller)) throw new Error(`${caller}: a caller is an app's name or genesis:<program name>`);
+  if (!PARTY.test(caller)) throw new Error(`${caller}: a caller is an app's name`);
   if (!SERVICES.includes(service)) throw new Error(`${service}: not a kernel service (${SERVICES.join(", ")})`);
   const op = o.remove ? "remove" : "add";
-  return { prompt: [`grant ${op}: ${caller} ${o.remove ? "loses" : "holds"} service ${service}${service === "signer" ? " (the raw signer import: any derivation)" : ""}`], recipient: view.identity, messages: [{ box: "grant", body: { op, service: { caller, service } } }] };
-}
-
-
-/** One app the management page offers (the site's www/catalog.json): a repository and a commit. */
-export interface CatalogEntry { name: string; version?: string; url: string; hash: string; image?: string; description?: string }
-
-/** The catalog in the instance's own site tree (its app `site`: www/catalog.json), and the names in it. */
-export async function catalogOf(view: InstanceView): Promise<CatalogEntry[]> {
-  const head = view.heads.find((h) => h.name === appHead("site"))?.root;
-  const rec = head ? await view.store.get(head).catch(() => undefined) as AppRecord | undefined : undefined;
-  if (rec?.kind !== "app") throw new Error("the instance has no site app (site/app): no catalog to name an app from; give <url>#<commit>");
-  const leaf = await lookup(view.store as never, rec.tree, "www/catalog.json");
-  if (!leaf) throw new Error(`the site app ${rec.version} has no www/catalog.json`);
-  const c = JSON.parse(new TextDecoder().decode(await readBlob(view.store as never, leaf.cid))) as { apps?: CatalogEntry[] };
-  return (c.apps ?? []).filter((e) => e && typeof e.name === "string" && typeof e.url === "string" && /^[0-9a-f]{40}$/i.test(e.hash ?? ""));
-}
-
-/**
- * The kernel's gate (#143, kernel-zig/src/grants.zig), read from the instance's view: the roles that
- * gate a route's handler (its app's `roles` for its fn; a kernel admin box's is root) and whether
- * `key` passes them. Root passes anything; `user` passes any key; no gating roles: open.
- */
-export async function gatePasses(view: InstanceView, row: DispatchRow, key: string): Promise<{ pass: boolean; roles: string[] }> {
-  const root = view.heads.find((h) => h.name === "grants")?.root;
-  const g = root ? await view.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined : undefined;
-  const holds = (role: string) => (g?.roles?.[role] ?? []).some((k) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : String(k)) === key);
-  const r = row as DispatchRow & { op?: string; fn?: string; app?: string };
-  let roles: string[] = [];
-  if (r.op) roles = ["root"];
-  else if (r.app && r.fn) {
-    const { appRecordIn } = await import("../host/plan.ts");
-    const rec = await appRecordIn(view, r.app);
-    const map = (rec?.record as { roles?: Record<string, string[]> } | undefined)?.roles ?? {};
-    roles = Object.entries(map).filter(([, fns]) => fns.includes(r.fn!)).map(([role]) => role === "root" || role === "user" ? role : `${r.app}.${role}`);
-  }
-  if (!roles.length || holds("root") || roles.includes("user") || roles.some((x) => x !== "root" && holds(x))) return { pass: true, roles };
-  return { pass: false, roles };
+  return { prompt: [`grant ${op}: ${caller} ${o.remove ? "loses" : "holds"} service ${service}${service === "signer" ? " (the raw signer import: any derivation)" : ""}`], recipient: view.identity, requests: [{ path: KERNEL_PATHS.grant, body: { op, service: { caller, service } } }] };
 }

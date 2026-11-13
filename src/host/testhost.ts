@@ -1,54 +1,49 @@
-// A test host (#40): a router over a temporary host.db and SKEIN_HOME,
-// instances with keys of their own (the signer's stand-in). With no host
-// skein its own origin's BRC-169 requests are answered by a fixture over
-// host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
-// skein with the onboarding app and the messagebox app installed, which then
-// answers them. A key outside the host (the owner, the inference peer, a
-// caller) reads its mail as any wallet does: registered as a handle at a host
-// skein — a second test host's (`inbox`: host B, so this host keeps its own
-// fake discovery) — at the messagebox URL its handle resolves to; this host's
-// fake discovery answers that handle with that URL, as a registrar answers a
-// handle whose messagebox is elsewhere.
+// A test host: a router over a temporary host.db and SKEIN_HOME, every instance a set of one SQLite
+// database (the wasm kernel; `rocks`: a RocksDB database run by the `skein-kernel host` process),
+// each instance's key its own (the signer's stand-in). The owner's key signs root's requests (the
+// `signed` scheme: src/client/raw.ts signRequest), handed in as the client's are (Router.messageLocal).
 
 import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import type { CID } from "multiformats/cid";
-import type { Store } from "../runtime/store.ts";
-import { RawBox, signClaim } from "../client/raw.ts";
+import { requestPayload, signRequest } from "../client/raw.ts";
+import { planInstallApp } from "../client/admin.ts";
 import { ephemeralWallet } from "../wallet.ts";
-import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from "../testapps.ts";
-import { fakeDiscovery } from "./fake-discovery.ts";
-import { imageSource } from "./boot.ts";
+import { imageSource, WASM_DIR, wasmDirObjects } from "./boot.ts";
 import { HostDb } from "./instances.ts";
-import { fetchHttp, REGISTER_PROTOCOL, Router, type SignedClaim } from "./router.ts";
+import { instanceView, readApp } from "./install.ts";
+import { openStoreFile } from "./stores.ts";
+import { storeSpec } from "../runtime/index-store.ts";
+import { Router } from "./router.ts";
 import { Signer } from "./signer.ts";
+import type { Answer } from "./kernel.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
+/** The default image (images/default): the kernel's operation rows and the claim row. */
+export const DEFAULT_IMAGE_DIR = join(ROOT, "images/default");
+/** The host's test app (programs/test/next-app: the kernel's test program, kernel-zig/test/call/next.wasm, as an app). */
+export const NEXT_APP = join(ROOT, "programs/test/next-app");
 
 /**
- * A system tree for a test (skein next, SPEC 8: an instance starts from a tree): the default image's bin/
- * and etc/dispatch.json (images/default), with `bin` files added (name → bytes or text), `dispatch` rows
- * added after the image's, and `config` as etc/config.json. Written under `dir`; boot it with
- * `router.bootRow(handle, {kind: "tree", ...await dirSource(dir)})`.
+ * A system tree for a test (SPEC 8: an instance starts from a tree): the default image's rows with `routes`
+ * added after them, `config` as etc/config.json, `apps` as etc/apps.json's install list (directories), and
+ * `files` (path → bytes or text). Written under `dir`.
  */
-export async function imageTree(dir: string, o: { bin?: Record<string, Uint8Array | string>; dispatch?: unknown[]; config?: Record<string, unknown> } = {}): Promise<string> {
-  const image = join(ROOT, "images/default");
-  await fs.mkdir(join(dir, "bin"), { recursive: true });
+export async function imageTree(dir: string, o: { routes?: unknown[]; config?: Record<string, unknown>; apps?: string[]; appRoutes?: unknown[]; files?: Record<string, Uint8Array | string> } = {}): Promise<string> {
   await fs.mkdir(join(dir, "etc"), { recursive: true });
-  for (const f of await fs.readdir(join(image, "bin"))) await fs.copyFile(join(image, "bin", f), join(dir, "bin", f));
-  for (const [f, b] of Object.entries(o.bin ?? {})) await fs.writeFile(join(dir, "bin", f), b);
-  const rows = JSON.parse(await fs.readFile(join(image, "etc/dispatch.json"), "utf8")) as unknown[];
-  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([...rows, ...(o.dispatch ?? [])]));
-  await fs.writeFile(join(dir, "etc/config.json"), JSON.stringify(o.config ?? JSON.parse(await fs.readFile(join(image, "etc/config.json"), "utf8"))));
+  const rows = JSON.parse(await fs.readFile(join(DEFAULT_IMAGE_DIR, "etc/routes.json"), "utf8")) as unknown[];
+  await fs.writeFile(join(dir, "etc/routes.json"), JSON.stringify([...rows, ...(o.routes ?? [])]));
+  await fs.writeFile(join(dir, "etc/config.json"), JSON.stringify(o.config ?? {}));
+  if (o.apps || o.appRoutes) await fs.writeFile(join(dir, "etc/apps.json"), JSON.stringify({ install: o.apps ?? [], ...(o.appRoutes ? { routes: o.appRoutes } : {}) }));
+  for (const [p, b] of Object.entries(o.files ?? {})) { await fs.mkdir(join(dir, p, ".."), { recursive: true }); await fs.writeFile(join(dir, p), b); }
   return dir;
 }
 
-export const until =async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
+export const until = async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
   for (const end = Date.now() + ms; Date.now() < end;) {
     const v = await f();
     if (v) return v;
@@ -57,46 +52,11 @@ export const until =async <T>(what: string, f: () => Promise<T | undefined> | T 
   throw new Error(`timed out: ${what}`);
 };
 
-/**
- * The messages an instance took in, in log order (#68): a mail entry of its
- * own (a host that admits one directly), or a message a request's thread
- * routed — the `admit` of the front door's answer on that thread's updates.
- */
-export async function messagesIn(store: Store): Promise<Array<Record<string, unknown>>> {
-  const byInput = new Map<string, CID>();
-  for await (const t of store.edges.query({ kind: "thread" })) {
-    const o = await store.get(t) as { args?: { request?: CID }; input?: CID };
-    if (o.args?.request && o.input) byInput.set(o.input.toString(), t);
-  }
-  const out: Array<Record<string, unknown>> = [];
-  for await (const { cid, entry } of store.log.entries(1)) {
-    const mail = (entry as { mail?: CID }).mail;
-    if (mail) { out.push(await store.get(mail) as Record<string, unknown>); continue; }
-    const t = byInput.get(cid.toString());
-    if (!t) continue;
-    for await (const u of store.chains.history(t)) {
-      if (u.equals(t)) continue;
-      const up = await store.get(u) as { result?: { stdout?: Uint8Array } };
-      if (!up.result?.stdout?.length) continue;
-      let a: { admit?: Array<{ mail?: Record<string, unknown> }> };
-      try { a = dagCbor.decode(up.result.stdout) as typeof a; } catch { continue; } // stdout that is not dag-cbor admitted nothing
-      for (const x of a.admit ?? []) if (x.mail) out.push(x.mail);
-    }
-  }
-  return out;
-}
-
-/** What a test needs of host B (testHost's `inboxHost`): its router and rows, its entries, its registrations. */
-export interface InboxHost { base: string; db: HostDb; router: Router; origin(handle: string): string; entries(handle: string): Promise<number>; register(key: PrivateKey, handle: string): Promise<string> }
-
 /** A host with instances, each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; teranode?: Router["o"]["teranode"]; headersUrl?: string; rocks?: boolean; sqlite?: boolean; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
-  // #156: `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; arcFetch?: Router["o"]["arcFetch"]; teranode?: Router["o"]["teranode"]; headersUrl?: string; rocks?: boolean; libp2p?: boolean; network?: string; reuse?: { home: string; keyOf(handle: string): PrivateKey } } = {}) {
+  // `reuse` — a second host over the first's home and keys (a restart: the first's router stopped first).
   const home = o.reuse?.home ?? await fs.mkdtemp(join(tmpdir(), "skein-router-"));
-  // #158: o.rocks — every instance a set of one RocksDB database, <home>/store-rocksdb, run by one `skein-kernel host` process.
-  // The settled split: o.sqlite (or SKEIN_TEST_STORE=sqlite) — every instance a set of one SQLite database, <home>/store.sqlite, on the wasm kernel.
-  const sqlite = o.sqlite ?? process.env.SKEIN_TEST_STORE === "sqlite";
-  const storeOf = (handle: string) => (sqlite ? `sqlite:${join(home, "store.sqlite")}` : o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : join(home, "instances", handle, "runtime.db"));
+  const storeOf = () => (o.rocks ? `rocksdb:${join(home, "store-rocksdb")}` : `sqlite:${join(home, "store.sqlite")}`);
   if (!o.reuse) t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
@@ -105,31 +65,16 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
   const providerMaster = PrivateKey.fromRandom();
-  // The hosted inboxes (inbox): host B, made on first use; the handles this host's fake discovery answers with B's messagebox.
-  let b: InboxHost | undefined;
-  const elsewhere = new Map<string, { identityKey: string; messagebox: string }>();
-  // This host's http beyond its own (the router's default, SKEIN_HTTP), and host B's URLs for real: deliveries to the hosted inboxes.
-  const http = o.http ?? (async (req: Parameters<NonNullable<Router["o"]["http"]>>[0]) => {
-    let toB = false;
-    try { toB = !!b && new URL(req.url).port === String(b.router.port); } catch { /* not a URL: not B's */ }
-    if (toB || process.env.SKEIN_HTTP === "fetch") return await fetchHttp(req);
-    throw new Error(`this host answers no http beyond its own (${req.url})`);
-  });
+  const peerKeys = new Map<string, PrivateKey>();
   const router = new Router({
-    db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
-    idleMs: o.idleMs ?? 0, http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
-    // A broadcaster (#58, #65): its Arcade, and so a `status` provider.
-    ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
-    // #156: the Teranode headers tracker (a fake mesh and hub in the tests).
+    db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), home,
+    idleMs: o.idleMs ?? 0, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
+    ...(o.network ? { network: o.network } : {}),
+    ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}), ...(o.arcFetch ? { arcFetch: o.arcFetch } : {}),
     ...(o.teranode ? { teranode: o.teranode } : {}),
-    // SPEC 8: an HTTP header source (SKEIN_HEADERS_URL) into the one intake.
     ...(o.headersUrl ? { headersUrl: o.headersUrl } : {}),
-    ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : {}),
-    // The settled split: the wasm kernel over the host's one SQLite database (SKEIN_TEST_STORE=sqlite: every test host so).
-    ...(sqlite ? { sqliteStore: join(home, "store.sqlite") } : {}),
-    // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
-    discovery: fakeDiscovery(db, () => router, elsewhere),
-    // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
+    ...(o.rocks ? { rocksStore: join(home, "store-rocksdb") } : { sqliteStore: join(home, "store.sqlite") }),
+    ...(o.libp2p ? { peerKeyFor: (h: string) => { let k = peerKeys.get(h); if (!k) peerKeys.set(h, (k = PrivateKey.fromRandom())); return k; } } : {}),
     providerKeyFor: (name) => new Signer(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
@@ -138,93 +83,43 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const base = `http://127.0.0.1:${router.port}`;
   const h = {
     home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
-    /**
-     * An instance's row and its store booted from the default image (images/default) as a system tree with
-     * the owner as root (skein next, SPEC 8: one loader — no code genesis; the genesis is written now, so
-     * the owner's mailbox must be configured first to be named in it). Its identity key (hex).
-     */
-    async instance(handle: string, dir = join(ROOT, "images/default")) {
-      db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() });
-      await router.bootRow(handle, await imageSource(dir));
+    /** An instance's row and its store booted from an image (default: images/default) born owned by the owner (root in its genesis). Its identity (hex). */
+    async instance(handle: string, dir = DEFAULT_IMAGE_DIR) {
+      db.add(handle, { store: storeOf(), identity: keyOf(handle).toPublicKey().toString() });
+      await router.bootRow(handle, await imageSource(dir), { owner: ownerId });
       return keyOf(handle).toPublicKey().toString();
     },
-    /** The same as `instance`, by its old name (for tests written before the rename). */
-    agent(handle: string) { return h.instance(handle); },
-    /**
-     * An instance booted from an image (#89; default: the default image,
-     * images/default): no owner in its genesis, the claim row from anyone.
-     * Claim it with a message from the owner's wallet in box `claim`
-     * (src/testapps.ts sendPlan of planClaim, #127): its sender owns it.
-     */
-    async image(handle: string, dir = join(ROOT, "images/default")) {
-      db.add(handle, { store: storeOf(handle), identity: keyOf(handle).toPublicKey().toString() });
-      return await router.bootRow(handle, await imageSource(dir), { image: true });
+    /** An instance booted from an image (default: images/default) with no owner: its claim row from anyone. */
+    async image(handle: string, dir = DEFAULT_IMAGE_DIR) {
+      db.add(handle, { store: storeOf(), identity: keyOf(handle).toPublicKey().toString() });
+      return await router.bootRow(handle, await imageSource(dir));
     },
-    /**
-     * The host skein (#90, #113, #142): `host` from the host image (the
-     * default image with the onboarding app), its genesis naming the owner
-     * (the operator's key here), the instance manager and the certifier in
-     * its address book; the onboarding app's config at birth over its
-     * manifest's (default: domain `localhost`, origin this router's). Its own
-     * origin's BRC-169 requests are then the app's.
-     */
-    async hostSkein(config: Record<string, unknown> = {}) {
-      const c = await router.createInstance("host", ownerId, { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base, messagebox: `${router.originOf("host")}/messagebox`, ...config } } } });
-      await router.hydrate("host");
+    /** A request signed by `key` (default the owner's) to `handle` (the `signed` scheme), handed in (Router.messageLocal): {entry, answer}. */
+    async request(handle: string, method: string, path: string, body?: unknown, key: PrivateKey = ownerKey) {
+      const id = db.get(handle)?.identity ?? (await router.hydrate(handle)).identity;
+      const r = await signRequest(ephemeralWallet(key), { recipient: id, payload: requestPayload(method, path, body) });
+      return await router.messageLocal(handle, r);
+    },
+    /** The app in `dir` installed into `handle` as root (the owner): planned (planInstallApp) over its store, each request signed by the owner and handed in. The plan. */
+    async install(handle: string, dir: string, config?: Record<string, unknown>) {
+      await router.hydrate(handle);
+      const st = openStoreFile(storeSpec(db.get(handle)!), { readOnly: true });
+      let plan;
+      try { plan = await planInstallApp(await readApp(dir), await instanceView(st as never), { config, modules: wasmDirObjects(WASM_DIR) }); } finally { st.close(); }
+      for (const r of plan.requests) await h.request(handle, "POST", r.path, r.body);
       await router.settled();
-      return c;
-    },
-    /**
-     * `key` registered as `handle` at this host's host skein (made if it is not yet: hostSkein) — the
-     * registration a wallet makes (POST /account/register over its session, signed over `register
-     * <handle>@localhost`) — and its messagebox URL, what the handle resolves to (the host skein's
-     * messagebox app, `<host skein>/messagebox`).
-     */
-    async register(key: PrivateKey, handle: string): Promise<string> {
-      if (!db.hostSkein()) await h.hostSkein();
-      const { signature } = await new ProtoWallet(key).createSignature({ protocolID: REGISTER_PROTOCOL, keyID: handle, counterparty: "anyone", data: Utils.toArray(`register ${handle}@localhost`, "utf8") });
-      const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: handle, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
-      const a = await r.json() as { messagebox?: string; error?: string };
-      if (r.status !== 200 || !a.messagebox) throw new Error(`register ${handle}: HTTP ${r.status} ${a.error ?? ""}`);
-      return a.messagebox;
-    },
-    /** Host B (a second test host, the same store kind), the hosted inboxes' — made on first use. */
-    async inboxHost(): Promise<InboxHost> {
-      b ??= await testHost(t, { sqlite, ...(o.rocks ? { rocks: true } : {}) });
-      return b;
-    },
-    /**
-     * A key's hosted inbox: `key` registered as `handle` at host B's host skein (B.register), this
-     * host's fake discovery answering `handle` with that messagebox URL (the handle's messagebox is
-     * elsewhere). Its URL; read it with RawBox there.
-     */
-    async inbox(key: PrivateKey, handle: string): Promise<string> {
-      const url = await (await h.inboxHost()).register(key, handle);
-      elsewhere.set(handle, { identityKey: key.toPublicKey().toString(), messagebox: url });
-      return url;
-    },
-    /**
-     * The owner's hosted inbox (`inbox` with the owner's key, as `handle`), and the owner's messagebox
-     * setting (the router's `ownerMessagebox`, SKEIN_OWNER_MESSAGEBOX's) set to it — before any
-     * instance's genesis names it. Its URL.
-     */
-    async ownerInbox(handle = "david"): Promise<string> {
-      const url = await h.inbox(ownerKey, handle);
-      router.o.ownerMessagebox = url;
-      return url;
+      return plan;
     },
     origin: (handle: string) => router.originOf(handle),
     storeSize(handle: string) { const p = db.get(handle)!.store; return statSync(p).size + (existsSync(`${p}-wal`) ? statSync(`${p}-wal`).size : 0); },
-    /**
-     * Install apps into an instance as the owner (#83: a genesis has no shell,
-     * no `run`, no `chat`): by default the shell app and the chat app, through
-     * the owner's messages (src/testapps.ts installApps, #124). Hydrates the instance first.
-     */
-    async install(handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP]) {
-      await router.hydrate(handle);
-      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, handle, apps);
-    },
     async entries(handle: string) { const k = (await router.hydrate(handle)).kernel; return (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n + 1; },
   };
   return h;
+}
+
+/** An answer's body decoded (dag-cbor, else JSON, else text). */
+export function bodyOf(a: Answer | { body: Uint8Array }): unknown {
+  try { return dagCbor.decode(a.body); } catch { /* not dag-cbor */ }
+  const t = new TextDecoder().decode(a.body);
+  try { return JSON.parse(t); } catch { return t; }
 }

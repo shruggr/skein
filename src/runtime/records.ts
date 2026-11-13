@@ -4,7 +4,7 @@
 // import. Validators are structural; a message is only trusted once
 // verifyMessage passes, which needs nothing but the record itself.
 
-import { isFilterRef } from "./dispatch.ts";
+import { KERNEL_OPS as KERNEL_OPS_, rowProblem } from "./dispatch.ts";
 import { createHash } from "node:crypto";
 import { PublicKey, Signature } from "@bsv/sdk";
 import { CID, decode, encode, isCID } from "./cid.ts";
@@ -112,82 +112,49 @@ export function isProgram(x: unknown): x is Program {
     && typeof x.description === "string";
 }
 
-// ---------------------------------------------------------------- dispatch row
+// ---------------------------------------------------------------- route row
 
-/**
- * A route of the route table (#77, #143; dispatch.ts, docs/MESSAGES.md "The
- * dispatch table"): the kernel's rule for a route (dispatch.zig `problem`).
- * `program` is a program record's CID, "kernel" for an admin operation named
- * by `fn`, or absent for a read route (http only: its filters answer). No
- * `sender` (#143: routing only).
- */
+/** A row of the route table (skein next, SPEC.md section 3; dispatch.ts rowProblem, the kernel's dispatch.zig rules). */
 export function isDispatchRow(x: unknown): x is DispatchRow {
-  if (!isObj(x)) return false;
-  const t = x.transport;
-  if (t !== "mailbox" && t !== "event" && t !== "http" && t !== "libp2p" && t !== "local") return false;
-  if (x.sender !== undefined) return false;
-  if (typeof x.address !== "string" || x.address === "" || /[ \0]/.test(x.address)) return false;
-  if (x.prefix !== undefined && x.prefix !== null && x.prefix !== false && !(x.prefix === true && t === "http")) return false;
-  const filters = x.filters === undefined || x.filters === null ? [] : x.filters;
-  if (!Array.isArray(filters) || !filters.every(isFilterRef)) return false;
-  if (filters.length && (t === "local" || (t === "event" && !(filters.length === 1 && filters[0] === "kernel.beef")))) return false;
-  if (x.fn !== undefined && x.fn !== null && typeof x.fn !== "string") return false;
-  // A read route (#143): http, or a libp2p stream protocol (#154: `/…`; a topic carries no answer).
-  if (x.program === undefined) return (t === "http" || (t === "libp2p" && x.address.startsWith("/"))) && filters.length > 0 && x.fn === undefined;
-  if (x.program === "kernel") return t === "mailbox" && filters.length === 0 && typeof x.fn === "string" && KERNEL_OPS.includes(x.fn);
-  return isCID(x.program);
+  return rowProblem(x) === undefined;
 }
 
-/** What a kernel route may name (its `fn`): the admin operations (#143: `grant` among them), and the claim (#89: an image's one route; root to the claimant, the route removed). */
-export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "grant", "claim"];
+/** What a kernel row's handler may name: `kernel.<op>`. */
+export const KERNEL_OPS: readonly string[] = KERNEL_OPS_;
 
 // ---------------------------------------------------------------- genesis
 
 /**
- * An instance's starting state: the record the first log entry names. Its
- * `identity` is the instance wallet's identity key, which its outbound
- * envelopes are signed by; `host` is the identity of the host that delivers
- * its inputs (format 1 only: format 2 dropped it); `owner` is the identity
- * it acted for (format 1-8: #143 replaced it with `root`); `programs` are the programs it starts with, by name;
- * `dispatch` is the seed of its dispatch table (dispatch.ts): written as the
- * table's chain's first updates when the entry is processed, never read for
- * routing; `scopes` are the heads each genesis-wired program may advance
- * (program name → head names, a prefix ending in `/`).
+ * An instance's starting state (skein next, SPEC.md section 3; kernel-zig log.zig): who it is
+ * (`identity`, `handle`, `domain`), the starting rows (`routes`), the starting grants
+ * (`grants`: {<role>: [key]}, root among them — whoever builds the image decides), call permissions
+ * (`calls`, `services`), the defaults (fuel), the tree (`main` starts there) and the heads an image's
+ * installed apps set (`<app>/app`). No programs, scopes, roles by program name, peers, address book,
+ * names, feeds or session settings.
  */
 export type Genesis = {
   kind: "genesis";
-  identity: Identity;
+  identity: Uint8Array;
   handle: string;
   domain: string;
-  /** #143: the initial root holders; absent in an image (#89: root comes with the claim). */
-  root?: Identity[];
-  /** #143: what gates the genesis's own programs' functions: {<role>: ["<program>.<fn>"]}. */
-  roles?: Record<string, string[]>;
-  host?: Identity;
-  programs: Record<string, CID>;
-  dispatch: DispatchRow[];
-  scopes?: Record<string, string[]>;
-  /** Peers by role, e.g. `infer`: the identity a program sends that kind of request to. */
-  peers?: Record<string, Identity>;
-  /** Defaults programs fall back on, e.g. `model` for the loop. */
+  routes: DispatchRow[];
+  grants?: Record<string, Uint8Array[]>;
+  calls?: Record<string, Record<string, string[] | "*">>;
+  services?: Record<string, string[]>;
   defaults?: Record<string, string>;
-  /** Handles of identities programs send to whose envelopes may not name them (the owner, the peers): an outbound envelope's `recipient`. */
-  names?: Record<Identity, { handle: string; domain: string }>;
-  /** Boxes the delivery provider collects besides the dispatched ones: replies (e.g. `completions`), routed only by `replyTo`. */
-  collect?: string[];
+  tree?: CID;
+  heads?: Record<string, CID>;
 };
 
+const GENESIS_GONE = ["owner", "root", "roles", "programs", "middleware", "scopes", "peers", "addressBook", "names", "collect", "dispatch", "feeds", "resolveOrigin", "ownerMessagebox", "host", "attest", "jobs", "subscriptions", "reads"];
+
 export function isGenesis(x: unknown): x is Genesis {
-  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && x.owner === undefined && (x.root === undefined || (Array.isArray(x.root) && x.root.every(isIdentity))) && (x.host === undefined || isIdentity(x.host))
-    && (x.roles === undefined || (isObj(x.roles) && Object.values(x.roles).every((v) => Array.isArray(v) && v.every((f) => typeof f === "string"))))
+  return isObj(x) && x.kind === "genesis" && x.identity instanceof Uint8Array && x.identity.length === 33
+    && GENESIS_GONE.every((k) => x[k] === undefined)
     && typeof x.handle === "string" && typeof x.domain === "string"
-    && isObj(x.programs) && Object.values(x.programs).every(isCID)
-    && Array.isArray(x.dispatch) && x.dispatch.every(isDispatchRow)
-    && (x.scopes === undefined || (isObj(x.scopes) && Object.values(x.scopes).every((v) => Array.isArray(v) && v.every((h) => typeof h === "string" && h !== ""))))
-    && (x.peers === undefined || (isObj(x.peers) && Object.values(x.peers).every(isIdentity)))
-    && (x.defaults === undefined || (isObj(x.defaults) && Object.values(x.defaults).every((v) => typeof v === "string")))
-    && (x.names === undefined || (isObj(x.names) && Object.entries(x.names).every(([k, v]) => isIdentity(k) && isObj(v) && typeof v.handle === "string" && typeof v.domain === "string")))
-    && (x.collect === undefined || (Array.isArray(x.collect) && x.collect.every((b) => typeof b === "string" && b !== "")));
+    && Array.isArray(x.routes) && x.routes.every(isDispatchRow)
+    && (x.grants === undefined || (isObj(x.grants) && Object.values(x.grants).every((v) => Array.isArray(v) && v.every((k) => k instanceof Uint8Array))))
+    && (x.defaults === undefined || (isObj(x.defaults) && Object.values(x.defaults).every((v) => typeof v === "string")));
 }
 
 // ---------------------------------------------------------------- program-written records

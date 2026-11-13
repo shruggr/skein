@@ -6,33 +6,30 @@
 //
 // The protocol is one JSON line each way, and it carries one request:
 //
-//   {"op": "message", "handle": h, "message": "<base64>", "body": "<base64>"}
-//                                                       → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
+//   {"op": "message", "handle": h, "request": "<base64>"}
+//        → {"ok": true, "entry": "<cid>", "status": n, "body": "<base64>"} | {"ok": false, "error": "…"}
 //
-// `message` (#142) is a message the client `skein` signed in its own process
-// (src/client/raw.ts signMessage: the operator's key), delivered on the host
-// machine: `message` its mail record's dag-cbor, `body` the body's bytes. The
-// router appends it as received, a `local` request (Router.messageLocal →
-// appendLocal, the path a forwarded claim takes): the front door checks its
-// signature and admits it by the dispatch table, as any signed message. The
-// router signs nothing; the answer is the entry, once the front door has
-// judged it (a refusal is an error).
+// `request` (skein next, SPEC.md section 2) is a request record the client `skein` signed in its own
+// process (src/client/raw.ts signRequest, the `signed` scheme: the operator's key), its dag-cbor,
+// delivered on the host machine. The router hands it to the instance (Router.messageLocal: CHECK then
+// COMMIT); the router signs nothing. The answer is the entry and the handler's (or the kernel
+// operation's) answer, once it came to rest; a refusal (nothing written) is an error.
 
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 
 export const CONTROL_SOCKET = "host.sock";
 
-export type ControlRequest = { op: "message"; handle: string; message: string; body: string };
-export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
+export type ControlRequest = { op: "message"; handle: string; request: string };
+export type ControlAnswer = { ok: true; entry: string; status: number; body: string } | { ok: false; error: string };
 
 /** What the socket's owner does with a request (the router: messageLocal). */
 export interface ControlHandler {
-  /** #142: a signed message for `handle` (its mail record's dag-cbor and its body), appended as a `local` request (Router.messageLocal). */
-  message(handle: string, message: Uint8Array, body: Uint8Array): Promise<string>;
+  /** A signed request record for `handle` (its dag-cbor): CHECK then COMMIT (Router.messageLocal) → the entry and the answer. */
+  message(handle: string, request: Uint8Array): Promise<{ entry: string; status: number; body: Uint8Array }>;
 }
 
-/** The longest request line: ours to choose (#142) — a message carries a module whole (base64), so 64 MiB. */
+/** The longest request line: ours to choose (#142) — an objects request carries a module whole (base64), so 64 MiB. */
 export const MAX_LINE = 64 << 20;
 
 /** A request line, checked. */
@@ -40,9 +37,9 @@ function requestOf(line: string): ControlRequest {
   let r: unknown;
   try { r = JSON.parse(line); } catch { throw new Error("not JSON"); }
   const o = r as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || o.op !== "message") throw new Error("want {op: \"message\", handle, message, body}");
+  if (!o || typeof o !== "object" || o.op !== "message") throw new Error("want {op: \"message\", handle, request}");
   if (typeof o.handle !== "string" || !o.handle) throw new Error("a message names its instance (handle)");
-  if (typeof o.message !== "string" || typeof o.body !== "string") throw new Error("a message is {message, body}, each base64");
+  if (typeof o.request !== "string") throw new Error("a message carries `request`: a signed request record's dag-cbor, base64");
   return o as unknown as ControlRequest;
 }
 
@@ -83,7 +80,7 @@ function serveOne(s: Socket, h: ControlHandler): void {
     if (nl < 0) { if (buf.length > MAX_LINE) reply({ ok: false, error: "request too long" }); return; }
     let req: ControlRequest;
     try { req = requestOf(buf.slice(0, nl)); } catch (e) { reply({ ok: false, error: (e as Error).message }); return; }
-    h.message(req.handle, Buffer.from(req.message, "base64"), Buffer.from(req.body, "base64")).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
+    h.message(req.handle, Buffer.from(req.request, "base64")).then((a) => reply({ ok: true, entry: a.entry, status: a.status, body: Buffer.from(a.body).toString("base64") }), (e: Error) => reply({ ok: false, error: e.message }));
   });
 }
 

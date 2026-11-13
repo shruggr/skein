@@ -1,174 +1,64 @@
-// Raw BRC-33 on a BRC-104 session (#40): what a client speaks to an
-// instance's front door once it knows where it is. No BRC-169 envelope: the
-// session proves who sends, the URL is the recipient's messagebox, the body is
-// dag-cbor (BRC-231: an application/cbor request, recipient and body as
-// bytes). One AuthFetch per box URL — the stock AuthFetch keeps one session
-// per origin, so a URL with a `/@<handle>` path prefix (a host's dev form)
-// gets its handshake sent under the prefix too (src/session-base.ts: the
-// skein the URL is for; the rest of its path, `/messagebox` for a hosted
-// messagebox, is a route in that skein).
+// A request signed outside any session (skein next, SPEC.md section 2, the `signed` scheme): what a
+// client, an operator's tool or the host's own services hand an instance when the sender must be
+// proven and no BRC-104 session carries it — the request record
 //
-//   const mb = new RawBox(wallet, "http://127.0.0.1:8100/@martha")   (or http://martha.localhost:8100)
-//   await mb.send(martha, "chat", {text: "hi"})     → {id}: the message's id (what a reply's replyTo names)
-//   await mb.list("chat")                           → [{messageId, sender, body, value}]
-//   await mb.ack([messageId])
+//   {kind: "request", payload: {method, path, query, headers, body},
+//    signature: {scheme: "signed", sender, recipient, nonce, signature}}
+//
+// signed BRC-169's way ([2, "metanet handles envelope"], key "send", counterparty anyone) over the
+// dag-cbor of {sender, recipient, nonce, payload}; `recipient` the instance's identity key. Anyone can
+// check it (kernel-zig door.zig `signed`). An identical signed request is refused the second time
+// (the unique map): `nonce` makes two like requests two.
+//
+//   const r = await signRequest(wallet, {recipient, payload: requestPayload("POST", "/kernel/grant", body)})
 
-import { AuthFetch, Peer, SimplifiedFetchTransport, type WalletInterface } from "@bsv/sdk";
+import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { CID } from "multiformats/cid";
-import { encode } from "../runtime/cid.ts";
-import { sessionBase } from "../session-base.ts";
+import type { RequestRecord } from "../host/kernel.ts";
 
-export interface Listed {
-  /** The message's id: its record's CID (text). */
-  messageId: string;
-  /** The sender's identity key (hex). */
-  sender: string;
-  /** The body's dag-cbor bytes. */
-  body: Uint8Array;
-  /** The body decoded. */
-  value: unknown;
-  /** The message itself: its mail record as the messagebox keeps it. */
-  message?: Record<string, unknown>;
+/** What signing a request needs of a wallet: its identity key and a signature (a ProtoWallet does). */
+export type Signer = Pick<WalletInterface, "getPublicKey" | "createSignature">;
+
+export const MESSAGE_PROTOCOL: [2, string] = [2, "metanet handles envelope"];
+export const MESSAGE_KEY_ID = "send";
+
+export type RequestPayload = RequestRecord["payload"];
+
+/** A request's payload: `body` bytes, or a value encoded as dag-cbor (content-type application/cbor). */
+export function requestPayload(method: string, path: string, body?: Uint8Array | unknown, o: { query?: string; headers?: Record<string, string> } = {}): RequestPayload {
+  const bytes = body === undefined ? new Uint8Array() : body instanceof Uint8Array ? body : dagCbor.encode(body);
+  const cbor = body !== undefined && !(body instanceof Uint8Array);
+  return { method, path, query: o.query ?? "", headers: { ...(cbor ? { "content-type": "application/cbor" } : {}), ...(o.headers ?? {}) }, body: bytes };
 }
 
-const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
-
-/**
- * A claim (#127), signed by `wallet` and naming no recipient: a message in
- * box `claim`, its body {messagebox?, handle?, domain?} (the owner's mailbox
- * entry, if any), signed by its sender ([2, "metanet handles envelope"], key
- * "send", counterparty anyone) — the one message a client signs itself (#126
- * step 4: no session of the instance's carries it). Signed before the instance it claims exists;
- * the host forwards it into that instance as its first entry, and the kernel
- * takes the owner from the signer. {message, body: its dag-cbor bytes}.
- */
-export async function signClaim(wallet: WalletInterface, body: { messagebox?: string; handle?: string; domain?: string } = {}, originator?: string): Promise<{ message: Record<string, unknown>; body: Uint8Array }> {
-  return await signMessage(wallet, { box: "claim", body: dagCbor.encode(body) }, originator);
+/** What a `signed` request's signature covers: dag-cbor {sender, recipient, nonce, payload}. */
+export function signedPreimage(sender: Uint8Array, recipient: Uint8Array, nonce: Uint8Array, payload: RequestPayload): Uint8Array {
+  return dagCbor.encode({ sender, recipient, nonce, payload });
 }
 
+const keyBytes = (k: Uint8Array | string): Uint8Array => typeof k === "string" ? Uint8Array.from(Buffer.from(k, "hex")) : k;
+
 /**
- * A message signed by `wallet` in its own process (#142): the mail record {kind: "mail", op: "put",
- * sender, recipient?, box, body: <the body's CID>, nonce, signature}, signed as every message is
- * ([2, "metanet handles envelope"], key "send", counterparty anyone, over the record's dag-cbor
- * without `signature`) — what the front door checks on a message carried in `local` (a provider's
- * answer, a forwarded claim, the operator's message over the host's control socket). `recipient`
- * (hex) names the instance; a claim names none (#127). {message, body: the body's dag-cbor bytes}.
+ * A request signed by `wallet` (its identity key the sender) to the instance `recipient` (hex or 33
+ * bytes) under the `signed` scheme. `nonce`: 16 fresh bytes when absent.
  */
-export async function signMessage(wallet: WalletInterface, m: { recipient?: string; box: string; body: Uint8Array }, originator?: string): Promise<{ message: Record<string, unknown>; body: Uint8Array }> {
-  const bytes = m.body;
+export async function signRequest(wallet: Signer, r: { recipient: Uint8Array | string; payload: RequestPayload; nonce?: Uint8Array }, originator?: string): Promise<RequestRecord> {
   const me = (await wallet.getPublicKey({ identityKey: true }, originator)).publicKey;
-  const unsigned = {
-    kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")),
-    ...(m.recipient ? { recipient: Uint8Array.from(Buffer.from(m.recipient, "hex")) } : {}),
-    box: m.box, body: encode(dagCbor.decode(bytes)).cid, nonce: globalThis.crypto.getRandomValues(new Uint8Array(16)),
-  };
-  const { signature } = await wallet.createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(unsigned)] }, originator);
-  return { message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bytes };
+  const sender = keyBytes(me), recipient = keyBytes(r.recipient);
+  const nonce = r.nonce ?? globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const payload = dagCbor.decode(dagCbor.encode(r.payload)) as RequestPayload;
+  const { signature } = await wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...signedPreimage(sender, recipient, nonce, payload)] }, originator);
+  return { kind: "request", payload, signature: { scheme: "signed", sender, recipient, nonce, signature: Uint8Array.from(signature) } };
 }
 
-export class RawBox {
-  readonly url: string;
-  readonly af: AuthFetch;
-  private readonly fetchFn: typeof fetch;
-  private readonly wallet: WalletInterface;
-  private readonly originator?: string;
-  private peer?: Promise<void>;
+/** The kernel's claim row's path (images/default etc/routes.json: handler kernel.claim, role user). */
+export const CLAIM_PATH = "/kernel/claim";
 
-  constructor(wallet: WalletInterface, url: string, o: { fetch?: typeof fetch; originator?: string } = {}) {
-    this.url = url.replace(/\/+$/, "");
-    const u = new URL(this.url);
-    const prefix = new URL(sessionBase(u)).pathname.replace(/\/$/, "");
-    // A bound fetch: the browser's must be called on the window.
-    const base = o.fetch ?? (((input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch);
-    // AuthFetch shakes hands at <origin>/.well-known/auth: under the skein's `/@<handle>` prefix, if the URL has one.
-    const f = prefix
-      ? ((input: string | URL | Request, init?: RequestInit) => {
-          const s = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-          const w = new URL(s);
-          if (w.origin === u.origin && w.pathname === "/.well-known/auth") w.pathname = `${prefix}/.well-known/auth`;
-          return base(input instanceof Request ? new Request(w, input) : w.href, init);
-        }) as typeof fetch
-      : base;
-    this.af = new AuthFetch(wallet, undefined, undefined, o.originator, {}, f);
-    this.fetchFn = f;
-    this.wallet = wallet;
-    this.originator = o.originator;
-  }
-
-  /**
-   * The session's peer, made here rather than by AuthFetch (#83): the stock
-   * AuthFetch's peer keeps the SDK's default cap on a message's payload
-   * (16 MiB counted at four per byte: about 4 MiB), and an install's
-   * `objects` message carries a module whole (the shell's coreutils is
-   * 10 MB). The peer takes `maxGeneralPayloadBytes: null`, the SDK's own
-   * option for leaving the capacity to the transport; the receiving front
-   * door judges what it takes. Such a request takes seconds to check and
-   * send, so it waits up to five minutes (the SDK's default is 30 s).
-   */
-  private ensurePeer(wallet: WalletInterface, originator?: string): Promise<void> {
-    this.peer ??= (async () => {
-      const origin = new URL(this.url).origin;
-      const peer = new Peer(wallet, new SimplifiedFetchTransport(origin, this.fetchFn, { requestTimeoutMs: 300_000 }), undefined, undefined, undefined, originator, { maxGeneralPayloadBytes: null });
-      await peer.ready;
-      (this.af.peers as Record<string, unknown>)[origin] = { peer, pendingCertificateRequests: [] };
-    })();
-    return this.peer;
-  }
-
-  /** The session, made (the handshake happens on the first request). */
-  async ready(): Promise<void> { await this.ensurePeer(this.wallet, this.originator); }
-
-  /** The identity key (hex) the other side's session answers as, once a request has been answered. */
-  peerIdentity(): string | undefined {
-    const p = (this.af.peers as Record<string, { identityKey?: string }>)[new URL(this.url).origin];
-    return p?.identityKey;
-  }
-
-  private async post(path: string, body: Record<string, unknown>): Promise<{ status: number; v: Record<string, unknown> }> {
-    await this.ensurePeer(this.wallet, this.originator);
-    const r = await this.af.fetch(`${this.url}${path}`, { method: "POST", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) as unknown as BodyInit });
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    let v: Record<string, unknown> = {};
-    try { v = dagCbor.decode(bytes) as Record<string, unknown>; } catch { v = { status: "error", description: new TextDecoder().decode(bytes) }; }
-    return { status: r.status, v };
-  }
-
-  /**
-   * A message to `recipient` (hex) in `box`: `body` a record (encoded here) or its dag-cbor bytes. Its id.
-   * The BRC-33 message alone (#126 step 4): the session proves who sends it, and nothing in it is signed.
-   */
-  async send(recipient: string, box: string, body: unknown): Promise<{ id: CID }> {
-    const bytes = body instanceof Uint8Array ? body : dagCbor.encode(body);
-    const to = Uint8Array.from(Buffer.from(recipient, "hex"));
-    const r = await this.post("/sendMessage", { message: { recipient: to, messageBox: box, body: bytes } });
-    if (r.status !== 200) throw new Error(`sendMessage ${box}: HTTP ${r.status} ${String(r.v.code ?? "")} ${String(r.v.description ?? "")}`.trim());
-    return { id: CID.parse(String(r.v.id ?? r.v.messageId)) };
-  }
-
-  /**
-   * A BRC-33 request with a JSON body on the session (`path` under the box URL, e.g. "/sendMessage"):
-   * what any BRC-100 wallet's BRC-104 client sends (`1sat authfetch POST <origin>/sendMessage --body @file`,
-   * the owner's admin messages as JSON, src/client/admin.ts messageJson). The status and the answer's text.
-   */
-  async postJson(path: string, json: string): Promise<{ status: number; text: string }> {
-    await this.ensurePeer(this.wallet, this.originator);
-    const r = await this.af.fetch(`${this.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: json });
-    return { status: r.status, text: await r.text() };
-  }
-
-  /** The messages in the caller's `box`, oldest first. */
-  async list(box: string): Promise<Listed[]> {
-    const r = await this.post("/listMessages", { messageBox: box });
-    if (r.status !== 200) throw new Error(`listMessages ${box}: HTTP ${r.status} ${String(r.v.description ?? "")}`);
-    return ((r.v.messages ?? []) as Array<{ messageId: string; sender: Uint8Array; body: Uint8Array; message?: Record<string, unknown> }>).map((m) => ({
-      messageId: m.messageId, sender: hexOf(m.sender), body: m.body, value: dagCbor.decode(m.body), ...(m.message ? { message: m.message } : {}),
-    }));
-  }
-
-  async ack(ids: string[]): Promise<void> {
-    if (!ids.length) return;
-    const r = await this.post("/acknowledgeMessage", { messageIds: ids });
-    if (r.status !== 200) throw new Error(`acknowledgeMessage: HTTP ${r.status} ${String(r.v.description ?? "")}`);
-  }
+/**
+ * A claim (SPEC 3: the kernel's claim operation on the image's claim row): a request signed by
+ * `wallet` to the instance `recipient`, POST /kernel/claim, body dag-cbor {handle?, domain?}. The
+ * kernel grants root to its sender and removes the claim row in the same step.
+ */
+export async function signClaim(wallet: Signer, recipient: Uint8Array | string, body: { handle?: string; domain?: string } = {}, originator?: string): Promise<RequestRecord> {
+  return await signRequest(wallet, { recipient, payload: requestPayload("POST", CLAIM_PATH, body) }, originator);
 }

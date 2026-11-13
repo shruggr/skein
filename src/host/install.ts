@@ -1,65 +1,36 @@
-// Installing an app (#72, #76, #77, #79, #143; docs/APPS.md §3): root's client. An
-// app is a tree (a directory or a git repository) with etc/app.json;
-// installing it into an instance is root-signed messages to the kernel's
-// admin boxes — the kernel's own operations on its tables — nothing else, and
-// no key (#143: the deployer is root, and grants itself nothing):
+// Installing an app (skein next, SPEC.md section 3; docs/APPS.md §3): root's client. An app is a
+// tree (a directory or a git repository) with etc/app.json; installing it into an instance is root's
+// requests to the kernel's operation rows (plan.ts KERNEL_PATHS, each returning data) — nothing else:
 //
-//   1. objects    the tree's git objects, the modules its bin/*.wasm carry (a
-//                 shell program's modules and support files too, #83), a program
-//                 record per program, and the **app record** (below)
-//                 — ≤ 1 MiB bundles; no bundle names a root (an app never
-//                 becomes `main`)
-//   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head, under its
-//                 own name (owner = the app).
-//   3. dispatch   one per route the manifest asks for (#77, #143): {op: "add", row: {transport,
-//                 address, prefix?, filters?, program?: <the handler's role's program record>,
-//                 fn?, …settings, app}} — a box under the app's (#128: "" or `<app>` → `<app>`,
-//                 "x" → `<app>/x`), an http address under /<app>/, a libp2p topic or protocol as
-//                 written; the filters named in full (an own filter `<app>.<name>`); a read
-//                 route (no handler) with no program.
-//   4. start      the manifest's `start.body`, into the app's box
+//   1. objects    {records: [{cid, bytes}]}: the tree's git objects, the modules its bin/*.wasm carry,
+//                 a program record per program, and the **app record** (below) — ≤ 1 MiB bundles
+//   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head
+//   3. route      one per row the manifest asks for: {op: "add", row} — the row as the kernel takes
+//                 it (manifest.ts rowOf: a path under /<app>/, an event name under the app's, the
+//                 handler "<app>.<role>.<fn>", its role and checks)
+//   4. grant      the call permissions the manifest asks for
 //
-// The **app record** is the head's root: the manifest as installed, so "what
-// does this head provide" is one read (`head("<app>/app")`, `get`):
+// The **app record** is the head's root: the manifest as installed —
 //
-//   {kind: "app", name, version, programs: {<role>: <program record CID>},
-//    routes: [<route as the manifest wrote it: relative addresses, handlers, filters as written>],
-//    filters?: {<filter>: <handler>}, roles?: {<role>: [<fn>…]},
-//    config?, provides, requires, start?, stop?, description?, tree: <the app's git tree>,
-//    state?: <the app's own state>}
+//   {kind: "app", name, version, programs: {<role>: <program record CID>}, roles?: {<role>: text},
+//    routes: [<rows as the manifest wrote them>], config?, provides, requires, calls?, services?,
+//    description?, tree: <the app's git tree>, state?: <the app's own state>}
 //
-// `state` is the app's: its handler advances the head to the record with
-// `state` replaced (the SDK's app.Call.setState). An install over an earlier
-// version carries `state` over, removes the routes the earlier record had and
-// the new one does not, and sends `start` again (the restart). Uninstall:
-// `stop`, then every route removed; the heads are left.
-//
-// **Write scope** (#77, #79): an app's programs write only heads under
-// `<app>/` (the kernel's rule, by the program record's `app`). No alias head,
-// no form before #77. Who may run an app's functions is its `roles`' and
-// root's grants (#143), never the install's.
-//
-// **Two paths to the tree** (#91; docs/APPS.md §3). This client reads it from
-// a directory or clones a repository itself (`readApp`, `fetchApp`:
-// `skein install`, #124; a coding-session tool). Or the instance already holds
-// it: the git app (shruggr/skein-git) cloned one commit into the store by
-// hash and answered {tree, app}; `readStoredApp` reads that tree out of the
-// store (reads are open), and the same `planInstall` rebuilds the app record
-// — whose CID must be the git app's `app` — with nothing left to send but
-// `head`, `dispatch` and `start`.
+// An install over an earlier version carries `state` over and removes the rows the earlier record
+// had and the new one does not. Uninstall: every row the app's handler names removed; the heads are
+// left. **Write scope**: an app's programs write only heads under `<app>/` (the kernel's rule).
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { CID } from "multiformats/cid";
-import { hashDir } from "../client/client.ts";
+import { hashDir } from "../client/bundle.ts";
 import { defaultIgnore } from "../dev/scan.ts";
 import { currentDispatch } from "../runtime/dispatch.ts";
 import { headTree } from "../runtime/heads.ts";
 import type { IndexStore } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
-import { addressBook } from "./deploy.ts";
 import { checkManifest } from "./manifest.ts";
 import { appHead, parseManifest, type AppRecord, type AppTree, type InstanceView } from "./plan.ts";
 
@@ -118,8 +89,6 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   return {
     store,
     identity: g.identity instanceof Uint8Array ? Buffer.from(g.identity).toString("hex") : String(g.identity),
-    programs: (g.programs ?? {}) as Record<string, CID>,
-    addressBook: await addressBook(store),
     heads,
     dispatch: (await currentDispatch(store)) ?? [],
   };

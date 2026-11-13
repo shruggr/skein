@@ -1,118 +1,60 @@
-// The host as a reverse proxy (#40): each instance is an HTTP server — its
-// front door (programs/frontdoor) — at an origin of its own, and the router
-// only picks the instance a request is for and forwards it. Routing comes
-// before authentication, because a BRC-104 handshake does not name its
-// recipient: the URL is the recipient. The router holds no sessions and no
-// mailbox: it keeps the hostname → instance map (host.db), the kernels it has
-// hydrated, the providers (the waker among them), the
-// feeds, the broadcaster, the fuel ledger.
+// The host (skein next, SPEC.md sections 1, 2, 4 and 8): a reverse proxy in front of its instances,
+// each at an origin of its own. The router picks the instance a request is for (its hostname, a
+// leading `/@<handle>`, the root instance at a hostname that is no instance's), decides whether the
+// arrival belongs there (the host's own concerns: routing, limits), and hands the instance ONE
+// request record — CHECK then COMMIT on the instance's worker (door.ts). The kernel never names the
+// carrier.
 //
-//   http://<handle>.localhost:<port>/…   an instance's origin (the Host header). The stock AuthFetch keeps one
-//                                         session per origin, and shakes hands at <origin>/.well-known/auth: this
-//                                         is the form it is served by. (SKEIN_INSTANCE_ORIGIN: another template.)
-//   http://<host>:<port>/@<handle>/…      the same instance for our own clients (a dev form): the router strips
-//                                         the prefix for the routes; the client signs the path it sent, and its
-//                                         handshake goes under the prefix (src/client/raw.ts).
-//   The host's own origin (a host name whose first label is no instance) is the host skein's BRC-169 server
-//   (#113): these requests go to the host skein, as any request goes to its instance, under the onboarding
-//   app's routes (shruggr/skein-onboard: it registers, certifies through the certifier provider, records and
-//   answers; DISCOVERY below):
-//   GET  /manifest.json                          → /onboard/manifest.json   BRC-169 §5.1
-//   GET  /.well-known/metanet-handles/resolve    → /onboard/resolve         BRC-169 §5.2
-//   GET  /.well-known/metanet-handles/search     → /onboard/search          BRC-169 §5.6
-//   POST /.well-known/auth                       → /.well-known/auth        the BRC-103 handshake (#135: a registration is signed)
-//   POST /account/register                       → /onboard/register        a handle's certificate (signed; no instance: its messagebox is the host skein's messagebox app)
-//   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
-//   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
-//   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
-//   GET  /skeins?key=<hex>                at the host's own origin: the skeins here whose head `grants` names the key
-//                                         among root's holders, [{handle, identity, url}] (no wallet token tracks them)
-//   GET  /.well-known/skein               at an instance's origin (its hostname, /@<handle>/, the root instance's): {handle,
-//                                         identity, origin, claimed} — claimed: its head `grants` names a root holder
-//   GET  /.well-known/skein-host          at every host name, an instance's too (#103): {origin, domain} — this
-//                                         router's origin and the handle domain (the onboarding app's
-//                                         config.onboard.domain), for a page an instance serves (the management
-//                                         site) to find the manifest and register
-//   GET  /<app>/.live/<topic>             at an instance's origin (#138): the liveness tool's beats for that app's
-//                                         liveness on the topic (liveness.ts), served by the host, no program:
-//                                         JSON [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer
-//                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
-//                                         Unsigned, nothing logged
-//   GET  /events/<name path>?after=<place>&limit=<n>&latest=1
-//                                         at an instance's origin (0.5.0, events.ts): the instance's event index,
-//                                         read from the store with no step and no fuel — the events under that
-//                                         name (a trailing `/`: every name the prefix starts), strictly after the
-//                                         place, the first n, or the last per name; newest last. JSON [{id: the
-//                                         event's place (<s>.<i>.<thread>: 0.8.0, the step number), event: its name,
-//                                         record: the record as DAG-JSON}]. With Accept: text/event-stream the same
-//                                         read as a Server-Sent Events stream (`id`, `event`, `data`), then each
-//                                         as handed over (its place in the kernel's notice: no store read);
-//                                         Last-Event-ID is `after`. 400 for a bad name or parameter. Unsigned,
-//                                         nothing logged; each answer or message metered as a read. A stream
-//                                         closes when the instance stops
+//   http://<handle>.localhost:<port>/…   an instance's origin (the Host header; SKEIN_INSTANCE_ORIGIN:
+//                                         another template). The stock AuthFetch keeps one session per
+//                                         origin and shakes hands at <origin>/.well-known/auth
+//   http://<host>:<port>/@<handle>/…      the same instance (a dev form): the request's path is handed
+//                                         over exactly as sent — the kernel strips `/@<its handle>`
+//   POST /.well-known/auth                at an instance's origin: the BRC-103 handshake, answered by the
+//                                         host for the instance (brc104.ts): the stock self-checking
+//                                         nonce under the instance's key, the session in host memory
+//                                         only (1024 per instance, the oldest evicted), nothing logged
+//   a request with x-bsv-auth-* headers   the BRC-104 signature gathered into the record's `signature`
+//                                         (scheme brc104); on a session the host no longer holds: 401
+//                                         before the kernel is asked (the stock client shakes hands
+//                                         again); the answer signed on the session by the host
+//   any other request                     no `signature`: a content-proven row takes it (a check proves
+//                                         it), or the kernel refuses it
+//   GET  /skeins?key=<hex>                at the host's own origin: the skeins here whose head `grants`
+//                                         names the key among root's holders, [{handle, identity, url}]
+//   GET  /.well-known/skein               at an instance's origin: {handle, identity, origin, claimed}
+//   GET  /.well-known/skein-host          at every host name: {origin, domain}
+//   GET  /<app>/.live/<topic>             at an instance's origin (#138): the liveness tool's beats
+//   GET  /events/<name path>              at an instance's origin (events.ts): the instance's event
+//                                         index, read from the store (JSON, or an SSE stream)
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
-// The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
-// (a durable queue in host.db, retries, one Arcade session) and routes what
-// Arcade says of a transaction to every instance whose state holds it (a
-// `has` of its CID, cached): a proof as an unsigned event in box `chain`,
-// any other status as a signed message from the status provider.
+// The request is answered when its handler answers: a handler that awaits holds the client's
+// connection until the kernel's `answered` notice (the connection is the only timer). A read row is
+// CHECK only. The host's own requests (the install's, root's commands, the status service's
+// rejection) are `signed` requests (src/client/raw.ts signRequest) through the same path
+// (messageLocal); a BEEF the host fetched (sync) goes to the overlay's sync row as plain BEEF
+// (submitBeef). The host's own facts (the chain pointer, a proof, a deploy BEEF) are events
+// (admitEvent: CHECK then COMMIT of {event, name}).
 //
-// A request for an instance goes to one of its two doors (#135, frontdoor.ts
-// serveHttp): a read — a path the instance's reads head names — is served by
-// a `call` (no entry; its fuel metered); a signed request for a message route
-// (#68, #66) is appended as received — one `request` entry, verified by
-// nothing here — and the client's connection held until the thread the kernel
-// steps the front door on comes to rest; its answer, signed on the session
-// inside, is the response. Past `answerWaitMs`, or at shutdown, 503 +
-// Retry-After. An unsigned request goes through the door only at an open row
-// whose filter validates the payload (#135: signed or validated; answered
-// plain); otherwise for a message route it is 401, for nothing 404, answered
-// without an entry.
+// What an instance's steps hand over (the kernel's `emit` notices, providers.ts Emits): broadcasts to
+// the broadcaster (arc.ts), topic membership to the libp2p node (p2p.ts: one node per key; gossip is
+// the host's, nothing of it handed to the kernel), every fact to the event streams and the host's
+// followers: the holder map (`chain/tx/<txid>`), the gossip `admit` (the overlay's admitted fact).
+// A direct libp2p stream carries a request on ONE protocol, /skein/request/1.0.0: a frame is the
+// dag-cbor request record, the answer frame the handler's answer (p2pInbound: the same CHECK/COMMIT
+// path as HTTP).
 //
-// What the instances send out goes through the host's providers (#70,
-// providers.ts): each kernel hands over the messages its steps emitted
-// (unsigned, #126 step 4) to a `local` provider or a libp2p recipient, and the provider's
-// answer comes back as a signed message, a `local` request entry. The HTTP
-// proxy (`fetch`) answers a URL of this host's own in process (the same
-// path, no socket) and sends any other out; the waker keeps the instances'
-// deadlines and their shells' sleeps (#69); the status provider tells the instances that subscribe
-// to it how their transactions stand (#65); the libp2p node is the
-// instance's own (p2p.ts); the instance manager (#90) creates, starts and
-// stops instances for the host skein alone (host.db `host_settings`:
-// `skein-host init` made it; createInstance claims a new instance before
-// its row is enabled, which publishes its hostname); the certifier (#113) signs handle
-// certificates for the host skein alone. Each genesis it writes names the providers' keys
-// in its address book (`addressBook`). A kernel's broadcast events go to the
-// broadcaster (#65).
-//
-// The libp2p host (#51, p2p.ts) is the router's too: one node per instance
-// whose genesis declares `libp2p` or whose dispatch table has a libp2p row
-// (#72, #77: a topic or a protocol), each topic message and stream
-// frame one request entry (`p2pInbound`: the verdict or the frame's answer
-// read off its thread and handed back to GossipSub or the stream). The node
-// follows the dispatch table: once the kernel has processed what the host
-// handed it (`settle`), the router reads the head (a kernel read), and when
-// it moved, declares the instance's libp2p config again — an install's
-// topics subscribed, an uninstall's unsubscribed, live (`syncDispatch`).
-// The host's headers (skein next, SPEC 8): ONE intake (`takeHeaders`) — the
-// Teranode tracker (teranode.ts) is its source — validates and updates the
-// host chain once (the kernel's, per database: hostHolders), then every
-// loaded instance whose table takes events in box `chain` gets the pointer
-// event {kind: "chain", root, height} (`chainBirth`); an instance is sent the
-// first one inside its load, before it is handed to anyone. No instance has a
-// header source of its own, and the image carries no chain.
-//
-// Nothing here is an instance's clock but its providers (#69): the waker
-// answers a step's deadline.
+// The host's headers (SPEC 8): ONE intake (`takeHeaders`) — the Teranode tracker and SKEIN_HEADERS_URL
+// feed it — validates and updates the host chain once, then every loaded instance whose table takes
+// the event `chain` gets the pointer event {kind: "chain", root, height}; an instance is sent the first
+// one inside its load, before it is handed to anyone.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { randomBytes } from "node:crypto";
-import { encode as encodeBlock } from "../runtime/cid.ts";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
 import { short, stampMs } from "../runtime/log.ts";
@@ -121,43 +63,34 @@ import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { DEFAULT_BOX, txCid } from "./feeds.ts";
 import { hashOf, TeranodeTracker } from "./teranode.ts";
 import { HttpHeaders } from "./headers-source.ts";
-import { takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
-import { isSet, parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
+import { rowApp, takesEvent, type DispatchRow } from "../runtime/dispatch.ts";
+import { parseRocksSpec, parseSqliteSpec, storeSpec } from "../runtime/index-store.ts";
 import { WasmHost } from "./wasm-kernel.ts";
 import { openStoreFile, storeExists } from "./stores.ts";
 import { rootOf } from "./install.ts";
-import { OVERLAY_ROLE } from "./manifest.ts";
-import { appHead } from "./plan.ts";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { bootStore, imageSource, isOverlayImage, namedImageSource, type BootSource, type Booted } from "./boot.ts";
-import { admitBody, admitOf, chainHeader, chainHolds, OverlaySync, SYNC_PROTOCOL } from "./sync.ts";
-import { ANSWER_WAIT_MS, appendRequest, cidOf, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { keyBytes, keyHex, type AddressSeed, type Genesis2Config } from "./genesis.ts";
+import { admitBody, admitOf, chainHeader, chainHolds, OverlaySync } from "./sync.ts";
+import { Answers, carry, headerMap, httpOf, requestRecord, unavailable, type Outcome, type Payload } from "./door.ts";
+import { DoorAnswered } from "./door-answer.ts";
+import { handshake, HANDSHAKE_PATH, Sessions, sessionGone, signReply, type HttpAnswer } from "./brc104.ts";
+import { keyBytes, keyHex, type GenesisConfig } from "./genesis.ts";
 import { HANDLE, pathOnly, TOKEN_HANDLE, topicsOf, validHandle, type HostDb, type InstanceRow } from "./instances.ts";
-import { signClaim } from "../client/raw.ts";
-import { DoorAnswered, Kernel, KernelHost, type HostChainTip, type KernelSurface } from "./kernel.ts";
+import { CLAIM_PATH, MESSAGE_KEY_ID, MESSAGE_PROTOCOL, signClaim, signRequest, type RequestPayload } from "../client/raw.ts";
+import { KernelHost, type Answer, type Answered, type HostChainTip, type KernelSurface, type RequestRecord } from "./kernel.ts";
 import { foldLiveness, LIVENESS_MAX_MS, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { EventStreams, eventsPath, eventsQuery, sseMessage, type Delivered, type EventStore } from "./events.ts";
-import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, emittedEvents, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
+import { beaconEvent, beaconsOf, LOOPBACK_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, REQUEST_PROTOCOL, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type Outgoing, type ProviderName } from "./providers.ts";
+import { Emits, type Outgoing, type ServiceName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
-import { Deliverer } from "./deliver.ts";
-import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
-
-type Named = { handle: string; domain: string };
 
 export interface RouterOptions {
   db: HostDb;
   /** Each row's signer: the wallet its kernel's `wallet` import is answered from. */
   walletFor(row: InstanceRow): Promise<WalletInterface> | WalletInterface;
-  /** A new agent's genesis: its owner (required to write one), the inference peer, their names. */
-  owner?: string;
-  infer?: string;
-  ownerHandle?: Named;
-  inferHandle?: Named;
   fuelPerStep?: string;
   /** A new genesis's defaults: what a tree's config leaves unset (genesis.ts mergeDefaults). */
   genesis?: { defaults?: Record<string, string> };
@@ -182,12 +115,8 @@ export interface RouterOptions {
   arcFetch?: typeof fetch;
   /** The broadcaster's queue: how soon a broadcast Arcade did not take is posted again (ms, doubling; default 1 000 → 300 000). */
   arcRetry?: { min: number; max: number };
-  /** The HTTP proxy's network (#70, the `fetch` provider) for URLs that are not this host's; default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
-  http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears). */
   idleMs?: number;
-  /** How long a synchronous client waits on its request's thread (#66) before 503 + Retry-After (ms); default SKEIN_ANSWER_WAIT_MS, else two minutes. */
-  answerWaitMs?: number;
   /** Where a new instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
   /**
@@ -204,17 +133,15 @@ export interface RouterOptions {
   sqliteStore?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
   instanceOrigin?: string;
-  /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
+  /** This host's own origin; default http://127.0.0.1:{port}. */
   origin?: string;
   /** The port it serves on, for origins named before it listens (a boot, `skein-host add`); listening sets it. */
   port?: number;
-  /** The owner's messagebox URL for a new agent's genesis (SKEIN_OWNER_MESSAGEBOX): wherever the owner's mail is kept, this host's own messagebox app included. Unset: none. */
-  ownerMessagebox?: string;
   /** The network the whole host runs on (SKEIN_NETWORK): every genesis it makes has it as `defaults.walletNetwork`. */
   network?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
   ledgerMs?: number;
-  /** Tests: the clock entries are stamped with (and deadlines fall due by). */
+  /** Tests: the clock entries are stamped with. */
   now?: () => Stamp;
   /** Lines, by source: an instance's handle, or "router". */
   log?(source: string, line: string): void;
@@ -230,25 +157,18 @@ export interface RouterOptions {
    */
   hostPeerKey?: PrivateKey;
   /**
-   * A provider's key (#70, signer.ts providerKey: the HTTP proxy `fetch`, the
-   * `waker`, `libp2p`, `status`), which each new genesis's address
-   * book names. Absent: keys of this router's own, made fresh (a test's; a
-   * restarted router would not be the providers its instances know).
+   * A host service's key (SPEC 8: each service signs with its OWN key; none is root): signer.ts
+   * providerKey — `status`, the status service, whose rejections go to the chain app's rejected row
+   * under the role `chain.status` (granted in each genesis this host writes). Absent: a key of this
+   * router's own, made fresh (a test's; a restarted router would hold another).
    */
-  providerKeyFor?(name: ProviderName): PrivateKey;
-  /**
-   * Tests: the host's own origin's BRC-169 requests (DISCOVERY) answered
-   * when the host has no host skein — a fixture resolver over host.db
-   * (testhost.ts). A host's are always the host skein's.
-   */
-  discovery?(req: RouterRequest, url: URL): Promise<RouterResponse | undefined>;
+  providerKeyFor?(name: ServiceName): PrivateKey;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
   /**
    * #160, #162: a one-key host's shared key's wallet (signer.ts Signer.oneKey). With it, an instance the
-   * host creates (createInstance) with no forwarded claim is claimed by the host itself: the claim
-   * message signed by this key (its owner), appended as a forwarded claim is. Absent (a master-key
-   * host): a create needs the owner's own signed claim, as before.
+   * host creates (createInstance, `needsClaim`) with no claim given is claimed by the host itself: the
+   * claim request signed by this key (its owner), handed in as any claim is.
    */
   claimer?: WalletInterface;
   /** SKEIN_ROOT_INSTANCE: the instance served at `/` of any hostname that is no instance's (the standalone's one app at localhost:<port>/). */
@@ -272,10 +192,10 @@ export interface RouterOptions {
 
 interface Loaded {
   row: InstanceRow; kernel: KernelSurface; identity: string; wallet: WalletInterface;
-  /** The genesis (its `libp2p`), and the dispatch table's tip as the libp2p node last followed it (#72, #77). */
+  /** The genesis, and the route table's tip as the host last followed it. */
   genesis: Record<string, unknown>;
   dispatchTip?: string;
-  /** The dispatch table as last read (syncDispatch). */
+  /** The route table as last read (syncDispatch). */
   rows?: DispatchRow[];
   /** The apps' subscriptions (#119): folded from the log at hydrate, then followed live. */
   subs: Subscription[];
@@ -288,7 +208,6 @@ interface Loaded {
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
 export interface RouterRequest {
   method: string; url: string; headers: Record<string, string>; body: Uint8Array;
-  /** The instance whose `http` this is (none for a socket's). */ from?: string;
   /**
    * 0.3.2: on a socket's request (Router.handler), aborted when the client's connection closes
    * before the answer is written; never fired after the answer. In process: none.
@@ -311,8 +230,7 @@ export const HEADERS_RUN = 2016;
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
-/** #148: an app's event stream, at an instance's origin. */
-/** The apps a dispatch table names (an app with no row left is uninstalled). */
+/** The apps a route table names (an app with no row left is uninstalled). */
 /**
  * The txid of the signed transaction a frame's answer carries (skein 0.9.0, rule 10): the answer dag-cbor, a map
  * whose `tx` is the bytes of a transaction (the amm-validator's accepted swap, `{ok, tx, txid, beef}`); else
@@ -326,31 +244,12 @@ export function signedTxOf(body: Uint8Array): string | undefined {
   try { return Transaction.fromBinary([...tx]).id("hex"); } catch { return undefined; }
 }
 
-const appsOf = (rows: DispatchRow[]): Set<string> => new Set(rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
+const appsOf = (rows: DispatchRow[]): Set<string> => new Set(rows.map(rowApp).filter((x): x is string => typeof x === "string"));
 export { HANDLE };
 /** Handles no instance may take on this host (H3), besides the router origin's own first label (Router.reserved): `id` (the router's own in production) and `host` (the host skein's). */
 export const RESERVED_HANDLES = new Set(["id", "host"]);
-/** The registration signature (#113: the onboarding app checks it): [2, "skein register"], key ID the username, counterparty anyone, over `register <username>@<domain>`. */
-export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
-/** A handle's domain as a manager's `create` takes it: a host name, lower case. */
+/** A handle's domain as a create takes it: a host name, lower case. */
 const DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
-/** The onboarding app (shruggr/skein-onboard, #90, #113): the host skein's app that serves BRC-169 on the host's own origin. */
-export const ONBOARD_APP = "onboard";
-/**
- * The host's own origin's BRC-169 requests (#113) → the host skein's routes
- * (the onboarding app's, under /onboard/): method + path → route.
- */
-export const DISCOVERY: Record<string, string> = {
-  "GET /manifest.json": `/${ONBOARD_APP}/manifest.json`,
-  [`GET ${RESOLVE_PATH}`]: `/${ONBOARD_APP}/resolve`,
-  [`GET ${SEARCH_PATH}`]: `/${ONBOARD_APP}/search`,
-  "POST /account/register": `/${ONBOARD_APP}/register`,
-  // #135: a registration is a signed request: the stock client's handshake at the host's own origin is the host skein's.
-  "POST /.well-known/auth": "/.well-known/auth",
-  "POST /account/profile": `/${ONBOARD_APP}/profile`,
-};
-/** The paymail PKI (`GET /bsvalias/id/<handle>[@<domain>]`) → the app's prefix row `/onboard/bsvalias/id/…`. */
-export const PAYMAIL_PREFIX = "/bsvalias/id/";
 /** The BRC-169 domain a host name stands for: a dev router at a loopback address answers for `localhost`. */
 export const domainOf = (hostname: string): string => {
   const h = hostname.toLowerCase();
@@ -366,88 +265,30 @@ export const hostDomain = (origin: string): string => {
   try { return domainOf(new URL(origin.replace("{port}", "0")).hostname); } catch { return "localhost"; } // an origin that is no URL: the loopback's
 };
 
-/**
- * SKEIN_HTTP=fetch: the HTTP proxy's requests (#70, the `fetch` provider)
- * performed for real; `timeoutMs` (default 30 000) bounds the whole exchange,
- * `maxBytes` (#91) the response body: reading stops past it, and the request
- * fails.
- */
-export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new Error(`timed out after ${req.timeoutMs ?? 30_000} ms`)), req.timeoutMs ?? 30_000);
-  try {
-    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: ac.signal });
-    const headers = Object.fromEntries(r.headers.entries());
-    if (req.maxBytes === undefined || !r.body) return { status: r.status, headers, body: new Uint8Array(await r.arrayBuffer()) };
-    const chunks: Uint8Array[] = [];
-    let n = 0;
-    for await (const c of r.body as unknown as AsyncIterable<Uint8Array>) {
-      n += c.length;
-      if (n > req.maxBytes) { ac.abort(); throw new Error(tooLarge(req.maxBytes)); }
-      chunks.push(c);
-    }
-    return { status: r.status, headers, body: new Uint8Array(Buffer.concat(chunks)) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * The warning for an agent whose genesis names no owner messagebox
- * (`defaults.ownerMessagebox`): its sends to the owner — every answer to him —
- * fail, since nothing else tells it where his mailbox is. Undefined if it names one.
- */
-export function noOwnerMessagebox(genesis: Record<string, unknown> | null | undefined): string | undefined {
-  // An image (#89, #143) names no root: the claim brings the claimant's messagebox (into the address book).
-  if (genesis && genesis.root === undefined) return undefined;
-  const d = genesis?.defaults as Record<string, unknown> | undefined;
-  if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
-  return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
-    "Set SKEIN_OWNER_MESSAGEBOX (the owner's messagebox URL), then re-genesis it (a new store)";
-}
-
-/** A sendMessage request's box and recipient, for the delivery log line ("" if the body is neither CBOR nor JSON). */
-function describeDelivery(req: HttpRequest): string {
-  const b = req.body ?? new Uint8Array();
-  let m: { messageBox?: unknown; recipient?: unknown } | undefined;
-  try { m = (dagCbor.decode(b) as { message?: typeof m }).message; } catch {
-    try { m = (JSON.parse(new TextDecoder().decode(b)) as { message?: typeof m }).message; } catch { /* neither: the line names no box; the delivery's result is logged beside it */ }
-  }
-  if (!m) return "";
-  const to = m.recipient instanceof Uint8Array ? Buffer.from(m.recipient).toString("hex") : typeof m.recipient === "string" ? m.recipient : "";
-  return `${String(m.messageBox ?? "?")}${to ? ` for ${short(to)}` : ""}`;
-}
-
-/** An error answer's description (JSON {description | error}), else its first 200 bytes. */
-function errorOf(body: Uint8Array): string {
-  const t = new TextDecoder().decode(body.subarray(0, 2000));
-  try { const j = JSON.parse(t) as { description?: unknown; error?: unknown }; return String(j.description ?? j.error ?? t.slice(0, 200)); } catch { return t.slice(0, 200); } // not JSON: the text itself is the description
-}
-
 export class Router {
   readonly o: RouterOptions;
   /** The host's broadcaster (#58, #65): present when the host has an Arcade. */
   readonly arc?: Broadcaster;
-  /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
+  /** The libp2p host (#51): one node per key, for the instances whose apps declare topic membership. */
   readonly p2p?: P2PHost;
   /** shruggr/skein#150: overlay sync over the libp2p node (sync.ts). */
   readonly sync?: OverlaySync;
-  /** The host's providers (#70): what carries the instances' messages out. */
-  readonly providers: Providers;
-  /** #148: the pages' subscriptions to their apps' emitted events (GET /<app>/.events), per instance. */
+  /** What the instances' steps hand over (the `emit` notices: broadcasts, membership, facts). */
+  readonly emits: Emits;
+  /** #148: the pages' subscriptions to their apps' emitted events, per instance. */
   readonly events: EventStreams;
-  /** The certifier (#100, #113): signs the BRC-169 handle certificates, for the host skein's onboarding app (the `certifier` provider). */
-  readonly certifier: ProtoWallet;
-  /** #157: the `deliver` intention's carrier (BRC-103/104, the sessions the host keeps). */
-  readonly deliverer: Deliverer;
+  /** BRC-103: the sessions the host keeps for its instances (memory only, brc104.ts). */
+  readonly sessions = new Sessions();
+  /** The kernels' `answered` notices, by entry (door.ts): a request whose handler awaits waits here. */
+  readonly answers = new Answers();
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   /** #156: the host chain record each running instance was last sent (a `chain` event), by handle; cleared at each start. */
   private sentChain = new Map<string, string>();
-  /** Rows being created (#90): hydrated before their hostname is published (disabled until claimed). */
+  /** Rows being created: hydrated before their hostname is published (disabled until claimed). */
   private unpublished = new Set<string>();
   private queues = new Map<string, Promise<unknown>>();
-  /** The libp2p nodes following their dispatch tables (#72: syncDispatch after a settle). */
+  /** The libp2p nodes following their route tables (syncDispatch after a settle). */
   private syncing = new Set<Promise<unknown>>();
   private idleTimer?: ReturnType<typeof setInterval>;
   private ledgerTimer?: ReturnType<typeof setInterval>;
@@ -455,10 +296,10 @@ export class Router {
   private owed = new Map<string, { calls: number; fuel: number }>();
   private stopped = false;
   private closing?: Promise<void>;
-  /** Settles when the router starts shutting down: every client still waiting on a thread is answered 503 (#66). */
+  /** Settles when the router starts shutting down: every client still waiting on an answer is answered 503. */
   private stopping: Promise<void>;
   private stopNow!: () => void;
-  /** Requests being forwarded (their clients held on a thread). */
+  /** Requests being carried (their clients held until an answer). */
   private inflight = new Set<Promise<RouterResponse>>();
   servers: Server[] = [];
   port = 0;
@@ -474,8 +315,8 @@ export class Router {
   private readonly p2pConfig: P2PHostConfig;
   /** The one header intake (SPEC 8), one run at a time: the host chains, then the instances' pointer events. */
   private intake: Promise<unknown> = Promise.resolve();
-  /** The host's provider keys. */
-  private readonly providerKey: (name: ProviderName) => PrivateKey;
+  /** The host's service keys (SPEC 8: each its own; none root). */
+  private readonly serviceKey: (name: ServiceName) => PrivateKey;
 
   /** The one-process kernels this router holds (#158), by database directory. */
   private kernelHosts = new Map<string, KernelHost>();
@@ -505,15 +346,15 @@ export class Router {
     this.o = o;
     if (o.rocksStore) this.kernelHost(o.rocksStore); // started with the router: the host's reads go through it (stores.ts)
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
+    // Without the host's own service keys: a router's own, fresh (a test's).
+    const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
+    this.serviceKey = o.providerKeyFor ?? ((n: ServiceName) => own!.derivePrivateKey([2, "skein provider"], n, "self"));
     if (o.arc) {
       this.arc = new Broadcaster({
         arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, ...(o.arcRetry ? { retry: o.arcRetry } : {}), log: (s, l) => this.say(s, l),
-        admit: (h, box, ev) => this.admitEvent(h, box, ev),
-        status: async (h, body, subject) => {
-          const id = this.o.db.get(h)?.identity;
-          if (!id) throw new Error("its identity is not known yet");
-          await this.providers.send(h, "status", keyBytes(id), "chain/status", body, subject);
-        },
+        admit: (h, _box, ev) => this.offerProof(h, ev),
+        // SPEC 6 [D]: only `rejected` rests on someone's word — a request signed by the host's STATUS service key to the chain app's rejected row.
+        status: (h, body) => this.statusRequest(h, body),
         now: () => stampMs(this.now()),
         // SPEC 8: who holds a transaction is the host's holder map (followed from the `chain/tx/<txid>` facts): no kernel started to ask.
         holders: (txid) => this.holdersOf(txid),
@@ -528,7 +369,7 @@ export class Router {
         keyOf: o.peerKeyFor, discoveryMs: o.libp2pDiscoveryMs,
         inbound: (h, c) => this.p2pInbound(h, c),
         log: (s, l) => this.say(s, l),
-        // #126: a beacon's beat signed by the instance's signer, as an intention request is.
+        // #126: a beacon's beat signed by the instance's signer.
         sign: (h, data) => this.signAs(h, data),
         identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
         beat: (h, topic, b) => { this.sync?.beat(h, topic, b); void this.rememberPeer(h, topic, b.from); },
@@ -540,63 +381,37 @@ export class Router {
         overlayOf: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.app,
         local: (h, app, fn, query) => this.overlayRead(h, app, fn, query),
         ownBeat: (h, liveTopic) => this.loaded.get(h)?.beacons.find((b) => b.topic === liveTopic)?.body,
-        // skein 0.6.1 (D10): a fetched BEEF goes in by the one submit path — the submit message to the instance itself.
-        submit: (h, app, beef, topic) => this.submitAsSelf(h, app, beef, topic),
-        // skein 0.6.0 (D3): the pull's proof for a held transaction, as the broadcaster's proof event (arc.ts `proofOf`).
+        // SPEC 8 [P]: a BEEF the host fetched from a peer goes to the overlay's sync row as plain BEEF, no signature.
+        submit: (h, app, beef) => this.submitBeef(h, syncPath(app), beef),
         holdsTx: async (h, txid) => {
           const row = this.o.db.get(h);
           if (!row || !storeExists(storeSpec(row))) return false;
           const st = openStoreFile(storeSpec(row), { readOnly: true });
           try { return await chainHolds(st, txid); } finally { st.close(); }
         },
-        proof: async (h, txid, path) => { await this.admitEvent(h, "chain", { kind: "proof", subject: txCid(txid), txid, path }); },
+        proof: async (h, txid, path) => { await this.offerProof(h, { kind: "proof", subject: txCid(txid), txid, path }); },
         header: async (h, height) => {
           const row = this.o.db.get(h);
           if (!row || !storeExists(storeSpec(row))) return undefined;
           const st = openStoreFile(storeSpec(row), { readOnly: true });
           try { return await chainHeader(st, height); } finally { st.close(); }
         },
-        request: (h, peer, body) => p2pHost.request(h, peer, SYNC_PROTOCOL, body),
+        // The peer's overlay's read rows, asked over the one request protocol (SPEC 7 [P]): a frame is a request record.
+        request: (h, peer, body) => p2pHost.request(h, peer, REQUEST_PROTOCOL, body),
         beats: (h, liveTopic) => p2pHost.live.live(h, liveTopic),
         self: (h) => p2pHost.peerId(h),
         log: (s, l) => this.say(s, l),
       });
     }
-    // Without a host's own provider keys: a router's own, fresh (a test's).
-    const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
-    const keyOf = o.providerKeyFor ?? ((n: ProviderName) => own!.derivePrivateKey([2, "skein provider"], n, "self"));
-    this.providerKey = keyOf;
-    // The certifier key is the certifier provider's (signer.ts certifierKey: providerKey("certifier")).
-    this.certifier = new ProtoWallet(keyOf("certifier"));
-    const p2p = this.p2p;
-    this.deliverer = new Deliverer({ http: (req, from) => this.http(req, from), log: (s, l) => this.say(s, l) });
     this.events = new EventStreams({
       open: (h) => { const row = this.o.db.get(h); return row && storeExists(storeSpec(row)) ? openStoreFile(storeSpec(row), { readOnly: true }) as EventStore : undefined; },
     });
-    this.providers = new Providers({
-      keyOf,
-      append: (h, pkg) => this.appendLocal(h, pkg),
-      identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
-      sign: (h, data) => this.signAs(h, data),
-      fetch: (req, from) => this.http(req, from),
+    const p2p = this.p2p;
+    this.emits = new Emits({
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
-      // #148: every fact to the event streams; SPEC 8: the host follows `chain/tx/<txid>` (the holder map) and the overlay's `admitted` (the gossip admit).
+      // #148: every fact to the event streams; SPEC 8: the host follows `chain/tx/<txid>` (the holder map) and the overlay's admitted fact (the gossip admit).
       emitted: (h, rec, place) => { this.events.emitted(h, rec, place); this.followFact(h, rec); },
-      deliver: (h, id, rec) => this.deliver(h, id, rec),
-      // #90: the instance manager acts for the host skein alone.
-      manager: {
-        from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
-        request: (box, body) => this.manage(box, body),
-      },
-      // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
-      certifier: (box, body) => certify(this.certifier, box, body),
-      ...(p2p ? {
-        p2p: {
-          publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
-        },
-      } : {}),
-      now: () => stampMs(this.now()),
       log: (s, l) => this.say(s, l),
     });
     const idle = o.idleMs ?? 0;
@@ -694,14 +509,13 @@ export class Router {
   stop(): Promise<void> { return this.close(); }
 
   /**
-   * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for
-   * `skein-host run`; mode 0600, no HTTP route): a signed message from the
-   * client on this machine (messageLocal). Removed by `close()`.
+   * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for `skein-host run`; mode 0600, no
+   * HTTP route): a signed request from the client on this machine (messageLocal). Removed by `close()`.
    */
   async listenControl(path: string): Promise<void> {
     if (this.stopped) throw new Error("the router is stopping");
     const server = await listenControl(path, {
-      message: async (h, m, body) => (await this.messageLocal(h, m, body)).toString(),
+      message: async (h, bytes) => { const r = await this.messageLocal(h, bytes); return { entry: r.entry.toString(), status: r.answer.status, body: r.answer.body }; },
     });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
@@ -710,7 +524,7 @@ export class Router {
   private async shutdown(): Promise<void> {
     this.stopped = true;
     this.sync?.stop();
-    // Clients waiting on a thread are answered 503 + Retry-After before the servers close (#66).
+    // Clients waiting on an answer are answered 503 + Retry-After before the servers close.
     this.stopNow();
     if (this.inflight.size) {
       await Promise.all([...this.inflight].map((p) => p.catch(() => {}))); // each answers its own client (a 503 now): this only waits for them
@@ -723,7 +537,7 @@ export class Router {
     this.servers = [];
     if (this.control) closed.push(closeControl(this.control.server, this.control.path));
     this.control = undefined;
-    this.providers.stop();
+    this.emits.stop();
     this.events.stop();
     await Promise.all([this.arc?.stop(), this.tracker?.stop(), this.headersSource?.stop()]);
     await Promise.all([this.p2p?.stop(), this.hostP2p !== this.p2p ? this.hostP2p?.stop() : undefined]); // #156: the host node with them
@@ -739,107 +553,126 @@ export class Router {
     await Promise.all(closed);
   }
 
-  /**
-   * A plain entry (#29, #65): a self-validating event from the host's wiring
-   * (a header feed, the broadcaster's proof), admitted into the instance in
-   * `box` with its record beside the entry (#164: the kernel puts it — after
-   * the door, when `box`'s event route names kernel.beef: its BEEFs decoded
-   * and checked, the bytes never stored; a BUMP that does not check, or no
-   * BEEF, is turned away: DoorAnswered, thrown, nothing written). The kernel
-   * routes it by its `subject` to the thread awaiting that record, else to
-   * `box`'s event route.
-   */
-  async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
-    return await this.serial(handle, async () => {
-      const l = await this.hydrate(handle);
-      const e = await l.kernel.admit({ box, event: cidOf(event) } as never, { event }, this.now());
-      this.settle(l);
-      return e;
-    });
-  }
-
-  /**
-   * #157: a `deliver` intention from `handle`, carried (deliver.ts: BRC-103/104 with the instance's
-   * key) and its answer admitted in box `deliver` — it stands on its own at the door (the server's
-   * signature). No answer: nothing admitted, the thread rests (offered again at its next start).
-   */
-  async deliver(handle: string, id: CID, rec: Record<string, unknown>): Promise<boolean> {
+  /** One arrival through `handle` (door.ts carry): CHECK then COMMIT on its worker, then its answer; `signal` the client's connection. */
+  private async carryIn(handle: string, arrival: { request: RequestRecord } | { event: Record<string, unknown>; name: string }, signal?: AbortSignal): Promise<Outcome> {
     const l = await this.hydrate(handle);
-    const mail = await l.kernel.store.get(rec.message as CID) as MailRecord;
-    const body = dagCbor.encode(await l.kernel.store.get(mail.body));
-    const ans = await this.deliverer.carry(handle, l.wallet, id, rec as never, mail, body);
-    if (!ans) return false;
-    try {
-      await this.admitEvent(handle, "deliver", ans);
-      this.say(handle, `deliver → ${String(rec.url)}: HTTP ${ans.status}, the signed answer admitted`);
-      return true;
-    } catch (e) {
-      this.say(handle, `deliver → ${String(rec.url)}: the answer turned away: ${(e as Error).message}`);
-      return false;
-    }
+    const o = await carry(l.kernel, arrival, { now: this.now(), answers: this.answers, signal, stop: this.stopping });
+    if (o.kind === "read") this.charge(handle, o.principal ? keyHex(o.principal) : "", "read", o.fuel);
+    if (o.kind === "refused") this.charge(handle, o.refusal.principal ? keyHex(o.refusal.principal) : "", "refused", o.refusal.fuel);
+    if (o.kind !== "refused" && o.kind !== "read") this.settle(l);
+    return o;
   }
 
   /**
-   * A message for an instance (#70): a provider's signed answer, a forwarded
-   * claim, or the loopback's own emit, appended as received — a `local`
-   * request entry, {kind: "message", message, body}; the front door checks it
-   * (the signature, or for the loopback the record in the store) and routes
-   * it. Nobody waits on it.
+   * An event from the host's own wiring (SPEC 4: the chain pointer, a merkle proof, a deploy BEEF):
+   * `{event, name}` through CHECK (the event row's checks — the chain app's proof or BEEF check) then
+   * COMMIT, in the order the host made them (serial). → the entry. Refused (nothing written):
+   * DoorAnswered, thrown.
    */
-  async appendLocal(handle: string, pkg: Record<string, unknown>): Promise<CID> {
+  async admitEvent(handle: string, name: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
-      const l = await this.hydrate(handle);
-      const e = await appendRequest(l.kernel, "local", pkg, this.now());
-      this.settle(l);
-      return e;
+      const o = await this.carryIn(handle, { event, name });
+      if (o.kind === "refused") throw new DoorAnswered(o.refusal);
+      if (o.kind === "read") throw new Error(`${name}: an event row answered as a read`);
+      return o.entry;
     });
   }
 
   /**
-   * #142: a message signed outside the host (the client `skein`, with the operator's key), delivered on
-   * the host machine over the control socket: its mail record (dag-cbor) and body, appended as a `local`
-   * request (appendLocal — the path a forwarded claim takes). The front door checks the signature and
-   * admits it by the dispatch table as it would any signed message; this waits for its verdict and
-   * throws on a refusal. The host signs nothing. The entry.
+   * A request signed outside the host (the client `skein` with the operator's key over the control
+   * socket; an application host's own root requests — Open Exchange's install and terms), handed to
+   * the instance as it is: `request` a request record, or its dag-cbor (src/client/raw.ts
+   * signRequest). CHECK then COMMIT, in order (serial), then its answer. The host signs nothing.
+   * → {entry, answer}. Refused (nothing written): DoorAnswered, thrown; committed with an answer of
+   * status ≥ 400 (a kernel operation refused: its entry written, its refusal the answer): an Error
+   * naming the status and the answer.
    */
-  async messageLocal(handle: string, messageBytes: Uint8Array, body: Uint8Array): Promise<CID> {
+  async messageLocal(handle: string, request: Uint8Array | RequestRecord): Promise<{ entry: CID; answer: Answer }> {
     if (!this.o.db.get(handle)) throw new Error(`no instance ${handle}`);
-    let message: unknown;
-    try { message = dagCbor.decode(messageBytes); } catch { throw new Error("the message is not dag-cbor"); }
-    if (!message || typeof message !== "object" || Array.isArray(message) || !(message as { signature?: unknown }).signature) throw new Error("not a signed message (a mail record with its signature)");
-    // #143: turned away at the door (a filter, the transport's check) writes no entry: DoorAnswered, thrown.
-    const entry = await this.appendLocal(handle, { kind: "message", message, body });
-    const l = await this.hydrate(handle);
-    const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
-    if (a.state === "errored") throw new Error(`the front door failed: ${a.error}`);
-    if (a.state !== "finished") throw new Error(`not judged in time (${a.state}); entry ${entry}`);
-    const v = dagCbor.decode(a.answer) as { verdict?: string; reason?: string };
-    if (v.verdict !== "accept") throw new Error(`${v.verdict ?? "not accepted"}: ${v.reason ?? ""}`.trim());
-    return entry;
+    let r: RequestRecord;
+    if (request instanceof Uint8Array) {
+      try { r = dagCbor.decode(request) as RequestRecord; } catch { throw new Error("the request is not dag-cbor"); }
+    } else r = request;
+    if (!r || typeof r !== "object" || r.kind !== "request" || !r.payload) throw new Error("not a request record ({kind: \"request\", payload, signature?})");
+    const o = await this.serial(handle, () => this.carryIn(handle, { request: r }));
+    if (o.kind === "refused") throw new DoorAnswered(o.refusal);
+    if (o.kind === "read") return { entry: undefined as never, answer: o.answer };
+    if (o.kind === "gone") throw new Error(`not answered before the host stopped (entry ${o.entry})`);
+    const answer = o.answer ?? { status: o.state === "errored" ? 500 : 204, body: new Uint8Array() };
+    if (answer.status >= 400) throw Object.assign(new Error(`${answer.status} ${answerText(answer)} (entry ${o.entry})`), { entry: o.entry, answer });
+    return { entry: o.entry, answer };
   }
 
   /**
-   * skein 0.6.1 (D10, David 2026-11-09): a BEEF the host fetched for `topic` (sync.ts), submitted by the
-   * one submit path — the overlay's submit message `{fn: "submit", args: {beef, topics: [topic]}}` in
-   * box `<app>/submit`, signed as the instance itself (signMessage) and appended as any message
-   * (messageLocal: the front door checks the signature, the route's `kernel.beef` the BEEF). → the
-   * front door's verdict; turned away at the door, or not accepted, → reject (a bad BEEF) or ignore.
-   * Public: an application host submits through it too (the one submit path).
+   * A BEEF handed to `handle`'s row at `path` as a content-proven request (SPEC 7: the body is just the
+   * BEEF, no signature, no topics): the host's sync deliveries go to the overlay's sync row
+   * (`/<app>/sync`); an application host hands a public submission to the submit row. → the verdict
+   * for the carrier: accept (committed), reject (refused 4xx: the sender's fault), ignore (refused
+   * otherwise, or the instance could not take it).
    */
-  async submitAsSelf(handle: string, app: string, beef: Uint8Array, topic: string): Promise<InboundAnswer> {
-    const id = this.o.db.get(handle)?.identity;
-    if (!id) return { verdict: "ignore", reason: `no instance ${handle} with an identity here` };
-    const { message, body } = await this.signMessage(handle, { recipient: id, box: `${app}/submit`, body: dagCbor.encode({ fn: "submit", args: { beef, topics: [topic] } }) });
+  async submitBeef(handle: string, path: string, beef: Uint8Array): Promise<InboundAnswer & { entry?: CID }> {
+    if (!this.o.db.get(handle)) return { verdict: "ignore", reason: `no instance ${handle} here` };
     try {
-      await this.messageLocal(handle, dagCbor.encode(message), body);
-      return { verdict: "accept" };
+      const o = await this.carryIn(handle, { request: { kind: "request", payload: { method: "POST", path, query: "", headers: { "content-type": "application/octet-stream" }, body: beef } } });
+      if (o.kind === "refused") return { verdict: o.refusal.status < 500 ? "reject" : "ignore", reason: o.refusal.reason ?? `refused (${o.refusal.status})` };
+      if (o.kind === "read") return { verdict: "ignore", reason: `${path} is a read row` };
+      return { verdict: "accept", entry: o.entry };
     } catch (e) {
-      if (e instanceof DoorAnswered) return { verdict: e.answer.status < 500 ? "reject" : "ignore", reason: e.answer.reason ?? "turned away at the door" };
       return { verdict: "ignore", reason: (e as Error).message };
     }
   }
 
-  /** Sign `data` with `handle`'s signer: [2, "metanet handles envelope"] / `send` / anyone — an intention request's signature (providers.ts), a beacon's beat (p2p.ts beaconFrame). */
+  /**
+   * The host's status service (SPEC 6 [D]): a REJECTED status Arcade gave for a transaction an instance
+   * holds, as a request signed by the host's STATUS service key (its own, not root) to the chain app's
+   * rejected row (REJECTED_PATH, role `chain.status`), body dag-cbor `body`.
+   */
+  async statusRequest(handle: string, body: Record<string, unknown>): Promise<CID> {
+    const id = this.o.db.get(handle)?.identity;
+    if (!id) throw new Error("its identity is not known yet");
+    const r = await signRequest(new ProtoWallet(this.serviceKey("status")), { recipient: id, payload: { method: "POST", path: REJECTED_PATH, query: "", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) } });
+    return (await this.messageLocal(handle, r)).entry;
+  }
+
+  /** The status service's identity key (hex): the key the genesis grants `chain.status` (imageConfig). */
+  statusKey(): string { return this.serviceKey("status").toPublicKey().toString(); }
+
+  /**
+   * A merkle proof for a transaction an instance holds (Arcade's, or one the sync pull cut from a
+   * block): the event PROOF_EVENT through the chain app's proof check (SPEC 6: its root matches a
+   * header we hold). An EARLY proof (its header not held yet: refused with EARLY_PROOF_CODE) is kept in
+   * host memory and offered again after the next header the host takes (`retryProofs`); any other
+   * refusal is the proof's.
+   */
+  async offerProof(handle: string, proof: Record<string, unknown>): Promise<CID | undefined> {
+    try {
+      const e = await this.admitEvent(handle, PROOF_EVENT, proof);
+      this.earlyProofs.get(handle)?.delete(proofKey(proof));
+      return e;
+    } catch (x) {
+      if (x instanceof DoorAnswered && x.answer.code === EARLY_PROOF_CODE) {
+        let m = this.earlyProofs.get(handle);
+        if (!m) this.earlyProofs.set(handle, (m = new Map()));
+        m.set(proofKey(proof), proof);
+        this.say(handle, `proof ${String(proof.txid ?? "").slice(0, 8)}: early (${x.answer.reason ?? "its header is not held yet"}): offered again after the next header`);
+        return undefined;
+      }
+      this.earlyProofs.get(handle)?.delete(proofKey(proof));
+      throw x;
+    }
+  }
+
+  /** The early proofs, per instance (offerProof): offered again after each header the host takes. */
+  private earlyProofs = new Map<string, Map<string, Record<string, unknown>>>();
+
+  /** Each early proof of `handle` offered again (after a new header): taken, early still, or refused (dropped). */
+  private async retryProofs(handle: string): Promise<void> {
+    const m = this.earlyProofs.get(handle);
+    if (!m?.size) return;
+    for (const p of [...m.values()]) await this.offerProof(handle, p).catch((e) => this.say(handle, `proof ${String(p.txid ?? "").slice(0, 8)}: refused: ${(e as Error).message}`));
+  }
+
+  /** Sign `data` with `handle`'s signer, BRC-169's way ([2, "metanet handles envelope"] / `send` / anyone): a beacon's beat (p2p.ts beaconFrame). */
   private async signAs(handle: string, data: Uint8Array): Promise<Uint8Array> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
@@ -848,97 +681,51 @@ export class Router {
   }
 
   /**
-   * A BRC-169 message signed by `handle`'s key through this host's key holder, outside any step (as
-   * the host signs an intention's request, providers.ts): the mail record {kind: "mail", op: "put",
-   * sender: the instance's identity, recipient?, box, body: <the body's CID>, nonce, signature}
-   * ([2, "metanet handles envelope"], key "send", counterparty anyone, over the record's dag-cbor
-   * without `signature`) and the body's dag-cbor bytes. `recipient` an identity key (33 bytes or
-   * hex); `nonce` 16 bytes, fresh when absent. For host code (the open-exchange host's swap relay
-   * signs its package to a validator with the token instance's key, 2026-11-06). Nothing is logged.
+   * A request signed as `handle` through this host's key holder, outside any step (SPEC 2: the
+   * `signed` scheme — src/client/raw.ts signRequest): for host code that speaks for an instance (Open
+   * Exchange's swap relay signs its package to a validator with the token instance's key).
+   * `recipient` the instance it is for (hex or 33 bytes; default `handle` itself); `nonce` 16 fresh
+   * bytes when absent. Nothing is logged.
    */
-  async signMessage(handle: string, m: { recipient?: Uint8Array | string; box: string; body: Uint8Array; nonce?: Uint8Array }): Promise<{ message: MailRecord; body: Uint8Array }> {
-    const id = this.o.db.get(handle)?.identity;
-    if (!id) throw new Error(`no instance ${handle} with an identity here`);
-    let value: unknown;
-    try { value = dagCbor.decode(m.body); } catch { throw new Error("the body is not dag-cbor"); }
-    const block = encodeBlock(value as never);
-    if (Buffer.compare(Buffer.from(block.bytes), Buffer.from(m.body)) !== 0) throw new Error("the body is not canonical dag-cbor");
-    if (m.nonce && m.nonce.length !== 16) throw new Error("nonce: want 16 bytes");
-    const recipient = m.recipient === undefined ? undefined : typeof m.recipient === "string" ? keyBytes(m.recipient) : m.recipient;
-    const unsigned = {
-      kind: "mail" as const, op: "put" as const, sender: keyBytes(id), ...(recipient ? { recipient } : {}),
-      box: m.box, body: block.cid, nonce: m.nonce ?? Uint8Array.from(randomBytes(16)),
-    };
-    return { message: { ...unsigned, signature: await this.signAs(handle, dagCbor.encode(unsigned)) } as MailRecord, body: m.body };
+  async signRequest(handle: string, r: { recipient?: Uint8Array | string; payload: RequestPayload; nonce?: Uint8Array }): Promise<RequestRecord> {
+    const row = this.o.db.get(handle);
+    if (!row?.identity) throw new Error(`no instance ${handle} with an identity here`);
+    return await signRequest(await this.o.walletFor(row), { recipient: r.recipient ?? row.identity, payload: r.payload, ...(r.nonce ? { nonce: r.nonce } : {}) });
   }
 
   /**
-   * An inbound libp2p message or stream frame (#51, #68): appended as
-   * received (the message with its signature; the frame), and the verdict
-   * — or the frame's answer — read off the thread the front door is stepped
-   * on, once it comes to rest (#66). The front door verifies, routes, and
-   * admits what an accept carries (the message's `p2p` event first); a
-   * redelivered message it accepted before is `ignore`. Its thread failing,
-   * or (a topic message) not answering within the wait, is `ignore` (no
-   * penalty); a stream frame's answer is waited for until its thread rests,
-   * however long (the stream stays open; nothing late is dropped). A frame a
-   * route's filter answers at the door (a read, #143: nothing written) is
-   * answered with the filter's body (#154: the overlay's sync protocol).
-   * skein 0.9.0: a frame's answer carrying a signed transaction (`signedTxOf`)
-   * is held until this host's broadcast of it is taken by Arcade; refused by
-   * Arcade as invalid, the answer is `{ok: false, reason: "rejected", detail:
-   * <Arcade's reason>}` instead (`broadcastTaken`).
+   * An inbound libp2p topic message or stream frame (#51). A topic message is the host's (SPEC 7/8:
+   * nothing of gossip is handed to the kernel): an overlay's `admit` announcement is fetched by the
+   * host unless held (sync.ts), anything else ignored. A frame on REQUEST_PROTOCOL is a request record
+   * (dag-cbor): the same CHECK / COMMIT path as HTTP, its answer frame the handler's answer (dag-cbor
+   * {status, type?, headers?, body}); the stream stays open until it comes. skein 0.9.0: a frame's
+   * answer carrying a signed transaction (`signedTxOf`) is held until this host's broadcast of it is
+   * taken by Arcade; refused by Arcade as invalid, it is answered `{ok: false, reason: "rejected",
+   * detail}` instead (`heldAnswer`).
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
-    const l = await this.hydrate(handle);
-    const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
-    try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name; the front door judges the record */ }
-    // The settled sync design (David 2026-10-30, skein-overlay 0.20.0): an `admit` announcement on an overlay
-    // topic is the host's, never the instance's — fetched from the announcer unless held (sync.ts), nothing
-    // logged; GossipSub's verdict ignore (no forward: each node announces its own admission).
-    if (call.topic !== undefined && this.sync) {
+    try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name */ }
+    if (call.topic !== undefined) {
       const app = this.loaded.get(handle)?.beacons.find((b) => b.topic === `${call.topic}-live`)?.app;
-      const txid = app ? admitOf(call.topic, call.body) : undefined;
+      const txid = app && this.sync ? admitOf(call.topic, call.body) : undefined;
       if (app && txid && from) {
-        this.sync.admit(handle, app, call.topic, txid, from);
+        this.sync!.admit(handle, app, call.topic, txid, from);
         return { verdict: "ignore", reason: "an announcement: the host fetches it" };
       }
+      return { verdict: "ignore", reason: "gossip is the host's: nothing of it goes to the instance" };
     }
-    const record = call.topic !== undefined
-      ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
-      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
-    let entry: CID;
-    try {
-      entry = await appendRequest(l.kernel, "libp2p", record, this.now());
-    } catch (e) {
-      if (!(e instanceof DoorAnswered)) throw e;
-      // #154: a frame on a stream answered by a filter (a read: nothing written) — its body is the answer frame.
-      if (call.topic === undefined && e.answer.kind === "answer") return { verdict: "accept", body: e.answer.body ?? new Uint8Array() };
-      // #121, #143: turned away at the door (nothing written). A bad signature or a bad BEEF is the sender's fault
-      // (reject: GossipSub penalises the forwarder); what this instance cannot judge (no chain state, a failing check) is ignore.
-      const reason = e.answer.reason ?? "turned away";
-      const verdict = e.answer.status < 500 && !/no chain state/.test(reason) ? "reject" : "ignore";
-      this.say(handle, `${source} from ${from}: ${verdict} (turned away at the door: ${reason})`);
-      return { verdict, reason };
-    }
-    let a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
-    // A stream frame's answer is written whenever its thread rests (the swap relay's call, 2026-11-06):
-    // the stream is open the whole time, so the wait is waited again, never answered "ignore" and the
-    // late answer dropped. A topic message keeps the bound (GossipSub waits on its verdict).
-    while (call.topic === undefined && a.state !== "finished" && a.state !== "errored" && !this.stopped) a = await (await this.hydrate(handle)).kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
-    this.settle(l);
-    if (a.state !== "finished") {
-      const why = a.state === "errored" ? `the front door failed: ${a.error}` : `not answered in time (${a.state})`;
-      this.say(handle, `${source} from ${from}: ${why}`);
-      return { verdict: "ignore", reason: why };
-    }
-    const r = dagCbor.decode(a.answer) as { verdict?: string; reason?: string; body?: Uint8Array; close?: boolean };
-    const verdict = r.verdict === "accept" || r.verdict === "reject" ? r.verdict : "ignore";
-    if (verdict !== "accept" || process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `${source} from ${from}: ${verdict}${r.reason ? ` (${r.reason})` : ""}`);
-    let body = r.body instanceof Uint8Array ? r.body : undefined;
-    if (call.topic === undefined && body) body = await this.heldAnswer(handle, body);
-    return { verdict, ...(body ? { body } : {}), ...(r.close ? { close: true } : {}), ...(r.reason ? { reason: r.reason } : {}) };
+    const frame = (a: Answer): InboundAnswer => ({ verdict: a.status < 400 ? "accept" : "ignore", body: dagCbor.encode({ status: a.status, ...(a.type ? { type: a.type } : {}), ...(a.headers ? { headers: a.headers } : {}), body: a.body }) });
+    if (call.protocol !== REQUEST_PROTOCOL) return frame({ status: 404, type: "application/json", body: jsonBytes({ status: "error", code: "ERR_NOT_FOUND", description: `this host serves ${REQUEST_PROTOCOL}` }) });
+    let r: RequestRecord;
+    try { r = dagCbor.decode(call.body) as RequestRecord; } catch { return frame({ status: 400, type: "application/json", body: jsonBytes({ status: "error", code: "ERR_BAD_REQUEST", description: "a frame is a dag-cbor request record" }) }); }
+    if (!r || typeof r !== "object" || r.kind !== "request" || !r.payload) return frame({ status: 400, type: "application/json", body: jsonBytes({ status: "error", code: "ERR_BAD_REQUEST", description: "a frame is a request record {kind: \"request\", payload, signature?}" }) });
+    let o: Outcome;
+    try { o = await this.carryIn(handle, { request: r }); } catch (e) { return frame({ status: 503, type: "application/json", body: jsonBytes({ status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }) }); }
+    const a = httpOf(o);
+    if (o.kind === "refused" || process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `libp2p: ${String(r.payload.method)} ${String(r.payload.path)} from ${from}: ${a.status}`);
+    const answer: Answer = { status: a.status, ...(a.headers["content-type"] ? { type: a.headers["content-type"] } : {}), body: await this.heldAnswer(handle, a.body) };
+    return frame(answer);
   }
 
   /**
@@ -977,19 +764,17 @@ export class Router {
     for (let i = 0; i < 1000; i++) {
       await Promise.all([...this.queues.values()]);
       await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {}))); // a kernel that exited is reported by its exit (hydrate's `exited`): this only waits
-      await this.providers.idle(); // what the providers carry now (#70): its answers are entries
       await this.arc?.idle(); // the broadcaster's posts (#65): their answers are statuses to route
       await Promise.all([...this.syncing]); // the libp2p nodes following their dispatch tables (#72, #77)
       await new Promise((r) => setImmediate(r));
-      if (!this.syncing.size && !this.queues.size && !this.providers.busy() && !this.arc?.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+      if (!this.syncing.size && !this.queues.size && !this.arc?.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
     }
   }
 
   /**
-   * Run `f` after everything else queued for this instance: the host's own admissions (events from its
-   * wiring, `local` messages: the waker's, the providers', the loopback, a forwarded claim) reach the
-   * kernel in the order the host made them, each after its hydrate, and `settled`
-   * waits on them. Not the log's order: the kernel assigns every entry's place (#163), so HTTP and
+   * Run `f` after everything else queued for this instance: the host's own arrivals (its events, its
+   * signed requests) reach the kernel in the order the host made them, each after its hydrate, and
+   * `settled` waits on them. Not the log's order: the kernel assigns every entry's place, so HTTP and
    * libp2p arrivals, which do not queue here, need no queue.
    */
   serial<T>(handle: string, f: () => Promise<T>): Promise<T> {
@@ -1082,7 +867,9 @@ export class Router {
       this.remember(at, raws);
     });
     this.intake = p.catch(() => {});
-    return p.then(() => { for (const h of [...this.loaded.keys()]) void this.chainBirth(h).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`)); });
+    return p.then(() => {
+      for (const h of [...this.loaded.keys()]) void this.chainBirth(h).then(() => this.retryProofs(h)).catch((e) => this.say(h, `host chain: the chain event not sent: ${(e as Error).message}`));
+    });
   }
 
   /** #156: the host chains this host keeps once per database (its SQLite one, its RocksDB one, and those its rows name). */
@@ -1122,41 +909,41 @@ export class Router {
     return net ? { ...this.o.kernel?.env, SKEIN_NETWORK: net } : this.o.kernel?.env;
   }
 
-  /** The `chain` event (#156) for `handle` in `box`, unless it was sent that record already since its start. */
-  private async chainEvent(handle: string, box: string, tip: HostChainTip): Promise<void> {
+  /** The chain pointer event (#156) for `handle`, unless it was sent that record already since its start. */
+  private async chainEvent(handle: string, tip: HostChainTip): Promise<void> {
     const key = tip.root.toString();
     if (this.sentChain.get(handle) === key) return;
     this.sentChain.set(handle, key);
     try {
-      await this.admitEvent(handle, box, { kind: "chain", root: tip.root, height: tip.height });
+      await this.admitEvent(handle, CHAIN_EVENT, { kind: "chain", root: tip.root, height: tip.height });
     } catch (e) {
       if (this.sentChain.get(handle) === key) this.sentChain.delete(handle);
       throw e;
     }
   }
 
-  /** The host chain's current record as the `chain` pointer event, unless sent already (a change of the host chain: the intake; an app taking box `chain` installed: syncDispatch). */
+  /** The host chain's current record as the pointer event, unless sent already (a change of the host chain: the intake; an app taking the event `chain` installed: syncDispatch). */
   private async chainBirth(handle: string): Promise<void> {
     const l = this.loaded.get(handle);
     if (!l || l.kernel.gone) return;
-    const rows = l.rows ?? (await l.kernel.dispatch()).rows;
-    if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
+    const rows = l.rows ?? (await l.kernel.routes()).rows as DispatchRow[];
+    if (!takesEvent(rows, CHAIN_EVENT)) return;
     const tip = await l.kernel.chainTip();
-    if (tip) await this.chainEvent(handle, DEFAULT_BOX, tip);
+    if (tip) await this.chainEvent(handle, tip);
   }
 
   /**
-   * SPEC 8: the first `chain` pointer event of a load — when the instance's table takes events in box `chain` and
-   * the host chain holds a tip — admitted directly into the kernel being loaded (its `admit`, then its drain is the
-   * kernel's), recorded as sent. Throws: the load fails (an instance not told the chain is not up).
+   * SPEC 8: the first chain pointer event of a load — when the instance's table takes the event `chain`
+   * and the host chain holds a tip — through CHECK and COMMIT on the kernel being loaded, recorded as
+   * sent. Throws: the load fails (an instance not told the chain is not up).
    */
   private async firstChainEvent(handle: string, kernel: KernelSurface): Promise<void> {
-    const rows = (await kernel.dispatch()).rows;
-    if (!rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) return;
+    const rows = (await kernel.routes()).rows as DispatchRow[];
+    if (!takesEvent(rows, CHAIN_EVENT)) return;
     const tip = await kernel.chainTip();
     if (!tip) return;
-    const event = { kind: "chain", root: tip.root, height: tip.height };
-    await kernel.admit({ box: DEFAULT_BOX, event: cidOf(event) } as never, { event }, this.now());
+    const o = await carry(kernel, { event: { kind: "chain", root: tip.root, height: tip.height }, name: CHAIN_EVENT }, { now: this.now() });
+    if (o.kind === "refused") throw new DoorAnswered(o.refusal);
     this.sentChain.set(handle, tip.root.toString());
   }
 
@@ -1278,17 +1065,20 @@ export class Router {
     const ko = {
       db: storeSpec(row), handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.kernelEnv(),
       log: (line: string) => this.say(handle, line),
-      emit: (o: Outgoing) => this.providers.deliver(handle, o),
+      emit: (o: Outgoing) => this.emits.deliver(handle, o),
+      answered: (a: Answered) => this.answers.notice(a),
       exited: (code: number | null, signal: string | null) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);
       },
     };
-    // #158: a RocksDB set is an instance of the host's one kernel process (opened there: hydrate); else a serve process of its own.
+    // #158: a RocksDB set is an instance of the host's one kernel process (opened there: hydrate).
     // The settled split (2026-10-31): a SQLite set's machine is the wasm kernel, loaded in this process on a worker.
+    // (The one-process-per-instance serve mode is gone: SPEC 5.)
     const rocks = parseRocksSpec(ko.db);
     const sq = parseSqliteSpec(ko.db);
-    const kernel: KernelSurface = sq ? await this.wasmHost(sq.db).open(ko) : rocks ? await this.kernelHost(rocks.dir).open(ko) : new Kernel(ko);
+    if (!sq && !rocks) throw new Error(`its store ${ko.db} is no set of the host's SQLite or RocksDB database: the serve mode (a store file of its own) is gone (SPEC 5)`);
+    const kernel: KernelSurface = sq ? await this.wasmHost(sq.db).open(ko) : await this.kernelHost(rocks!.dir).open(ko);
     let g: { identity?: unknown } | null;
     try {
       // One loader (SPEC 8): an instance starts from a tree (an image, `skein-host add --boot/--packet`); an empty store is no instance.
@@ -1300,14 +1090,13 @@ export class Router {
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
-      { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       // SPEC 8: not up until it has been told the chain as far as the host knows it — the first pointer event,
       // straight to the kernel here, before the instance is handed to anyone (not through admitEvent/serial: that
       // would hydrate, and wait on this load). Anything admitted after the load lands after it in the log.
       this.sentChain.delete(handle);
       await this.firstChainEvent(handle, kernel);
     } catch (e) {
-      await kernel.stop(1000);
+      await kernel.stop();
       throw e;
     }
     // #119: the apps' subscriptions, read from the log (the kernel writes nothing for them).
@@ -1317,7 +1106,7 @@ export class Router {
     // #138: the apps' liveness, read from the log the same way.
     const live = await this.readLiveness(storeSpec(row)).catch((e) => { this.say(handle, `libp2p: the liveness not read: ${(e as Error).message}`); return [] as Live[]; });
     const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs, beacons, live };
-    // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
+    // Its node (its apps' membership), before anything it runs can publish.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
     // The settled sync design: the peers each overlay topic's beats came from (host.db), asked at once.
@@ -1327,71 +1116,44 @@ export class Router {
   }
 
   /**
-   * Boot a row's empty store from a system tree or a checkpoint (issue #4,
-   * boot.ts) before its first hydration; the row's identity is its signer's.
+   * Boot a row's empty store from a system tree or a checkpoint (issue #4, boot.ts) before its first
+   * hydration; the row's identity is its signer's. `owner` (hex): born owned — root granted to it in
+   * the genesis, no claim row. `appConfig`: the apps' config at birth.
    */
-  async bootRow(handle: string, src: BootSource, o: { image?: boolean; manager?: boolean; owner?: string; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<Booted> {
+  async bootRow(handle: string, src: BootSource, o: { owner?: string; appConfig?: GenesisConfig["appConfig"] } = {}): Promise<Booted> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
     if (this.loaded.has(handle)) throw new Error(`${handle} is loaded: boot only an empty store`);
-    if (o.image && src.kind !== "tree") throw new Error("an image is a system tree");
-    if (o.manager && !o.image) throw new Error("the instance manager is the host skein's, and the host skein is an image");
-    if ((o.owner || o.appConfig) && !o.image) throw new Error("an owner and app config at birth are an image's (#142)");
     const identity = await rootIdentity(await this.o.walletFor(row));
-    // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
-    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity);
+    const c: GenesisConfig = { ...this.imageConfig(row, identity, o.owner), ...(o.appConfig ? { appConfig: o.appConfig } : {}) };
     const b = await bootStore({ db: storeSpec(row), handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.kernelEnv(), log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
   }
 
-  /** The owner's messagebox: the configured one (SKEIN_OWNER_MESSAGEBOX), or none. */
-  ownerMessagebox(): string | undefined {
-    return this.o.ownerMessagebox || undefined;
-  }
-
   /**
-   * A new agent's address book seed (#70): this host's providers — the HTTP
-   * proxy, the waker, the libp2p node (when it runs
-   * one), the status provider (#65, when it has an Arcade) — and the owner's
-   * mailbox, when it knows it.
+   * What this host brings to an image's genesis (SPEC 3: who builds the image decides what the starting
+   * table holds; this host builds it from the image and its own facts): the instance's identity,
+   * handle and domain, the host's defaults and network, and the grants it adds — `chain.status` for
+   * its status service key (SPEC 6: the rejected row's role; the planner's call, David to review) and,
+   * for an instance born owned, `root` for `owner`.
    */
-  addressSeed(handle?: string): AddressSeed[] {
-    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])];
-    const out: AddressSeed[] = this.providers.entries(names);
-    const mb = this.ownerMessagebox();
-    if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
-    return out;
-  }
-
-  /**
-   * What this host brings to an image's genesis (#89): only its own facts —
-   * the instance's identity, handle and domain, its providers in the address
-   * book, where its domain resolves, the host's defaults. No owner, no
-   * owner's mailbox, no inference peer, no names: the image is the same for
-   * everyone, and the owner is the claim's sender (#127). `manager`
-   * (#90, #113): the host skein's — the instance manager and the certifier
-   * in its address book too (no other instance's book names them).
-   */
-  imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
-    const seed = this.providers.entries(["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
+  imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, owner?: string): GenesisConfig {
     return {
-      identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), network: this.o.network, addressBook: seed,
-      providers: Object.fromEntries(seed.map((e) => [e.address, Buffer.from(e.key).toString("hex")])),
+      identity, handle: row.handle, domain: row.domain, network: this.o.network,
+      grants: { [STATUS_ROLE]: [this.statusKey()], ...(owner ? { root: [owner] } : {}) },
       defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
     };
   }
 
   /**
-   * #162: the image a create names, as a boot source — the built-in `default` (this host's, with its
-   * chain part), or a directory `<imagesDir>/<name>` (SKEIN_IMAGES_DIR, default $SKEIN_HOME/images;
-   * the layout `skein-host add --image <dir>` takes: with no bin/ merged over the default image as
-   * images/host is, with bin/ a complete image). Its path resolved first (a link to an app repository's
-   * image/ reads `..` beside the repository's image, not beside the link).
+   * #162: the image a create names, as a boot source — the built-in `default`, or a directory
+   * `<imagesDir>/<name>` (SKEIN_IMAGES_DIR, default $SKEIN_HOME/images; with no etc/routes.json merged
+   * over the default image, with it a complete image). Its path resolved first.
    */
-  private async namedImage(name: string | undefined, host: boolean | undefined): Promise<BootSource> {
-    if (host || name === undefined || name === "default") return await namedImageSource({ host, ...(name ? { image: name } : {}) });
+  private async namedImage(name: string | undefined): Promise<BootSource> {
+    if (name === undefined || name === "default") return await namedImageSource({});
     const dir = this.imageDir(name);
     if (!dir) throw new Error(`image ${JSON.stringify(name)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
     return isOverlayImage(dir) ? await namedImageSource({ overlay: dir }) : await imageSource(dir);
@@ -1399,14 +1161,14 @@ export class Router {
 
   /** #162: an image by name: its directory under imagesDir (resolved), or undefined. */
   private imageDir(name: string): string | undefined {
-    if (!this.o.imagesDir || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name === "host") return undefined;
+    if (!this.o.imagesDir || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return undefined;
     try {
       const d = realpathSync(join(this.o.imagesDir, name));
       return statSync(d).isDirectory() ? d : undefined;
     } catch { return undefined; } // no such image here
   }
 
-  /** Whether `owner` holds root on the instance (#143: the head `grants`): claimed by that key. */
+  /** Whether `owner` holds root on the instance (the head `grants`): claimed by that key. */
   private async claimedBy(l: Loaded, owner: string): Promise<boolean> {
     const root = await l.kernel.call("head", "grants") as CID | null;
     if (!root) return false;
@@ -1415,114 +1177,70 @@ export class Router {
   }
 
   /**
-   * A new instance from an image, owned by `owner` (#90: the instance
-   * manager's `create`; `skein-host init` for the host skein). In this order:
-   * the row, disabled (no hostname: nothing reaches it); its identity
-   * derived (the signer's, key ID = the handle) and its store booted from the
-   * image (only `default`, the default image, so far); its kernel started
-   * unpublished; `claim` (#127) — the owner's own signed claim, a message in
-   * box `claim` naming no recipient (it was signed before the instance
-   * existed), with its body — forwarded into it as a `local` request, its
-   * first entry after the genesis: the front door checks the signature, and
-   * the kernel takes the owner from the signer (the owner's admin rows
-   * written, the claim row removed); only then (`publish`, default true) the
-   * row enabled, which publishes its hostname. No request can reach the claim
-   * row first. The host signs nothing for the owner. With no `claim` (a bare
-   * image: `skein-host init`), the instance keeps its claim row, from anyone:
-   * the first sender of a claim owns it. `host`: the host skein — the
-   * instance manager and the certifier in its address book, and recorded as
-   * the host skein (host.db). `domain`: the handle's domain, recorded with
-   * the row (default `localhost`). A refusal throws (a bad or taken handle, a
-   * bad key, another image, a claim not `owner`'s or refused: the row is left
-   * disabled, its store kept for a look).
+   * A new instance from an image, for `owner`. In this order: the row, disabled (no hostname: nothing
+   * reaches it); its identity derived (the signer's, key ID = the handle) and its store booted from the
+   * image; its kernel started unpublished; then:
    *
-   * `owned` (#164): a non-host image instance born owned as the host skein
-   * is — its genesis's `root` is `owner`, no claim (none taken, none made:
-   * the image's claim route is not seeded), no instance manager or
-   * certifier in its address book (those stay the host skein's and
-   * SKEIN_MANAGER_FOR's).
+   *   `owned`   born owned (#164): root granted to `owner` in the genesis, no claim row (the image's is
+   *             dropped);
+   *   `claim`   the owner's own signed claim (a request record to the image's claim row, /kernel/claim,
+   *             signed by the owner to the instance's identity: src/client/raw.ts signClaim), handed
+   *             in as the instance's first arrival after the genesis — the kernel grants root to its
+   *             sender and removes the claim row in the same step;
+   *   `needsClaim` with no claim on a one-key host (`claimer`): the host's own key signs it;
+   *   none      the instance keeps its claim row: the first claim's sender owns it.
+   *
+   * Only then (`publish`, default true) the row enabled, which publishes its hostname. `domain`: the
+   * handle's domain (default the host's). A refusal throws (a bad or taken handle, a bad key, another
+   * image, a claim not `owner`'s or refused: the row is left disabled, its store kept for a look).
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; owned?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; owned?: boolean; publish?: boolean; domain?: string; claim?: RequestRecord; needsClaim?: boolean; appConfig?: GenesisConfig["appConfig"]; topics?: string[] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!validHandle(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label; or a token id <txid>_<vout> (path-only, #161)`);
-    if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
+    if (this.reserved(handle)) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
     if (o.image !== undefined && o.image !== "default" && !this.imageDir(o.image)) throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image${this.o.imagesDir ? ` and the images in ${this.o.imagesDir}` : ""}`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
-    if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
-    // #164: an owned image instance is born owned as the host skein is: no claim.
     if (o.owned && (o.claim !== undefined || o.needsClaim)) throw new Error("an owned instance is born owned (#164): no claim");
-    const owned = o.host || o.owned;
-    let claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
-    // #162: a one-key host claims what it creates itself — the claim signed by its shared key (the owner).
-    if (!claim && !owned && this.o.claimer && o.needsClaim) {
-      const me = (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey;
-      if (owner !== me) throw new Error(`owner: on a one-key host the claim is the host's own key's (${short(me)}): name it or no owner, or forward the owner's signed claim`);
-      claim = claimOf(await signClaim(this.o.claimer));
-    }
-    if (!claim && o.needsClaim) claimOf(undefined);
-    if (claim) claimProblem(claim, owner);
+    if (o.claim !== undefined) claimProblem(o.claim, owner);
+    if (!o.owned && !o.claim && o.needsClaim && !this.o.claimer) throw new Error("claim: the owner's signed claim (a request to /kernel/claim signed by the owner), or a one-key host's own");
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
     const store = this.newStore(handle);
     if (storeExists(storeSpec({ store, handle }))) throw new Error(`handle ${handle}: a store is at ${storeSpec({ store, handle })} already`);
-    this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain(), ...(o.topics?.length ? { topics: JSON.stringify(o.topics) } : {}) }); // #137: the names it is routed by. H4: never the column's `localhost` on a host with a domain
+    this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? this.domain(), ...(o.topics?.length ? { topics: JSON.stringify(o.topics) } : {}) }); // #137: the names it is routed by
     this.unpublished.add(handle);
     try {
-      // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
-      // operator's key, `appConfig` merged.
-      // #162: any instance's app config at birth (a create's `config`), the host skein's owner at birth.
-      // #164: an owned instance's genesis names `owner` root (boot.ts then seeds no claim route), as the host skein's does.
-      await this.bootRow(handle, await this.namedImage(o.image, o.host), { image: true, manager: o.host, ...(owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
+      await this.bootRow(handle, await this.namedImage(o.image), { ...(o.owned ? { owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) });
       const l = await this.hydrate(handle);
-      if (claim) {
-        // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
-        // turns away (its signature does not hold) writes no entry.
-        let entry: CID;
-        try {
-          entry = await this.appendLocal(handle, { kind: "message", message: claim.message, body: claim.body });
-        } catch (e) {
-          if (e instanceof DoorAnswered) throw new Error(`the claim message was refused at the door (${e.answer.reason ?? e.answer.status}); ${handle} is left disabled`);
-          throw e;
-        }
-        await this.queues.get(handle);
-        await l.kernel.idle();
-        if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
+      let claim = o.claim;
+      // #162: a one-key host claims what it creates itself — the claim signed by its shared key (the owner).
+      if (!claim && !o.owned && o.needsClaim && this.o.claimer) {
+        const me = (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey;
+        if (owner !== me) throw new Error(`owner: on a one-key host the claim is the host's own key's (${short(me)}): name it, or give the owner's signed claim`);
+        claim = await signClaim(this.o.claimer, l.identity);
       }
-      if (o.host) this.o.db.setSetting("host_skein", handle);
+      if (claim) {
+        try {
+          await this.messageLocal(handle, claim);
+        } catch (e) {
+          throw new Error(`the claim was refused (${(e as Error).message}); ${handle} is left disabled`);
+        }
+        if (!(await this.claimedBy(l, owner))) throw new Error(`the claim was taken but root is not ${short(owner)} (its log says why); ${handle} is left disabled`);
+      }
       if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
       const tip = this.sentChain.has(handle) ? await l.kernel.chainTip() : undefined;
-      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${owned ? `owned by ${short(owner)}${o.host ? "" : " (born owned, #164)"}` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.image ?? "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.owned ? `owned by ${short(owner)} (born owned, #164)` : claim ? `claimed by ${short(owner)}${o.claim === undefined ? " (the host's own key, #162)" : ""}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);
     }
   }
 
-  /** host.db's `store` for a new instance: its set in the host's shared store (SQLite, RocksDB), else its own file. */
+  /** host.db's `store` for a new instance: its set in the host's shared store (SQLite, RocksDB). */
   private newStore(handle: string): string {
     if (this.o.sqliteStore) return `sqlite:${this.o.sqliteStore}`; // the settled split: the wasm kernel
     if (this.o.rocksStore) return `rocksdb:${this.o.rocksStore}`; // #158
-    return join(this.o.home ?? ".", "instances", handle, "runtime.db");
-  }
-
-  /**
-   * The instance manager's work (#90; providers.ts `manager`): a message from the host skein in box `create`
-   * → the answer body. A refusal throws (the provider answers {error}). (skein next, SPEC 8: start and stop
-   * are no messages any more: the host's own startInstance / stopInstance.)
-   */
-  private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (box !== "create") throw new Error(`the instance manager takes create: not ${box}`);
-    const handle = typeof b.handle === "string" ? b.handle : "";
-    // #162: on a one-key host with no claim forwarded, the owner is the host's own key (named or not).
-    const shared = this.o.claimer && b.claim == null ? (await this.o.claimer.getPublicKey({ identityKey: true })).publicKey : undefined;
-    const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : shared ?? "";
-    if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
-    if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
-    // #162: `config` — the new instance's app config at birth, by app name (as an install's --config), any image's.
-    if (b.config != null && (typeof b.config !== "object" || Array.isArray(b.config) || b.config instanceof Uint8Array || Object.values(b.config).some((x) => !x || typeof x !== "object" || Array.isArray(x)))) throw new Error("config: the apps' config at birth, {<app>: {…}}");
-    // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded); #162: a one-key host's own.
-    const topics = topicsArg(b.topics);
-    const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), ...(b.config != null ? { appConfig: b.config as Genesis2Config["appConfig"] } : {}), ...(topics ? { topics } : {}), needsClaim: true });
-    return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+    // No shared store named: a SQLite database under the host's home (the serve mode is gone, SPEC 5).
+    return `sqlite:${join(this.o.home ?? ".", "instances.db")}`;
   }
 
   /**
@@ -1558,62 +1276,44 @@ export class Router {
   }
 
   /**
-   * What this host brings to the genesis of a system tree booted with an owner (`skein-host add --boot/--packet`,
-   * boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults — the tree's
-   * config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
-   */
-  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string): Genesis2Config {
-    if (!this.o.owner) throw new Error("a system tree booted with an owner needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(row.handle), providers: Object.fromEntries(this.addressSeed(row.handle).filter((e) => e.transport === "local").map((e) => [e.address, Buffer.from(e.key).toString("hex")])) };
-    return {
-      identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-      defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn: (l) => this.say(row.handle, l), network: this.o.network, ...facts,
-    };
-  }
-
-  /**
-   * The kernel counts as busy until it has processed what was just admitted
-   * (its `idle` answers after the drain); then the libp2p node and the chain
-   * pointer event follow the dispatch table (#72, #77).
+   * The kernel counts as busy until it has processed what was just committed (its `idle` answers after
+   * the drain); then the libp2p node and the chain pointer event follow the route table.
    */
   private settle(l: Loaded): void {
-    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
+    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the route table not followed: ${(e as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
 
   /**
-   * What the host does by the instance's dispatch table (#72, #77): read the table (the kernel's `dispatch`
-   * frame); when it moved since it was last followed (or `first`), its libp2p node is declared again as its
-   * genesis and the table ask (p2p.ts libp2pConfig) — started, reconfigured (topics subscribed and
-   * unsubscribed, protocols handled and unhandled) or stopped — and (not `first`: the load sent it) an app
-   * that takes box `chain` installed into the running instance gets the chain pointer event now (chainBirth;
-   * one already sent is not sent again). A failure is logged, not fatal.
+   * What the host does by the instance's route table: read it (the kernel's `routes` frame); when it
+   * moved since it was last followed (or `first`), an uninstalled app's beacons and liveness stop, the
+   * libp2p node is declared again, and (not `first`: the load sent it) an app that takes the event
+   * `chain` installed into the running instance gets the chain pointer event now (chainBirth; one
+   * already sent is not sent again). A failure is logged, not fatal.
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
     if (l.kernel.gone) return;
-    const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
+    const d = await l.kernel.routes().catch((e) => { this.say(l.row.handle, `the route table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
     l.dispatchTip = key;
-    l.rows = d.rows;
-    if (!first && d.rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX))) void this.chainBirth(l.row.handle).catch((e) => this.say(l.row.handle, `host chain: the install event not sent: ${(e as Error).message}`));
-    // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
-    // removes every row naming the app and leaves its heads).
+    l.rows = d.rows as DispatchRow[];
+    if (!first && takesEvent(l.rows, CHAIN_EVENT)) void this.chainBirth(l.row.handle).catch((e) => this.say(l.row.handle, `host chain: the install event not sent: ${(e as Error).message}`));
+    // #126: an uninstalled app's beacons stop — an app with no row left in the table.
     if (l.beacons.length || l.live.length) {
-      const apps = appsOf(d.rows);
+      const apps = appsOf(l.rows);
       l.beacons = l.beacons.filter((b) => apps.has(b.app));
       l.live = l.live.filter((x) => apps.has(x.app)); // #138: and its liveness
     }
     await this.declareP2P(l, first);
   }
 
-  /** The instance's libp2p node declared as its genesis, its table and its apps' subscriptions (#119) ask. */
+  /** The instance's libp2p node declared as its apps' membership asks (SPEC 7: the topics they subscribe; a beacon or liveness needs the node). */
   private async declareP2P(l: Loaded, first = false): Promise<void> {
     if (!this.p2p) return;
-    const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
-    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs), l.beacons.length > 0 || l.live.length > 0)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    await this.p2p.declare(l.row.handle, libp2pConfig(subscribedTopics(l.subs), l.beacons.length > 0 || l.live.length > 0)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
     this.p2p.beacons(l.row.handle, l.beacons);
     this.p2p.liveness(l.row.handle, l.live);
   }
@@ -1654,8 +1354,6 @@ export class Router {
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
     if (rec.event === "beacon" || rec.event === "unbeacon") return this.beaconEvent(handle, rec);
-    // An overlay before skein-overlay 0.20.0 emits want / unwant: nothing asks for them any more (the settled sync design).
-    if (rec.event === "want" || rec.event === "unwant") return;
     if (rec.event === "liveness" || rec.event === "unliveness") return this.livenessEvent(handle, rec);
     const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
@@ -1665,7 +1363,7 @@ export class Router {
       const l = this.loaded.get(handle) ?? await this.loading.get(handle)?.catch(() => undefined);
       if (!l || l.kernel.gone) return;
       foldSubscriptions([e], l.subs);
-      this.say(handle, `libp2p: ${e.event} ${topic} (app ${app}${e.event === "subscribe" ? ` → ${e.sub.program}.${e.sub.fn}` : ""})`);
+      this.say(handle, `libp2p: ${e.event} ${topic} (app ${app})`);
       await this.declareP2P(l);
     };
     const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${topic}: ${(x as Error).message}`));
@@ -1791,28 +1489,16 @@ export class Router {
   }
 
   /**
-   * shruggr/skein#154: our own overlay's read, for the sync's puller (its locator and what it lacks) —
-   * the engine's function `fn` (`anchors`, `admitted`) by a kernel call (the `call` op; nothing
-   * appended, nothing logged), not through the app's http table, which an app need not publish. The
-   * program is the app record's engine (its role `overlay`); the argument is what a read route's
-   * filter is handed (docs/APPS.md "Filters": the route handler contract's fields), `match` naming the
-   * app, so the engine reads its configuration from the app record as it does for its read routes.
-   * Its answer is the read route's `{status, type, body}`: the body's JSON, or a throw on another status.
+   * Our own overlay's read, for the sync's puller (its locator, what it lacks, whether it holds a
+   * transaction): the overlay's read row `/<app>/<fn>` (SPEC 7 [P]: the reads are read rows, role
+   * anyone) asked through CHECK — nothing written — with the query; its answer's JSON body, or a throw
+   * on another status.
    */
   private async overlayRead(handle: string, app: string, fn: "anchors" | "admitted" | "holds", query: Record<string, string>): Promise<unknown> {
-    const l = await this.hydrate(handle);
-    const root = await l.kernel.call("head", appHead(app)) as CID | null;
-    if (!root) throw new Error(`${app}: no app record`);
-    const engine = (await l.kernel.store.get(root) as { programs?: Record<string, unknown> }).programs?.[OVERLAY_ROLE];
-    if (!(engine instanceof CID)) throw new Error(`${app}: its app record has no engine (role ${OVERLAY_ROLE})`);
     const qs = new URLSearchParams(query).toString();
-    const route = `/${app}/${fn}`;
-    const http = { method: "GET", path: route, route, query: qs ? `?${qs}` : "", headers: {}, body: new Uint8Array() };
-    const arg = { transport: "http", request: { kind: "http", ...http }, match: { transport: "http", address: route, app }, ...http, contentType: "" };
-    const c = await l.kernel.invoke(engine, fn, dagCbor.encode(arg), { now: stampMs(this.now()) });
-    if (!c.ok) throw new Error(`${app}.${fn}: ${c.error}`);
-    const a = dagCbor.decode(c.result) as { status?: number; body?: Uint8Array };
-    const text = a.body instanceof Uint8Array ? Buffer.from(a.body).toString("utf8") : "";
+    const o = await this.carryIn(handle, { request: { kind: "request", payload: { method: "GET", path: `/${app}/${fn}`, query: qs ? `?${qs}` : "", headers: {}, body: new Uint8Array() } } });
+    const a = httpOf(o);
+    const text = new TextDecoder().decode(a.body);
     if (a.status !== 200) throw new Error(`${app}.${fn}: ${a.status} ${text.slice(0, 200)}`);
     return JSON.parse(text);
   }
@@ -1837,22 +1523,7 @@ export class Router {
     void p.finally(() => this.syncing.delete(p));
   }
 
-  /**
-   * The waker answers every wake-me due by this router's clock — what its
-   * timers do in real time, for a clock that is not (a script clock: tests,
-   * the corpus).
-   */
-  async wake(): Promise<void> {
-    this.providers.wakeDue();
-    await this.providers.idle();
-  }
-
-  /** An instance's next wake (ms), if any (the host page): the waker's earliest. */
-  nextWake(handle: string): number | undefined {
-    return this.providers.nextWake(handle);
-  }
-
-  /** Stop kernels idle for `ms` with nothing queued. Their deadlines and sleeps stay with the waker. */
+  /** Stop kernels idle for `ms` with nothing queued. */
   private async reap(ms: number): Promise<void> {
     for (const [handle, l] of this.loaded) {
       if (l.kernel.busy > 0 || this.queues.has(handle) || Date.now() - l.kernel.last < ms) continue;
@@ -1882,19 +1553,6 @@ export class Router {
 
   // ---------------------------------------------------------------- HTTP
 
-  /** Whether a URL is this host's own (answered in process: no DNS, no socket). */
-  isLocal(url: string): boolean {
-    let u: URL;
-    try { u = new URL(url); } catch { return false; } // a URL that does not parse is not this host's (the caller's fetch reports it)
-    if (!this.port) return false;
-    const mine = (o: string) => { try { return new URL(o).host === u.host; } catch { return false; } }; // an origin setting that is no URL matches nothing
-    if (mine(this.origin())) return true;
-    const port = u.port || (u.protocol === "https:" ? "443" : "80");
-    if (port !== String(this.port)) return false;
-    const h = u.hostname.toLowerCase();
-    return h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1" || h.endsWith(".localhost");
-  }
-
   /** Which instance a URL is for: `/@<handle>` (stripped for the routes), or a `<handle>.` host name. */
   target(url: URL): { handle: string; route: string } | undefined {
     const enabled = (h: string) => this.o.db.get(h)?.status === "enabled";
@@ -1906,38 +1564,11 @@ export class Router {
     return undefined;
   }
 
-  /**
-   * The HTTP proxy's request (#70, the `fetch` provider): this host's own URLs in
-   * process, the rest as configured. A delivery (`POST …/sendMessage`, from
-   * instance `from`) is logged in one line: where it went, how, and the result.
-   */
-  async http(req: HttpRequest, from?: string): Promise<HttpResponse> {
-    const local = this.isLocal(req.url);
-    const delivery = req.method === "POST" && /\/sendMessage$/.test(new URL(req.url, "http://x").pathname);
-    const said = (what: string) => { if (delivery) this.say(from ?? "router", `deliver${((d) => d ? ` ${d}` : "")(describeDelivery(req))} → ${req.url} (${local ? "local" : "remote"}): ${what}`); };
-    try {
-      let r: HttpResponse;
-      if (local) {
-        const d = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array(), ...(from ? { from } : {}) });
-        r = { status: d.status, headers: d.headers, body: d.body };
-      } else {
-        const f = this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined);
-        if (!f) throw new Error(`this host answers no http beyond its own (${req.url})`);
-        r = await f(req);
-      }
-      said(r.status === 200 ? "200 delivered" : `HTTP ${r.status} ${errorOf(r.body)}`.trimEnd());
-      return r;
-    } catch (e) {
-      said(`failed: ${(e as Error).message}`);
-      throw e;
-    }
-  }
-
   /** One request, whoever made it: a socket's, or an instance's own http. */
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
-      return json(200, { origin: this.origin(), domain: await this.handleDomain() });
+      return json(200, { origin: this.origin(), domain: this.domain() });
     }
     const t = this.target(url);
     // The router's own paths at its own hostname stay the router's when the root instance takes that label (ownLabelInstance).
@@ -1983,20 +1614,9 @@ export class Router {
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
     // SKEIN_ROOT_INSTANCE: a hostname that is no instance's serves the root instance (the standalone's one app at
     // localhost:<port>/) — every path but the router's own three above (.well-known/skein-host, /skeins, the ARC
-    // callback). The BRC-169 set below is the host skein's only when no root instance takes the hostname: with one,
-    // POST /.well-known/auth must shake hands with the root instance (its sessions are its own, #68) and
-    // GET /manifest.json is the app's (its grouped permissions), as at an instance's own hostname.
+    // callback); its handshake (/.well-known/auth) is the root instance's.
     const root = this.o.rootInstance;
     if (root && this.o.db.get(root)?.status === "enabled") return await serve({ handle: root, route: path });
-    // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
-    const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
-    if (route) {
-      const host = this.o.db.hostSkein();
-      if (host?.status === "enabled") return await this.held(this.forward(host.handle, route, url, req));
-      const f = await this.o.discovery?.(req, url);
-      if (f) return f;
-      return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
-    }
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
@@ -2094,29 +1714,6 @@ export class Router {
     try { return await p; } finally { this.inflight.delete(p); }
   }
 
-  /**
-   * The handle domain (#113): the host skein's onboarding app's
-   * `config.onboard.domain` (the app record, a kernel read), the one setting
-   * every handle here is at. With no host skein or no app: this router's
-   * origin's host name as a domain.
-   */
-  async handleDomain(): Promise<string> {
-    const fallback = this.domain();
-    const host = this.o.db.hostSkein();
-    if (host?.status !== "enabled") return fallback;
-    try {
-      const l = await this.hydrate(host.handle);
-      const root = await l.kernel.call("head", `${ONBOARD_APP}/app`) as CID | null;
-      if (!root) return fallback;
-      const rec = await l.kernel.store.get(root) as { config?: Record<string, { domain?: unknown } | undefined> };
-      const d = rec.config?.[ONBOARD_APP]?.domain;
-      return typeof d === "string" && d ? d.toLowerCase() : "localhost";
-    } catch (e) {
-      this.say("router", `the handle domain: not read from ${host.handle}: ${(e as Error).message}`);
-      return fallback;
-    }
-  }
-
   /** Arcade's webhook (#58, arc.ts); 404 when the host has no Arcade. */
   private async arcRequest(req: RouterRequest, path: string): Promise<RouterResponse> {
     if (!this.arc) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no Arcade" });
@@ -2124,23 +1721,38 @@ export class Router {
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
   }
 
+  /** The paths of `handle`'s overlays' sync rows (syncPath of each app that beacons): the host's own carrier's rows, not offered over HTTP (SPEC 7 [P]). */
+  private syncRows(handle: string): Set<string> {
+    return new Set((this.loaded.get(handle)?.beacons ?? []).map((b) => syncPath(b.app)));
+  }
+
   /**
-   * A request for an instance (#68, #66): appended as received, and the
-   * client's connection held until the thread it launched comes to rest —
-   * then its answer, signed on the session inside. Past `answerWaitMs`, or
-   * when the router shuts down, 503 + Retry-After (the thread goes on). A
-   * read's call fuel (the explorer's) is charged to the ledger.
+   * A request for an instance (SPEC 2, 4, 8): the BRC-103 handshake answered here (POST
+   * /.well-known/auth, nothing logged); any other request made ONE record — the path exactly as the
+   * client sent it, the x-bsv-auth-* headers gathered into its signature — and carried through CHECK
+   * and COMMIT, the client's connection held until the handler answers (the connection is the only
+   * timer: a client that goes ends the wait; the host shutting down answers 503). A signed request on
+   * a session the host does not hold: 401 before the kernel is asked. A signed request's answer is
+   * signed on its session. A read's fuel and a refusal's go to the ledger.
    */
   private async forward(handle: string, route: string, url: URL, req: RouterRequest): Promise<RouterResponse> {
     if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    // #135: two doors — a read by a call, a signed request through the door (serveHttp).
-    const a: FrontAnswer = await serveHttp(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
-    this.settle(l);
-    // Charged to the identity the front door verified (H13), never to a header as the client sent it.
-    if (a.fuel !== undefined) this.charge(handle, a.caller ?? "", `${route} (read)`, a.fuel);
-    return { status: a.status, headers: a.headers, body: a.body };
+    if (route === HANDSHAKE_PATH) {
+      if (req.method !== "POST") return json(405, { status: "error", code: "ERR_METHOD", description: `${HANDSHAKE_PATH} takes POST (the BRC-103 handshake)` });
+      return await handshake(this.sessions, handle, l.wallet, req.body);
+    }
+    if (this.syncRows(handle).has(route)) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `${route} is the host's sync row: not offered here` });
+    const p: Payload = { method: req.method, path: url.pathname, query: url.search, headers: req.headers, body: req.body };
+    const rec = requestRecord(p);
+    if ("problem" in rec) return json(400, { status: "error", code: "ERR_AUTH_MALFORMED", description: rec.problem });
+    const session = rec.auth ? this.sessions.get(handle, rec.auth.yourNonce) : undefined;
+    if (rec.auth && (!session || session.client !== rec.auth.identityKey)) return sessionGone();
+    let a: HttpAnswer;
+    try { a = httpOf(await this.carryIn(handle, { request: rec.record }, req.signal)); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    if (rec.auth && session) a = await signReply(l.wallet, session, rec.auth.requestId, a);
+    return a;
   }
 
   /** The HTTP handler: CORS, then dispatch. */
@@ -2215,14 +1827,6 @@ export class Router {
   }
 }
 
-/**
- * The owner's signed claim (#127): a message in box `claim`, signed by the
- * owner (BRC-169's signing, counterparty anyone) and naming no recipient — it
- * was signed before the instance it claims existed — with its body (dag-cbor
- * bytes). The host forwards it as it is (Router.createInstance).
- */
-export interface SignedClaim { message: Omit<MailRecord, "recipient"> & { recipient?: undefined }; body: Uint8Array }
-
 /** A create's `claim` ({message, body}), checked for its shape (throws; undefined: missing). */
 /**
  * The instance manager's `topics` (#137): the overlay names (gossip topics and lookup services alike)
@@ -2234,20 +1838,31 @@ function topicsArg(v: unknown): string[] | undefined {
   return v as string[];
 }
 
-function claimOf(v: unknown): SignedClaim {
-  const c = v as { message?: unknown; body?: unknown } | null | undefined;
-  if (!c || typeof c !== "object" || !c.message || typeof c.message !== "object" || !(c.body instanceof Uint8Array)) {
-    throw new Error("claim: the owner's signed claim {message, body} (#127: a message in box claim, signed by the owner, naming no recipient)");
-  }
-  return { message: c.message as SignedClaim["message"], body: c.body };
+/** Why a claim cannot be handed in for `owner` (throws): not a signed request to the claim row, another sender. The signature is the kernel's to check. */
+function claimProblem(c: RequestRecord, owner: string): void {
+  if (!c || c.kind !== "request" || !c.payload) throw new Error("claim: a request record (src/client/raw.ts signClaim)");
+  if (c.payload.path !== CLAIM_PATH) throw new Error(`claim: a request to ${CLAIM_PATH}`);
+  const sig = c.signature as { scheme?: unknown; sender?: unknown } | undefined;
+  if (sig?.scheme !== "signed" || !(sig.sender instanceof Uint8Array)) throw new Error("claim: signed (the `signed` scheme)");
+  if (Buffer.from(sig.sender).toString("hex") !== owner) throw new Error("claim: its sender is not the owner");
 }
 
-/** Why a claim cannot be forwarded for `owner` (throws): not a claim, another sender, a recipient named. The signature is the front door's to check. */
-function claimProblem(c: SignedClaim, owner: string): void {
-  const m = c.message;
-  if (m.kind !== "mail" || m.op !== "put" || m.box !== "claim") throw new Error("claim: not a message in box claim");
-  if (!(m.sender instanceof Uint8Array) || Buffer.from(m.sender).toString("hex") !== owner) throw new Error("claim: its sender is not the owner");
-  if (m.recipient !== undefined) throw new Error("claim: it names a recipient (a claim is signed before the instance exists: it names none)");
-  if (!(m.signature instanceof Uint8Array)) throw new Error("claim: not signed");
-}
+/** The chain pointer event's name (SPEC 4 [D]: {kind: "chain", root, height}, unsigned and unchecked): the chain app's event row. */
+export const CHAIN_EVENT = DEFAULT_BOX;
+/** A merkle proof event's name: the chain app's proof row (SPEC 6: `chain.proof` checks it). */
+export const PROOF_EVENT = "chain/proof";
+/** The code the chain app's proof check refuses an EARLY proof with (its header not held yet): offered again after the next header. */
+export const EARLY_PROOF_CODE = "ERR_HEADER_UNKNOWN";
+/** The chain app's rejected row (SPEC 6 [D]: `/chain/rejected`, role `chain.status`). */
+export const REJECTED_PATH = "/chain/rejected";
+/** The role the host's status service key is granted at birth (imageConfig). */
+export const STATUS_ROLE = "chain.status";
+/** An overlay app's sync row: what the host hands a BEEF it fetched from a peer (SPEC 7: `/overlay/sync`, under the app's name). */
+export const syncPath = (app: string): string => `/${app}/sync`;
 
+const proofKey = (p: Record<string, unknown>): string => `${String(p.txid ?? "")} ${p.path instanceof Uint8Array ? Buffer.from(p.path).toString("hex").slice(0, 64) : ""}`;
+const jsonBytes = (v: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(v));
+/** An answer's body as text for an error line: dag-cbor decoded (a kernel operation's {refused}), else UTF-8. */
+function answerText(a: Answer): string {
+  try { return JSON.stringify(dagCbor.decode(a.body), (_k, v) => (v instanceof Uint8Array ? Buffer.from(v).toString("hex") : typeof v === "bigint" ? Number(v) : v)); } catch { return new TextDecoder().decode(a.body).slice(0, 300); }
+}

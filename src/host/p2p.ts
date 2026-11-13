@@ -105,7 +105,7 @@ import { createLibp2p } from "libp2p";
 import type { Store } from "../runtime/store.ts";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "../client/raw.ts";
 import { verifyAnyone } from "../runtime/identity.ts";
 import { Liveness, type BeatStore, type Live, type LiveBeat } from "./liveness.ts";
 
@@ -176,11 +176,15 @@ export interface InboundAnswer {
   reason?: string;
 }
 
-/** The stream protocol a signed message travels on to an instance (#70). */
-export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
+/**
+ * The one skein stream protocol (skein next, SPEC 8 [P]): a frame is the dag-cbor request record (its
+ * payload, and its signature when it has one), the answer frame is the handler's answer (dag-cbor
+ * {status, type?, headers?, body}). Every node serves it.
+ */
+export const REQUEST_PROTOCOL = "/skein/request/1.0.0";
 
-/** Whether a node handles `protocol` inbound for its handles' rows: not the host's own. */
-const inboundRow = (protocol: string, host: Record<string, unknown>) => protocol !== MESSAGE_PROTOCOL && !(protocol in host);
+/** Whether a node handles `protocol` inbound for its handles: not the host's own. */
+const inboundRow = (protocol: string, host: Record<string, unknown>) => protocol !== REQUEST_PROTOCOL && !(protocol in host);
 
 export interface P2POptions {
   host: P2PHostConfig;
@@ -307,63 +311,26 @@ export function hostP2PConfig(vars: Record<string, string | undefined>, home?: s
   };
 }
 
-/** The libp2p config a genesis carries (`libp2p: {topics?, protocols?, listen?}`), or undefined: no node. */
-export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInstanceConfig | undefined {
-  const c = g?.libp2p as Record<string, unknown> | undefined;
-  if (!c || typeof c !== "object") return undefined;
-  const strs = (v: unknown) => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
-  const listen = strs(c.listen);
-  return { topics: strs(c.topics), protocols: strs(c.protocols), ...(listen.length ? { listen } : {}) };
-}
-
 /**
- * An instance's libp2p config as it stands (#72, #77): the genesis's
- * (libp2pOf: a tree names what its node subscribes in `config.libp2p`),
- * plus the topics and protocols named by the dispatch table's `libp2p`
- * rows added since the genesis (an app's install; address: a topic) — a
- * genesis topic row alone subscribes nothing, as a route alone did not — and
- * every stream protocol a `libp2p` row names (`/<protocol>`), whatever
- * installed it, the genesis included (#155: an image-born instance serves its
- * sync row), plus the
- * topics the apps subscribed (#119, `subscribed`).
- * `beacons` (#126): an app's beacon (or its liveness, #138: P2PHost.liveness
- * subscribes those topics itself) needs the node, and adds no topic.
- * Undefined: no node — the genesis declares none and nothing needs one.
+ * An instance's libp2p config as it stands (skein next, SPEC 7/8: the instance states which topics it
+ * serves; the host joins and listens): the topics its apps' `subscribe` events name (folded from the
+ * log, then followed live), and — an app's beacon or liveness needs the node, and adds no topic — a
+ * node at all. Undefined: no node. No protocols: every node serves the one REQUEST_PROTOCOL.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
-  const base = libp2pOf(g);
-  const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
-  // #155: a stream protocol is declared whatever installed its row; a topic row from the genesis alone subscribes nothing.
-  const names = rows.filter((r) => r.transport === "libp2p" && (String(r.address).startsWith("/") || !seeded.has(String(r.address)))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
-  // #126: a beacon needs the node (to publish), not a subscription of its topic.
-  if (!base && !names.length && !subscribed.length && !beacons) return undefined;
-  const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
-  return {
-    topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), subscribed),
-    protocols: add(base?.protocols ?? [], names.filter((n) => n.startsWith("/"))),
-    ...(base?.listen ? { listen: base.listen } : {}),
-  };
+export function libp2pConfig(subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
+  if (!subscribed.length && !beacons) return undefined;
+  return { topics: [...new Set(subscribed)], protocols: [] };
 }
 
-// ---------------------------------------------------------------- subscriptions (#119)
+// ---------------------------------------------------------------- subscriptions (skein next, SPEC 7)
 //
-// An app's installed program emits `subscribe {topic, program, fn}` /
-// `unsubscribe {topic}` (the kernel's open events: the record {kind: "event",
-// event, app, topic, program?, fn?, filter?} on the step's update, `app` the
-// kernel's, handed to the host after the commit). A subscription is the
-// delivery record: the kernel delivers a message on the topic to that app's
-// program and fn (kernel-zig/src/subscriptions.zig) — the host only
-// subscribes the topic and hands each message to the kernel. The kernel
-// checks a subscription as it is emitted (an installed app's program, a fn, a
-// topic not a /protocol, an unsubscribe of the app's own), so what the log
-// lists is followed as it is.
-//
-// The same fold as the kernel's: keyed by (app, topic) — an app's subscribe
-// replaces its own, an unsubscribe removes only its own — in log order. After
-// a restart the subscriptions are folded from the events every step recorded
-// (subscriptionsOf); the kernel keeps nothing written for them.
+// An app's installed program emits `subscribe {topic}` / `unsubscribe {topic}` (the record {kind:
+// "event", event, app, topic} on the step's update, `app` the kernel's, handed to the host after the
+// commit): membership only — the instance states which topics it serves, the host joins and listens;
+// nothing of gossip is handed to the kernel. The same fold as before: keyed by (app, topic), in log
+// order; after a restart folded from the events every step recorded (subscriptionsOf).
 
-export interface Subscription { app: string; topic: string; program: string; fn: string; filter?: string }
+export interface Subscription { app: string; topic: string }
 export type SubscriptionEvent = { event: "subscribe"; sub: Subscription } | { event: "unsubscribe"; app: string; topic: string };
 
 export const isTopic = (t: unknown): t is string => typeof t === "string" && t.length > 0 && !/[\s\0]/.test(t) && !t.startsWith("/");
@@ -375,8 +342,7 @@ export function subscriptionEvent(rec: Record<string, unknown>): SubscriptionEve
   if (typeof rec.app !== "string" || !rec.app) return { refused: "it names no app (its program record is not installed): ignored" };
   if (!isTopic(rec.topic)) return { refused: `${JSON.stringify(rec.topic)} is not a topic (text, no space; a /protocol is not subscribed)` };
   if (event === "unsubscribe") return { event, app: rec.app, topic: rec.topic };
-  if (typeof rec.program !== "string" || !rec.program || typeof rec.fn !== "string" || !rec.fn) return { refused: "a subscribe names its program and fn" };
-  return { event, sub: { app: rec.app, topic: rec.topic, program: rec.program, fn: rec.fn, ...(typeof rec.filter === "string" ? { filter: rec.filter } : {}) } };
+  return { event, sub: { app: rec.app, topic: rec.topic } };
 }
 
 /** Fold subscription events in order (subscriptions.zig apply). */
@@ -806,7 +772,7 @@ export class P2PHost {
   }
 
   /** Whether the host serves `protocol` on every node itself (/skein/message/1.0.0, `hostProtocols`). */
-  private hostServed(protocol: string): boolean { return protocol === MESSAGE_PROTOCOL || protocol in (this.o.hostProtocols ?? {}); }
+  private hostServed(protocol: string): boolean { return protocol === REQUEST_PROTOCOL || protocol in (this.o.hostProtocols ?? {}); }
 
   private async handleHostProtocol(n: Node, protocol: string, f: (handle: string, remote: PeerId, frame: Uint8Array) => Promise<Uint8Array>): Promise<void> {
     await n.node.handle(protocol, (stream, connection) => {
@@ -907,7 +873,7 @@ export class P2PHost {
     this.resubscribe(n);
     const host = this.o.hostProtocols ?? {};
     for (const protocol of (config?.protocols ?? []).filter((p) => inboundRow(p, host))) { n.handled.add(protocol); await this.handleProtocol(n, protocol); }
-    await this.handleProtocol(n, MESSAGE_PROTOCOL);
+    await this.handleProtocol(n, REQUEST_PROTOCOL);
     for (const [protocol, f] of Object.entries(host)) await this.handleHostProtocol(n, protocol, f);
     const dhts = (h.dht === "off" ? "DHT off" : `DHT ${h.dht} (${skeinDhtProtocol(h.network)})`) + `; UPnP ${h.upnp ? "on" : "off"}; bootstrap ${h.bootstrap.join(", ") || "none"}`;
     if (handle && config) this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}; ${dhts}`);
@@ -989,45 +955,52 @@ export class P2PHost {
   }
 
   /**
-   * Which handle an inbound stream on `protocol` is for (#160), by its first frame: the handles that
-   * declare the protocol (every handle declares /skein/message/1.0.0); the frame's `topic` (dag-cbor
-   * {topic, …}) picks the one among them that takes it; a frame naming none, or a topic none of them
-   * takes, goes to the one handle that declares the protocol; with several, a problem.
+   * Which handle an inbound frame on `protocol` is for (#160). On REQUEST_PROTOCOL: the node's one
+   * handle; with several, the request record's path naming one (`/@<handle>/…`, as the HTTP dev form
+   * does), else its `signed` recipient's (the instance whose identity it is); else a problem. On a
+   * protocol handles declare: the one declaring it; with several, the frame's `topic` picks.
    */
-  private streamHandle(n: Node, protocol: string, first: Uint8Array): { handle: string } | { problem: string } {
-    const declaring = [...n.handles].filter(([, h]) => protocol === MESSAGE_PROTOCOL || h.config.protocols.includes(protocol)).map(([handle]) => handle);
+  private async streamHandle(n: Node, protocol: string, frame: Uint8Array): Promise<{ handle: string } | { problem: string }> {
+    const declaring = [...n.handles].filter(([, h]) => protocol === REQUEST_PROTOCOL || h.config.protocols.includes(protocol)).map(([handle]) => handle);
     if (declaring.length === 1) return { handle: declaring[0]! };
     if (!declaring.length) return { problem: `no instance here declares ${protocol}` };
-    let topic: unknown;
-    try { const v = dagCbor.decode(first) as { topic?: unknown } | null; topic = v && typeof v === "object" ? v.topic : undefined; } catch { /* not dag-cbor: it names no topic */ }
+    let v: Record<string, unknown> | undefined;
+    try { const x = dagCbor.decode(frame) as Record<string, unknown> | null; v = x && typeof x === "object" ? x : undefined; } catch { /* not dag-cbor: it names nothing */ }
+    if (protocol === REQUEST_PROTOCOL) {
+      const path = (v?.payload as { path?: unknown } | undefined)?.path;
+      const named = typeof path === "string" ? /^\/@([^/]+)(?:\/|$)/.exec(path)?.[1] : undefined;
+      if (named) return declaring.includes(named) ? { handle: named } : { problem: `no instance ${named} on this node` };
+      const to = (v?.signature as { recipient?: unknown } | undefined)?.recipient;
+      if (to instanceof Uint8Array && this.o.identity) {
+        for (const h of declaring) { const id = await this.o.identity(h); if (id && Buffer.from(id).equals(Buffer.from(to))) return { handle: h }; }
+      }
+      return { problem: `this node carries ${declaring.length} instances: name one (a path /@<handle>/…, or a signed request's recipient)` };
+    }
+    const topic = v?.topic;
     if (typeof topic !== "string" || !topic) return { problem: TOPIC_REQUIRED };
     // A topic several declaring instances take (a discovery instance beside a token instance, #137): the first declared of them.
-    const taker = declaring.find((handle) => n.handles.get(handle)!.config.topics.includes(topic as string));
+    const taker = declaring.find((handle) => n.handles.get(handle)!.config.topics.includes(topic));
     return taker ? { handle: taker } : { problem: `no instance here takes ${topic}` };
   }
 
-  /** An inbound stream on a handled protocol: its first frame picks the handle (#160); each frame one front-door call, its answer's body written back. */
+  /** An inbound stream on a handled protocol: each frame picks its handle (#160) and is one call (Router.p2pInbound), its answer written back. */
   private async serve(n: Node, protocol: string, stream: Stream, remote: PeerId): Promise<void> {
     const lp = lpStream(stream);
     let handle = this.nameOf(n);
     try {
-      let first: Uint8Array | undefined;
-      try { first = (await lp.read()).subarray(); } catch { /* the remote closed before a frame: nothing owed */ }
-      if (first) {
-        const to = this.streamHandle(n, protocol, first);
+      for (;;) {
+        let frame: Uint8Array;
+        try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed or reset its side: nothing here is owed an answer
+        const to = await this.streamHandle(n, protocol, frame);
         if ("problem" in to) {
           this.say(handle, `libp2p: ${protocol} from ${remote}: ${to.problem}: answered and closed`);
-          await lp.write(dagCbor.encode({ kind: "error", message: to.problem }));
-          await stream.close().catch(() => {});
-          return;
+          await lp.write(dagCbor.encode(protocol === REQUEST_PROTOCOL ? { status: 404, type: "application/json", body: new TextEncoder().encode(JSON.stringify({ status: "error", code: "ERR_NOT_FOUND", description: to.problem })) } : { kind: "error", message: to.problem }));
+          break;
         }
         handle = to.handle;
-        for (let frame: Uint8Array | undefined = first; ;) {
-          const a = await this.o.inbound(handle, { transport: "libp2p", protocol, from: remote.toMultihash().bytes, body: frame });
-          if (a.body) await lp.write(a.body);
-          if (a.close || a.verdict === "reject") break;
-          try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed or reset its side: the stream is over either way, and nothing here is owed an answer
-        }
+        const a = await this.o.inbound(handle, { transport: "libp2p", protocol, from: remote.toMultihash().bytes, body: frame });
+        if (a.body) await lp.write(a.body);
+        if (a.close || a.verdict === "reject") break;
       }
       await stream.close().catch(() => {}); // a stream the remote already closed or reset cannot be closed again; every frame was answered
     } catch (e) {

@@ -1,148 +1,60 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-host`: the host's management database (instances.ts, $SKEIN_HOME/host.db)
-// and the router (router.ts, #33) that serves every enabled row.
-//   skein-host run                    the host (#142): on the first run it makes the host skein, then serves
-//   skein-host init [--handle host]   the first run's part alone: the host skein made (once), nothing served
-//   skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>]   a grant (#143)
-//   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+// and the router (router.ts) that serves every enabled row.
+//   skein-host run                    the host: the router, every enabled instance hydrated once
+//   skein-host grant <key> --instance <handle> [--role root|<app>.<role>] [--remove]   a grant: the operator's request
+//   skein-host add <handle> --image <default | dir> | --boot <dir|tree-cid> [--from store] | --packet <file>  [--domain d] …
+//   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--tree cid] [--knows a,b|*] [--disabled]   (an existing row)
 //   skein-host knows <handle> [a,b | --all | --none]
-//   skein-host list                   handle, kind, status, identity, front-door key, store, tree, libp2p peer ID
+//   skein-host list                   handle, status, identity, store, tree, libp2p peer ID
 //   skein-host identity <handle> [--peer]   an instance's identity key (from the master secret); --peer: its libp2p peer ID
-//   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
+//   skein-host ledger [handle]        the fuel ledger: what reads and refusals cost
 //   skein-host enable|disable|remove <handle>
-//   skein-host run
 //   skein-host roster [--for <handle>]
-//   skein-host peers <handle> list    its address book, read from its store
-//   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
-//   skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>
-//   skein-host system <dir>
-//   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
-//   skein-host chain [handle]          #156: the host chain's tip — height, hash, record — the RocksDB database's
-//                                     (SKEIN_STORE_ROCKSDB; through the running kernel process), else <handle>'s own store's
-//   skein-host migrate-store <handle>   #158: its runtime.db copied into its set of the host's RocksDB database (SKEIN_STORE_ROCKSDB)
-// `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
-// store: its objects pre-filled, its genesis from the system tree (or a
-// checkpoint restored). `system` writes the stock system as such a tree;
-// `pack` writes a packet (packet.ts: synthetic transactions, never broadcast).
-// `add --image` (#89) boots the new row from an image: a system tree whose
-// genesis names no owner and carries the claim row (`default`: the repo's
-// images/default, the default image; `host`: images/host merged over it, the
-// onboarding app installed at birth; a directory with bin/: a complete image
-// of its own; a directory with no bin/ (an app repository's image/, only
-// etc/apps.json): merged over the default image as images/host is — either
-// way the apps its etc/apps.json names installed at birth, #152; an outpoint is
-// refused until the ORDFS app exists). Its claim row admits anyone: the first claim's sender owns it
-// (#127) — the owner claims it (`skein claim --instance <handle>` or
-// `skein claim <its origin>`, or a wallet's own claim message); the host
-// holds no owner's key and sends no claim.
-// `run` (#142) is the one command a host needs. Its settings are $SKEIN_HOME/host.env (every `SKEIN_*`
-// line; the environment wins: hostenv.ts) — they configure the commands, and through `run` how the host
-// skein is first built; a later change does not reach into a live skein. On the first run (no host skein in
-// host.db) it makes the master secret and host.db as before, the operator's key (SKEIN_OPERATOR_KEY,
-// default $SKEIN_HOME/operator.key: used if present, made if not, plain, 0600) and the HOST SKEIN —
-// Router.createInstance with `host`: from the host image (images/host merged over images/default: the
-// onboarding app), its genesis's `root` the operator's key (#143: root from birth;
-// no claim route), the onboarding app's config
-// from host.env (domain SKEIN_HANDLE_DOMAIN, default the router origin's domain; origin
-// SKEIN_ROUTER_ORIGIN; name SKEIN_HOST_NAME; note SKEIN_HOST_NOTE), the instance manager and the certifier in
-// its address book, published at once — and prints its identity and URLs. Later runs start what exists.
-// `init` is the first run's part alone. `grant` grants a role — root by default — to another key (a
-// browser wallet's) in the host skein: the operator's message, signed with its key and handed to the running host
-// (src/client/target.ts, the control socket's `message` op).
-// `add` inserts, or updates the given fields of an existing row. A new row's
-// identity is the signer's (signer.ts, #18): derived from the router's master
-// secret with key ID = the handle, no wallet process; `--derive` sets it again
-// on an existing row (its store must then be a new one: re-genesis).
-// `roster` prints the front end's roster (roster.ts), which `run` also serves
-// at /roster.json; `roster --for h` prints h's ROSTER.md (#27: the rows it
-// `knows`; `knows` sets them). `peers <handle> list` reads an instance's
-// address book from its store. Nothing here writes into a running instance
-// on its own: installing an app, a dispatch row, an address-book entry, a
-// directory into `main` are the owner's messages (the client `skein`, #142,
-// signs them with the operator's key; the management page with a wallet).
-// Nothing registers itself anywhere: a key in no address book is "no route".
-// `run` is the router (#40: a reverse proxy — each
-// instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
-// or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
-// (every enabled row's started at start, any other on demand; stopped only
-// past SKEIN_IDLE_MS, which is unset by default), the providers (the waker
-// among them), the signer, the fuel ledger; plus the host page. It
-// reads ($SKEIN_HOME/host.env, under the environment):
+//   skein-host pack <handle|dir|tree-cid> <out> [--from store] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+//   skein-host chain [handle]          the host chain's tip — height, hash, record
+// `add --image/--boot/--packet` runs the loader (boot.ts, #4) on the new row's empty store: its objects
+// pre-filled, its genesis from the tree (or a checkpoint restored). An image (`default`: images/default; a
+// directory with etc/routes.json: a complete image; one without: merged over the default image, #152) carries
+// the claim row: the first claim's sender owns it (`skein claim --instance <handle>`).
+// Nothing here writes into a running instance on its own: installing an app, a row, a directory into `main`
+// are root's requests (the client `skein`, signed with the operator's key, over the control socket).
+// Settings: $SKEIN_HOME/host.env (every `SKEIN_*` line; the environment wins: hostenv.ts):
 //   SKEIN_HOME            default ~/.skein; host.db, master.key, operator.key and host.env live here
-//   SKEIN_OPERATOR_KEY    the operator's key file (#142), default $SKEIN_HOME/operator.key: the host skein's owner
-//   SKEIN_HANDLE_DOMAIN, SKEIN_HOST_NAME, SKEIN_HOST_NOTE   the onboarding app's config at the host skein's birth
+//   SKEIN_OPERATOR_KEY    the operator's key file (the client's signer), default $SKEIN_HOME/operator.key
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
 //   SKEIN_KEY_FILE        #160: one-key mode — the ONE key every instance signs with (a file, read and never made), or
-//                         SKEIN_KEY (hex); refused beside SKEIN_MASTER_KEY(_FILE). Every row the same identity, one peer key
-//                         (signer.ts Signer.oneKey), one libp2p node for all (p2p.ts); a create claimed by the host's key (#162)
+//                         SKEIN_KEY (hex); refused beside SKEIN_MASTER_KEY(_FILE); a create claimed by the host's key (#162)
 //   SKEIN_IMAGES_DIR      #162: where a create's image by name is (<dir>/<name>), default $SKEIN_HOME/images
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
-//   SKEIN_ROOT_INSTANCE   the instance served at / of a hostname that is no instance's (the standalone's app at http://localhost:<port>/)
-//   SKEIN_ROUTER_BIND     the addresses the router listens on, a comma list (default 127.0.0.1,::1): a tunnel on another box needs the LAN/tailnet address here
-//   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: where BRC-169 discovery is
-//                         answered (the host skein's onboarding app, #113), and the geneses' resolveOrigin. The manifest's
-//                         URLs, the handle domain, the host's name and note are the onboarding app's config
-//                         (config.onboard), written at the host skein's birth from these settings
+//   SKEIN_ROOT_INSTANCE   the instance served at / of a hostname that is no instance's; it may take the router's own first label
+//   SKEIN_ROUTER_BIND     the addresses the router listens on, a comma list (default 127.0.0.1,::1)
+//   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
-//   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses (unset: none)
-//   SKEIN_NETWORK         the network the whole host runs on: main | test | regtest, default main (any other value:
-//                         skein-host refuses to start). Every genesis the host makes has it as defaults.walletNetwork,
-//                         under a tree's own config; the chain app takes its network from that default, so
-//                         the headers tracker must follow this network's chain or the chain app refuses them
-//   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
-//   SKEIN_ANSWER_WAIT_MS  how long the front door holds a request waiting on its thread's answer (ms) before 503 +
-//                         Retry-After; default 120000 (two minutes; frontdoor.ts)
-//   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE its genesis name, default david@localhost
-//   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
+//   SKEIN_NETWORK         the network the whole host runs on: main | test | regtest, default main; every genesis the
+//                         host makes has it as defaults.walletNetwork (the chain app's network)
+//   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never
 //   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
 //   SKEIN_HOST_PORT       the host page (/) and roster (/roster.json) on 127.0.0.1, default 4600
-//   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
-//   SKEIN_STORE           named the host's LMDB environment: LMDB is no longer supported, a set SKEIN_STORE is refused.
-//                         With none of the three below: a file per instance, $SKEIN_HOME/instances/<handle>/runtime.db
-//   SKEIN_STORE_ROCKSDB   #158: the host's RocksDB database (a directory, e.g. $SKEIN_HOME/store-rocksdb), run by ONE
-//                         `skein-kernel host` process the router starts (every instance in it, a worker pool,
-//                         SKEIN_WORKERS threads, default the CPU count): a new instance's store is its set there
-//                         (host.db `rocksdb:<dir>`). The host's reads of such a set go through that
-//                         process (its host-read socket), so `ls`, explore and the other readers need the host running;
-//                         the one-shot commands that boot (`add --image`, `init`) open the database themselves, so the
-//                         host must be stopped for them (RocksDB: one process per database)
-//   SKEIN_STORE_SQLITE    the settled split (2026-10-31): the host's ONE SQLite database (a file, e.g. $SKEIN_HOME/store.sqlite):
-//                         a new instance's store is its set there (host.db `sqlite:<path>`; the set its handle), run by the
-//                         WASM kernel this process loads (one worker per active instance, wasm-kernel.ts). Over
-//                         SKEIN_STORE_ROCKSDB. Unset, and no native kernel binary here (the npm package
-//                         ships none): $SKEIN_HOME/store.sqlite
-//   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
-//                         queue), one status subscription, the instances' status provider. Unset: the network's (arc.ts DEFAULT_ARC:
-//                         test https://testnet.arcade.1sat.app, main https://arcade.1sat.app, regtest none); `off`: none.
-//                         SKEIN_ARC_TOKEN its one callback token (required with a named URL; with the network's and none set,
-//                         made once and appended to $SKEIN_HOME/host.env, read from there after);
-//                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
-//                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only)
-//   SKEIN_HEADERS_URL     an SSE stream of block headers (hex, or chaintracks' JSON: Arcade's
-//                         http://127.0.0.1:8083/chaintracks/v2/tip/stream) into the host's one header intake (SPEC 8,
-//                         headers-source.ts), beside the Teranode tracker or alone; a `…/tip/stream` URL's history
-//                         (`…/headers`) brings the host chain up to it at start
-//   SKEIN_TERANODE        #156: `off` turns the host's headers tracker over the Teranode P2P network off (teranode.ts;
-//                         `skein-host run` only). On by default where the network has bootstrap peers (main, test):
-//                         it joins the network's block topic (`teranode/bitcoin/1.0.0/<network>-block`), takes each
-//                         announced header into the host's one header intake (SPEC 8), crawls a gap back from the
-//                         announcer's data hub, and, with an empty host chain, syncs the whole chain first from the
-//                         network's default hub (gorillanode). It rides the host node (the host key's, one per host:
-//                         the instances' overlay on the same node), its block-topic peers from the
-//                         bootstrap list and GossipSub (no Teranode DHT; the overlay's on its skein DHT, /skein/kad/<network>/1.0.0)
-//   SKEIN_TERANODE_BOOTSTRAP  more Teranode bootstrap peers (multiaddrs, comma separated) beside the network's
-//                         (/dnsaddr/<mainnet|testnet>.bootstrap.teranode.bsvb.tech); regtest has none: set it to run one
-//   SKEIN_HEADERS_HUB     the data hub the tracker's first sync reads (a Teranode asset API: `bestblockheader`,
-//                         `headers/<hash>?n=`) over the network's default (https://<mainnet|testnet>.gorillanode.io/api/v1);
-//                         regtest has none: without one the first sync waits for the first announcement's hub
+//   SKEIN_KERNEL_BIN      the kernel binary (the RocksDB host process), default kernel-zig/zig-out/bin/skein-kernel
+//   SKEIN_STORE_ROCKSDB   #158: the host's RocksDB database (a directory), run by ONE `skein-kernel host` process
+//   SKEIN_STORE_SQLITE    the host's ONE SQLite database (a file), run by the wasm kernel this process loads; the
+//                         default when SKEIN_STORE_ROCKSDB is not set: $SKEIN_HOME/store.sqlite (the one-process-per-instance
+//                         serve mode is gone: SPEC 5)
+//   SKEIN_ARC_URL         the host's Arcade (arc.ts): broadcasts, its status subscription (proofs as events; a REJECTED
+//                         as the status service's signed request); `off`: none. SKEIN_ARC_TOKEN, SKEIN_ARC_EVENTS_URL,
+//                         SKEIN_ARC_CALLBACK_URL as before
+//   SKEIN_HEADERS_URL     an SSE stream of block headers into the host's one header intake (headers-source.ts)
+//   SKEIN_TERANODE        `off` turns the host's Teranode headers tracker off (teranode.ts); SKEIN_TERANODE_BOOTSTRAP,
+//                         SKEIN_HEADERS_HUB as before
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, namedImageSource, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
-import { Kernel, KERNEL_BIN } from "./kernel.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, imageSource, isOverlayImage, MemBlocks, namedImageSource, packetSource, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { KERNEL_BIN } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -159,8 +71,7 @@ import { hostArcConfig } from "./arc.ts";
 import { lineWriter } from "./stamp.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { DEFAULT_HUBS, TERANODE_BOOTSTRAP } from "./teranode.ts";
-import { addressBook } from "./deploy.ts";
-import { fetchHttp, hostDomain, Router, type RouterOptions } from "./router.ts";
+import { hostDomain, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, pathOnly, type InstanceRow, type RowFields } from "./instances.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
 
@@ -173,32 +84,25 @@ export interface Env {
 }
 
 const USAGE = `usage:
-  skein-host run                                          the host: on the first run the host skein (owned by the operator's key), then the router on :8100
-                                                          (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
-  skein-host init [--handle host]                         the first run's part alone: the host skein (#142), once; nothing served
-  skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>] [--dry-run]
-                                                          a grant (#143; root by default) in the host skein (or <handle>):
-                                                          the operator's message, to the running host
-  skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+  skein-host run                                          the host: the router on :8100 (instances at <handle>.localhost:8100), a kernel per
+                                                          instance on demand; host page and roster on :4600
+  skein-host grant <key> --instance <handle> [--role root|<app>.<role>] [--remove] [--dry-run]
+                                                          a grant (root by default): the operator's request, to the running host
+  skein-host add <handle> --image <default | dir> [--domain d]   a new instance from an image: no owner, a claim row (claim it: skein claim)
+  skein-host add <handle> --boot <dir | tree-cid [--from store]>              … from a system tree (docs/BOOTSTRAP.md)
+  skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]  … from a packet: a system tree, or a checkpoint to restore
+  skein-host add <handle> [--domain d] [--derive] [--identity hex] [--tree cid] [--knows a,b|*] [--disabled]   an existing row's fields
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
-  skein-host list                                         handle, kind, status, identity, front-door key, store, tree, libp2p peer ID
+  skein-host list                                         handle, status, identity, key, store, tree, libp2p peer ID
   skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host enable|disable|remove <handle>
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
-  skein-host peers <handle> list                          its address book, from its store: key, transport, address, handle, source
-  skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
-  skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
-  skein-host add <handle> --image <default | host | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
-  skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
-  skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
-  skein-host chain [handle]                               #156: the host chain's tip (height, hash, record): the RocksDB database's
-                                                          (SKEIN_STORE_ROCKSDB, through the running kernel process), else <handle>'s own store's
-  skein-host migrate-store <handle>                       #158: its runtime.db copied into its set of the host's RocksDB database (SKEIN_STORE_ROCKSDB); the row then
-                                                          names the set, the file kept beside as runtime.db.migrated-<date>. With the host stopped
-settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
-dispatch rows, the address book, a directory into main) are the client's: \`skein install|dispatch|… --instance <handle>\``;
+  skein-host pack <handle|dir|tree-cid> <out> [--from store] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+  skein-host chain [handle]                               the host chain's tip (height, hash, record)
+settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). Root's requests (installing an app, rows,
+grants, a directory into main) are the client's: \`skein install|routes|grant|… --instance <handle>\``;
 
 export const homeOf = homeOfVars;
 
@@ -225,7 +129,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (!db.get(handle)) {
           const sqlite = sqliteStoreOf(env.vars, home);
-          f.store ??= sqlite ? `sqlite:${sqlite}` : env.vars.SKEIN_STORE_ROCKSDB ? `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB)}` : join(home, "instances", handle, "runtime.db"); // #158, the settled split
+          f.store ??= sqlite ? `sqlite:${sqlite}` : `rocksdb:${resolve(env.vars.SKEIN_STORE_ROCKSDB!)}`; // #158, the settled split; no serve mode (SPEC 5)
           f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
         }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
@@ -246,11 +150,11 @@ export async function main(argv: string[], given: Env): Promise<number> {
             // A directory with no bin/ (#152: an app repository's image/, etc/apps.json alone): merged over the
             // default image as images/host is. A directory with bin/: a complete image.
             const overlay = v.image !== undefined && existsSync(v.image) && statSync(v.image).isDirectory() && isOverlayImage(v.image) ? resolve(v.image) : undefined;
-            const src = v.image === "default" || v.image === "host" ? await namedImageSource({ image: v.image })
+            const src = v.image === "default" ? await namedImageSource({ image: v.image })
               : overlay ? await namedImageSource({ overlay })
               : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
-            const b = await router.bootRow(handle, src, { image: v.image !== undefined });
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? ` · no owner: claim it (skein claim --instance ${handle})` : ""}`);
+            const b = await router.bootRow(handle, src);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled${b.apps?.length ? ` · apps ${b.apps.map((x) => `${x.name} ${x.version}`).join(", ")}` : ""} · genesis ${b.entry} · no owner: claim it (skein claim --instance ${handle})`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
@@ -260,8 +164,6 @@ export async function main(argv: string[], given: Env): Promise<number> {
         }
         return 0;
       }
-      case "init":
-        return await initCmd(db, rest, env);
       case "grant":
         return await grantCmd(db, rest, env);
       case "identity": {
@@ -279,8 +181,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
       case "list": {
         const door = frontDoorKeys(env.vars, home);
         const peer = peerIds(env.vars, home);
-        const host = db.setting("host_skein");
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : "agent", r.status, r.identity ?? "-", door(r), r.store, r.tree ?? "-", peer(r)].join("\t"));
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.status, r.identity ?? "-", door(r), r.store, r.tree ?? "-", peer(r)].join("\t"));
         return 0;
       }
       case "enable": case "disable": case "remove": {
@@ -297,14 +198,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
         return knowsCmd(db, rest, env);
       case "roster":
         return await rosterCmd(db, rest, env);
-      case "peers":
-        return await peersCmd(db, rest, env);
-      case "system":
-        return await systemCmd(rest, env);
       case "pack":
         return await packCmd(db, rest, env);
-      case "migrate-store":
-        return await migrateStoreCmd(db, rest, env);
       case "chain": {
         // #156: the host chain's tip (a RocksDB host's: one per host; a serve instance's: in its own store).
         const [handle] = rest;
@@ -382,100 +277,26 @@ export function originOf(vars: Env["vars"], handle: string): string {
   return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
 }
 
-/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein peers`). */
-async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const [handle, op, ...more] = rest;
-  if (!handle || more.length || op !== "list") { env.err(USAGE); return 2; }
-  const row = db.get(handle);
-  if (!row) { env.err(`skein-host peers: no instance ${handle}`); return 1; }
-  const s = openRow(row, env);
-  try {
-    for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
-    return 0;
-  } finally {
-    await s.close?.();
-  }
-}
-
 /**
- * The onboarding app's config at the host skein's birth (#142), from the settings: domain, origin, name, note, and
- * `messagebox` — every handle's messagebox URL: the host skein's own URL (the instance-origin template with its
- * handle) plus the messagebox app's path, `/messagebox` (the app hosts the keys onboard records).
- */
-export function onboardConfig(v: Env["vars"], handle: string): Record<string, Record<string, unknown>> {
-  const port = v.SKEIN_ROUTER_PORT || "8100";
-  const origin = (v.SKEIN_ROUTER_ORIGIN || "http://127.0.0.1:{port}").replace("{port}", port).replace(/\/+$/, "");
-  const messagebox = `${originOf(v, handle).replace(/\/+$/, "")}/messagebox`;
-  return { onboard: { onboard: { domain: v.SKEIN_HANDLE_DOMAIN || hostDomain(origin), origin, messagebox, ...(v.SKEIN_HOST_NAME ? { name: v.SKEIN_HOST_NAME } : {}), ...(v.SKEIN_HOST_NOTE ? { note: v.SKEIN_HOST_NOTE } : {}) } } };
-}
-
-/**
- * The first run's part (#142): the operator's key (made if absent) and the host skein —
- * Router.createInstance with `host`: the host image, the operator's key its owner in its genesis, the
- * onboarding app's config from the settings — published at once. What it prints is what a human needs.
- */
-async function createHostSkein(router: Router, db: HostDb, handle: string, env: Env): Promise<InstanceRow> {
-  const op = operatorKey(env.vars, { create: true });
-  const owner = identityOf(op.key);
-  const t0 = Date.now();
-  const config = onboardConfig(env.vars, handle);
-  const c = await router.createInstance(handle, owner, { host: true, appConfig: config });
-  const cfg = config.onboard!.onboard as { domain: string; origin: string; messagebox: string };
-  env.out(`skein-host: first run — the host skein ${c.handle} ${c.identity} at ${c.url}, owned by the operator's key ${owner} (${op.path}${op.made ? ", made now, mode 0600" : ""}) · ${Date.now() - t0} ms`);
-  env.out(`skein-host: apps onboard, messagebox installed at birth · handles @${cfg.domain} · registrations and BRC-169 at ${cfg.origin}/ · the handles' messagebox ${cfg.messagebox}`);
-  env.out(`skein-host: to manage it from a browser wallet: skein-host grant <the wallet's identity key> --role root · the operator's own messages: skein install|routes|grant|… --instance ${c.handle}`);
-  return db.get(handle)!;
-}
-
-/**
- * `skein-host init [--handle host]` (#90, #142): the first run's part alone — the host skein made through
- * a router of this command's own (closed afterwards; the running router hydrates it on its first
- * request). Once: a second `init` prints which instance is the host skein.
- */
-async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" } } });
-  if (positionals.length) { env.err(USAGE); return 2; }
-  const had = db.hostSkein();
-  if (had) {
-    if (v.handle !== undefined && v.handle !== had.handle) { env.err(`skein-host init: the host skein is ${had.handle} already`); return 1; }
-    env.out(`the host skein: ${had.handle}@${had.domain} (${had.identity ? short(had.identity) : "-"}) ${had.status}`);
-    return 0;
-  }
-  if (await routerAt(env.vars)) { env.err("skein-host init: a router serves this host: `skein-host run` makes the host skein on its first run (restart it)"); return 1; }
-  const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
-  try {
-    await createHostSkein(router, db, v.handle ?? "host", env);
-    return 0;
-  } catch (e) {
-    env.err(`skein-host init: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await router.close();
-  }
-}
-
-/**
- * `skein-host grant <key> [--role <role>] [--remove] [--instance <handle>] [--dry-run]` (#142, #143): the
- * kernel's `grant` operation — root (or `<app>.<role>`) to the key — in the host skein (or `handle`): the
- * operator's message (src/client/admin.ts planGrant), signed with its key and handed to the running host
- * over its control socket.
+ * `skein-host grant <key> --instance <handle> [--role <role>] [--remove] [--dry-run]`: the kernel's `grant`
+ * operation — root (or `<app>.<role>`) to the key — in the instance: the operator's request
+ * (src/client/admin.ts planGrant), signed with its key and handed to the running host over its control socket.
  */
 async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const { values: v, positionals: [key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { role: { type: "string" }, remove: { type: "boolean" }, instance: { type: "string" }, "dry-run": { type: "boolean" } } });
-  if (!key || more.length) { env.err(USAGE); return 2; }
-  const handle = v.instance ?? db.hostSkein()?.handle;
-  if (!handle) { env.err("skein-host grant: no host skein yet (skein-host run)"); return 1; }
-  const { planGrant, messageJson } = await import("../client/admin.ts");
+  if (!key || more.length || !v.instance) { env.err(USAGE); return 2; }
+  void db;
+  const { planGrant } = await import("../client/admin.ts");
   const { localTarget } = await import("../client/target.ts");
   const { keyWallet } = await import("../wallet.ts");
   let t: import("../client/target.ts").Target | undefined;
   try {
-    t = localTarget(env.vars, handle, keyWallet(operatorKey(env.vars).key));
+    t = localTarget(env.vars, v.instance, keyWallet(operatorKey(env.vars).key));
     const p = await planGrant(await t.view(), key, { ...(v.role ? { role: v.role } : {}), ...(v.remove ? { remove: true } : {}) });
     for (const l of p.prompt) env.out(l);
-    if (v["dry-run"]) { for (const m of p.messages) env.out(messageJson(p.recipient, m)); return 0; }
-    for (const m of p.messages) await t.send(m.box, m.body);
-    env.out(`${handle}: ${p.messages.length ? `${v.role ?? "root"} ${v.remove ? "revoked from" : "granted to"}` : "nothing to change for"} ${short(key)}`);
+    if (v["dry-run"]) return 0;
+    for (const r of p.requests) await t.send(r.path, r.body);
+    env.out(`${v.instance}: ${p.requests.length ? `${v.role ?? "root"} ${v.remove ? "revoked from" : "granted to"}` : "nothing to change for"} ${short(key)}`);
     return 0;
   } catch (e) {
     env.err(`skein-host grant: ${(e as Error).message}`);
@@ -553,10 +374,8 @@ function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promis
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 
 export interface RunOptions {
-  /** The router's options beyond what the environment gives (tests). */
+  /** The router's options beyond what the environment gives (tests, an application host). */
   router?: Partial<RouterOptions>;
-  /** false: no host skein on the first run (tests that make their own). */
-  firstRun?: boolean;
 }
 
 export interface Host {
@@ -589,23 +408,17 @@ function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" 
 function routerOptions(db: HostDb, env: Env): RouterOptions {
   const v = env.vars;
   const home = homeOf(v);
-  const named = (s: string | undefined, d: string) => { const [handle, domain = "localhost"] = (s || d).split("@"); return { handle: handle!, domain }; };
   return {
     db, ...wallets(v, home),
-    owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
-    origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
+    origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     network: hostNetwork(v),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     ...(v.SKEIN_STORE_ROCKSDB ? { rocksStore: resolve(v.SKEIN_STORE_ROCKSDB) } : {}), // #158
     ...((s) => (s ? { sqliteStore: s } : {}))(sqliteStoreOf(v, home)), // the settled split: the wasm kernel
-    // #162: the instances besides the host skein the instance manager takes messages from; the images a create names.
     ...(v.SKEIN_ROOT_INSTANCE ? { rootInstance: v.SKEIN_ROOT_INSTANCE } : {}),
     ...(v.SKEIN_HEADERS_URL ? { headersUrl: v.SKEIN_HEADERS_URL } : {}),
     imagesDir: resolve(v.SKEIN_IMAGES_DIR || join(home, "images")),
-    // #142: settings host.env may give (the environment's are read where they are used, too).
-    ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
-    ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
     libp2p: hostP2PConfig(v, home),
     arc: hostArcConfig(v, home, { made: (f) => env.out(`skein-host: the host's Arcade callback token made and kept in ${f} (SKEIN_ARC_TOKEN)`) }),
     log: (source, line) => env.out(`[${source}] ${line}`),
@@ -654,26 +467,6 @@ async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; 
   s.close();
   for (const b of c.blocks) await blocks.putBlock(b.cid, b.bytes);
   return { kind: "tree", root, objects: anyOf(blocks, wasmDirObjects(WASM_DIR)) };
-}
-
-/** `skein-host system <dir>`: the stock system (what code genesis writes) as a system tree to start from. */
-async function systemCmd(rest: string[], env: Env): Promise<number> {
-  const [dir, ...more] = rest;
-  if (!dir || more.length) { env.err(USAGE); return 2; }
-  const tmp = mkdtempSync(join(tmpdir(), "skein-system-"));
-  const k = new Kernel({ db: join(tmp, "k.db"), handle: "system", domain: "localhost", command: env.vars.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: tmp } });
-  try {
-    const files = await stockSystemFiles(k);
-    for (const [p, text] of Object.entries(files)) {
-      mkdirSync(dirname(join(dir, p)), { recursive: true });
-      writeFileSync(join(dir, p), text);
-    }
-    env.out(`${dir}: ${Object.keys(files).length} files (${Object.keys(files).filter((f) => f.endsWith(".cid")).length} programs, etc/config.json, etc/dispatch.json)`);
-    return 0;
-  } finally {
-    await k.stop(5000);
-    rmSync(tmp, { recursive: true, force: true });
-  }
 }
 
 /** An index node or a state record (#30): history a checkpoint leaves behind (dump.zig isIndexBlock). */
@@ -747,47 +540,6 @@ async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   } finally { close(); }
 }
 
-/** Whether something answers on the control socket (a running host holds its instances' kernels). */
-function controlAlive(sock: string): Promise<boolean> {
-  if (!existsSync(sock)) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    const c = connect(sock);
-    c.once("connect", () => { c.destroy(); resolve(true); });
-    c.once("error", () => resolve(false));
-  });
-}
-
-/**
- * `skein-host migrate-store <handle>` (#158): the row's runtime.db copied into its set of the host's
- * RocksDB database (SKEIN_STORE_ROCKSDB) by `skein-kernel migrate` (blocks, the state pointer, the size); the
- * row then names the set (`rocksdb:<dir>`) and the file is kept beside, renamed
- * runtime.db.migrated-<date> (never deleted here). Only with the host stopped: its kernel would
- * hold the store; a running host (its control socket or router answering) is refused.
- */
-async function migrateStoreCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const [handle, ...more] = rest;
-  if (!handle || more.length) { env.err(USAGE); return 2; }
-  // #158: SKEIN_STORE_ROCKSDB the target (from a file).
-  refuseLmdbEnv(env.vars);
-  const dir = env.vars.SKEIN_STORE_ROCKSDB ? resolve(env.vars.SKEIN_STORE_ROCKSDB) : undefined;
-  if (!dir) { env.err("skein-host migrate-store: SKEIN_STORE_ROCKSDB (the host's RocksDB database) is not set"); return 2; }
-  const row = db.get(handle);
-  if (!row) { env.err(`skein-host migrate-store: no instance ${handle}`); return 1; }
-  refuseLmdb(row.store);
-  if (isRocks(row.store)) { env.err(`skein-host migrate-store: ${handle}'s store is a set already (${row.store})`); return 1; }
-  if (!existsSync(row.store)) { env.err(`skein-host migrate-store: ${handle} has no store at ${row.store}`); return 1; }
-  if (await controlAlive(join(homeOf(env.vars), CONTROL_SOCKET)) || await routerAt(env.vars)) { env.err("skein-host migrate-store: the host is running (its kernel holds the store): stop it first, migrate, then start it"); return 1; }
-  const target = `rocksdb:${dir}`;
-  const r = spawnSync(env.vars.SKEIN_KERNEL_BIN || KERNEL_BIN, ["migrate", "--from", storeSpec(row), "--into", target, "--set", handle], { encoding: "utf8", maxBuffer: 1 << 26 });
-  if (r.status !== 0) { env.err(`skein-host migrate-store ${handle}: ${(r.stderr || r.stdout || `exit ${r.status}`).trim()}`); return 1; }
-  const store = target;
-  const kept = `${row.store}.migrated-${new Date().toISOString().slice(0, 10)}`;
-  for (const ext of ["", "-wal", "-shm"]) if (existsSync(`${row.store}${ext}`)) renameSync(`${row.store}${ext}`, `${kept}${ext}`);
-  db.add(handle, { store });
-  env.out(`${handle}: migrated into ${store} (set ${handle}) ${r.stdout.trim()} · the file kept as ${kept}`);
-  return 0;
-}
-
 /**
  * `skein-host run`: the router (router.ts) on SKEIN_ROUTER_PORT (default
  * 8100, the messagebox URL clients already use), every enabled row hydrated
@@ -808,20 +560,11 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
   if (messagebox !== undefined) env.out(`skein-host: router at http://127.0.0.1:${messagebox} · an instance at ${router.originOf("<handle>")} (or /@<handle>)`);
   env.out(`skein-host: network ${router.o.network} (SKEIN_NETWORK): every new genesis's defaults.walletNetwork, the chain app's network`);
-  const omb = router.ownerMessagebox();
-  if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
-  else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no messagebox (SKEIN_OWNER_MESSAGEBOX is unset): a new agent's genesis names no owner messagebox, and its answers cannot be delivered`);
-  if (router.arc) env.out(`skein-host: broadcaster: broadcast events → Arcade ${router.o.arc!.url}; proofs and statuses (the status provider) from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
-  else env.out(`skein-host: no Arcade (SKEIN_ARC_URL ${(v.SKEIN_ARC_URL ?? "").toLowerCase() === "off" ? "off" : `unset, and network ${hostNetwork(v)} has none`}): a broadcast event is dropped; a new genesis names no status provider`);
+  if (router.arc) env.out(`skein-host: broadcaster: broadcast events → Arcade ${router.o.arc!.url}; proofs (events) and rejections (the status service's requests) from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
+  else env.out(`skein-host: no Arcade (SKEIN_ARC_URL ${(v.SKEIN_ARC_URL ?? "").toLowerCase() === "off" ? "off" : `unset, and network ${hostNetwork(v)} has none`}): a broadcast event is dropped`);
   await router.start();
-  // #142: the first run makes the host skein (owned by the operator's key); later runs start what exists.
-  if (!db.hostSkein() && o.firstRun !== false) {
-    try { await createHostSkein(router, db, "host", env); } catch (e) { env.err(`skein-host: the host skein: ${(e as Error).message}`); }
-  }
   const enabled = db.list("enabled");
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
-  const hs = db.hostSkein();
-  env.out(hs ? `skein-host: the host skein is ${hs.handle} (${hs.identity ? short(hs.identity) : "-"}) at ${router.originOf(hs.handle)}: the instance manager takes its messages only` : "skein-host: no host skein: the instance manager acts for nobody");
   const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
   const page = async () => hostPage(db.list("enabled").map((r): HostRow => {
@@ -829,7 +572,6 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
     return {
       handle: r.handle, domain: r.domain, identity: r.identity ?? "", status: l ? "live" : "idle",
       store: r.store, tree: r.tree ?? "", pid: l?.kernel.pid, restarts: 0, origin: router.originOf(r.handle),
-      wake: router.nextWake(r.handle),
     };
   }), { router: messagebox !== undefined ? `http://127.0.0.1:${messagebox}` : undefined, originOf: (h) => router.originOf(h) });
   const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => openRow(row, env), live), "127.0.0.1", page)
@@ -875,12 +617,12 @@ export function refuseLmdbEnv(v: Record<string, string | undefined>): void {
 
 /**
  * The host's SQLite database for new instances (the settled split, 2026-10-31): SKEIN_STORE_SQLITE, else
- * $SKEIN_HOME/store.sqlite when this installation has no native kernel binary (the npm package ships the
- * wasm kernel only) and no other shared store is named; else none (a native kernel per instance store).
+ * $SKEIN_HOME/store.sqlite unless SKEIN_STORE_ROCKSDB names the RocksDB database (SPEC 5: no store file per
+ * instance).
  */
 export function sqliteStoreOf(v: Record<string, string | undefined>, home: string): string | undefined {
   refuseLmdbEnv(v);
   if (v.SKEIN_STORE_SQLITE) return resolve(v.SKEIN_STORE_SQLITE);
   if (v.SKEIN_STORE_ROCKSDB) return undefined;
-  return existsSync(v.SKEIN_KERNEL_BIN || KERNEL_BIN) ? undefined : join(home, "store.sqlite");
+  return join(home, "store.sqlite");
 }

@@ -1,30 +1,23 @@
-// The bootstrap loader (issue #4): one loader, no genesis by code (skein next,
-// SPEC 8: everything about the starting point comes from the tree). An instance boots from a **system tree** (docs/BOOTSTRAP.md):
+// The bootstrap loader (issue #4): one loader, no genesis by code (skein next, SPEC 8: everything
+// about the starting point comes from the tree). An instance boots from a **system tree**
+// (docs/BOOTSTRAP.md):
 //
-//   bin/<name>.wasm   a handler program's module (WASI), or
-//   bin/<name>.cid    the CID (raw, bafkrei…) of a module the source or the kernel holds
-//   bin/<name>.json   optional: the program record's {inputs, services, description}
-//   etc/config.json   optional: {defaults, peers, names, collect, feeds, roles} (keys hex, $self, $infer or a provider's $<name>; feeds: feeds.ts)
-//   etc/dispatch.json [{transport?, address, prefix?, filters?, program?, fn?, …}] (#77, #143: the routes; genesis.ts DispatchSpec)
-//   etc/apps.json     optional (#141, #152): {install: [<directory> | {url, hash}], routes?: [<root's own route>]}
-//   … anything else: the instance's files (SOUL.md, skills/ …)
-//   (etc/subscriptions.json, etc/routes.json, etc/reads.json — the forms before #77 and #115 — are refused, #143)
+//   etc/routes.json   [<row>] the starting rows as the kernel takes them (SPEC 3; genesis.ts rowsOf):
+//                     the kernel's operation rows, an image's claim row (`handler: "kernel.claim"`,
+//                     `role: "user"`), root's own rows. Required: a tree with it is a complete image
+//   etc/config.json   optional: {defaults?, grants?: {<role>: [<hex key>]}}
+//   etc/apps.json     optional: {install: [<directory> | {url, hash}], routes?: [<root's own row>]}
+//   … anything else: the instance's files
+//   (bin/ is gone: an image's programs come in its apps; etc/dispatch.json, the old row form, is refused)
 //
-// The loader **pre-fills the store** with the tree's objects (git-raw blobs
-// and trees, each hash-checked by the kernel's `putblock`; modules as raw
-// blocks), puts a program record per bin/ module, and writes the genesis from
-// the tree's config and routes, naming the tree — the kernel sets
-// `main` to it when it processes the genesis. That is the state an authorised
-// `objects` + `head` pair would have produced, written directly, and a
-// function of the log (a replay copies the tree and gets the same state).
-//
-// The sources only differ in where the objects come from (`Objects`): a
-// directory scanned into memory (A), a store file (`--boot <cid> --from`),
-// or a verified chain packet (B, packet.ts). A
-// packet with a checkpoint (#30's state record) is restored instead: its
-// blocks put, the state pointer moved, nothing rebuilt. The router's
-// createInstance / bootRow and `skein-host add --image/--boot/--packet` call
-// `boot` here; an empty store is no instance (the router refuses to start it).
+// The loader **pre-fills the store** with the tree's objects (git-raw blobs and trees, each
+// hash-checked by the kernel's `putblock`), installs the apps etc/apps.json names at birth (their
+// objects, modules and records put; their rows, heads and call permissions into the genesis), and
+// writes the genesis from the tree's rows and config, naming the tree — the kernel sets `main` to it
+// when it processes the genesis. A function of the log (a replay copies the tree and gets the same
+// state). The sources only differ in where the objects come from (`Objects`): a directory scanned
+// into memory, a store file, or a verified chain packet (packet.ts); a packet with a checkpoint (#30's
+// state record) is restored instead. An empty store is no instance (the router refuses to start it).
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -35,28 +28,28 @@ import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
-import { programRecord, RAW, rawCid, wasmKind } from "../runtime/programs.ts";
+import { RAW, rawCid } from "../runtime/programs.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, hashBlob, hashTree, parseTree, sha1Cid, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
-import type { DispatchRow } from "../runtime/dispatch.ts";
-import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type GrantOp, type InstanceView, type ViewStore } from "./plan.ts";
-import { CLAIM_ROW, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
+import { rowKey, type DispatchRow } from "../runtime/dispatch.ts";
+import { mergeConfig, planInstall, planRootRoute, readStoredApp, type GrantOp, type InstanceView, type ViewStore } from "./plan.ts";
+import { checkConfig, isClaimRow, rowsOf, resolveSystem, writeSystemGenesis, type ConfigSpec, type GenesisConfig, type System } from "./genesis.ts";
 import { appIgnore } from "./install.ts";
 import type { KernelSurface as Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
-// The module and program-record helpers live in ../runtime/programs.ts (no node APIs: the plan uses them in a browser too, #92).
-export { programRecord, RAW, rawCid, wasmKind };
+export { RAW, rawCid };
 
 export const BIN = "bin";
 export const CONFIG = "etc/config.json";
-export const DISPATCH = "etc/dispatch.json";
-/** The forms before #77 and #115, refused (#143: they spoke of senders). */
-export const GONE = ["etc/subscriptions.json", "etc/routes.json", "etc/reads.json"];
-/** #141, #152: the apps an image installs at birth, and root's own routes (ImageApps). */
+/** The starting rows (skein next, SPEC 3). */
+export const ROUTES = "etc/routes.json";
+/** The forms gone, refused: the old row form (etc/dispatch.json) and the forms before #77. */
+export const GONE = ["etc/dispatch.json", "etc/subscriptions.json", "etc/reads.json"];
+/** #141, #152: the apps an image installs at birth, and root's own rows (ImageApps). */
 export const APPS = "etc/apps.json";
 
 /** Blocks by CID, from wherever a source keeps them. */
@@ -92,18 +85,13 @@ export async function dirSource(dir: string, o: ScanOptions = {}): Promise<{ roo
 
 // ---------------------------------------------------------------- reading a system tree
 
-export interface ProgramSpec { name: string; module: CID; record: Record<string, unknown> }
-
 export interface SystemTree {
   root: CID;
   /** Every git object under the root, in walk order. */
   objects: Array<{ cid: CID; bytes: Uint8Array }>;
-  programs: ProgramSpec[];
-  /** Modules named by bin/<name>.wasm (with their bytes) or bin/<name>.cid (bytes if the source has them). */
-  modules: Array<{ cid: CID; bytes?: Uint8Array; name: string }>;
   config: ConfigSpec;
-  /** etc/dispatch.json (#77, #143): the routes. Required. */
-  dispatch: DispatchSpec[];
+  /** etc/routes.json: the starting rows. Required. */
+  routes: DispatchRow[];
   /** etc/apps.json (#141): the apps installed at birth, and the trees of those inside the image (appKey → tree CID). */
   apps?: ImageApps;
   appTrees?: Record<string, CID>;
@@ -119,7 +107,7 @@ export interface SystemTree {
  * the app's objects and records (pre-filled), the routes (with `app`) and the heads `<app>/app`
  * (plan.ts planInstall, planRootRoute).
  */
-export interface ImageApps { install: ImageApp[]; routes?: DispatchSpec[] }
+export interface ImageApps { install: ImageApp[]; routes?: DispatchRow[] }
 export type ImageApp = string | { url: string; hash: string };
 /** An entry's key: its path, or its tarball's tree id. */
 export const appKey = (a: ImageApp): string => typeof a === "string" ? posix.normalize(a).replace(/\/$/, "") : a.hash;
@@ -151,7 +139,7 @@ export async function treeObjects(objects: Objects, root: CID): Promise<Array<{ 
   return out;
 }
 
-/** Read a system tree out of `objects` (docs/BOOTSTRAP.md): its objects, programs, modules, config and subscriptions. */
+/** Read a system tree out of `objects` (docs/BOOTSTRAP.md): its objects, rows, config and apps. */
 export async function readSystemTree(objects: Objects, root: CID): Promise<SystemTree> {
   const all = await treeObjects(objects, root);
   const byCid = new Map(all.map((x) => [x.cid.toString(), x]));
@@ -176,37 +164,11 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
     try { return JSON.parse(text(e, path)) as T; } catch (x) { throw new Error(`${path}: ${(x as Error).message}`); }
   };
 
-  const bin = at(BIN);
-  const programs: ProgramSpec[] = [];
-  const modules: SystemTree["modules"] = [];
-  const binEntries = bin?.mode === "40000" ? entriesOf(bin.cid) ?? [] : [];
-  const names = [...new Set(binEntries.map((e) => /^(.+)\.(wasm|cid)$/.exec(e.name)?.[1]).filter((n): n is string => !!n))].sort();
-  for (const name of names) {
-    const wasm = binEntries.find((e) => e.name === `${name}.wasm`), cidFile = binEntries.find((e) => e.name === `${name}.cid`);
-    if (wasm && cidFile) throw new Error(`bin/${name}: both a .wasm and a .cid`);
-    let module: CID;
-    if (wasm) {
-      const bytes = gitBody(byCid.get(wasm.cid.toString())!.bytes, "blob")!;
-      // A preview1 core module (version 1) or a WASI 0.2 component (#34: version 0x0d, layer 1): stored as a raw
-      // block either way; the kernel's runner tells them apart by this preamble when it runs one.
-      if (wasmKind(bytes) === undefined) throw new Error(`bin/${name}.wasm: not a wasm module or component`);
-      module = rawCid(bytes);
-      modules.push({ cid: module, bytes: new Uint8Array(bytes), name });
-    } else {
-      const t = text(cidFile!, `bin/${name}.cid`).trim();
-      try { module = parseCid(t); } catch { throw new Error(`bin/${name}.cid: not a CID: ${JSON.stringify(t)}`); }
-      if (module.code !== RAW) throw new Error(`bin/${name}.cid: ${module} is not a raw module CID`);
-      modules.push({ cid: module, bytes: await objects.get(module), name });
-    }
-    const meta = json<{ inputs?: unknown; services?: string[]; description?: string }>(`${BIN}/${name}.json`) ?? {};
-    programs.push({ name, module, record: programRecord(name, module, meta) });
-  }
-  for (const g of GONE) if (at(g)) throw new Error(`${g}: the form before #77/#115 is gone (#143: it spoke of senders) — name routes in ${DISPATCH}`);
-  const dispatch = json<DispatchSpec[]>(DISPATCH);
-  if (dispatch === undefined) throw new Error(`${DISPATCH}: missing (a system tree names its routes)`);
-  if (!Array.isArray(dispatch)) throw new Error(`${DISPATCH}: not a list`);
-  const config = json<ConfigSpec>(CONFIG) ?? {};
-  if (config.defaults && Object.values(config.defaults).some((v) => typeof v !== "string")) throw new Error(`${CONFIG}: every default is a string`);
+  if (at(BIN)) throw new Error(`${BIN}/: gone (skein next): an image's programs come in its apps (${APPS})`);
+  for (const g of GONE) if (at(g)) throw new Error(`${g}: the old form is gone (skein next) — name the rows in ${ROUTES} ({kind, path | name, role, checks?, recheck?, handler})`);
+  const routes = json<unknown>(ROUTES);
+  if (routes === undefined) throw new Error(`${ROUTES}: missing (a system tree names its rows)`);
+  const config = checkConfig(json<unknown>(CONFIG));
   const apps = json<ImageApps>(APPS);
   checkImageApps(apps);
   const appTrees: Record<string, CID> = {};
@@ -215,14 +177,14 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
     const e = at(appKey(a));
     if (e?.mode === "40000") appTrees[appKey(a)] = e.cid;
   }
-  return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, dispatch };
+  return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), config, routes: rowsOf(routes) };
 }
 
 /** etc/apps.json's shape (#141, #152), refused with what it wants. */
 export function checkImageApps(apps: ImageApps | undefined): void {
   if (apps === undefined) return;
   if (!apps || !Array.isArray(apps.install) || !apps.install.every(isImageApp) || (apps.routes !== undefined && !Array.isArray(apps.routes))) throw new Error(`${APPS}: want {install: [<directory, relative to the image> | {url: <tarball>, hash: <its tree's git id, 40 hex>}], routes?: [<root's own route>]}`);
-  if ((apps as { reads?: unknown }).reads !== undefined) throw new Error(`${APPS}: reads: gone (#143) — root's own read is a route in \`routes\` (filters only)`);
+  if ((apps as { reads?: unknown }).reads !== undefined) throw new Error(`${APPS}: reads: gone — root's own read is a row in \`routes\` (kind read)`);
   const keys = apps.install.map(appKey);
   const twice = keys.filter((k, i) => keys.indexOf(k) !== i);
   if (twice.length) throw new Error(`${APPS}: ${twice.join(", ")} listed twice`);
@@ -247,46 +209,31 @@ export interface Booted { entry?: CID; tree?: CID; state?: CID; objects: number;
  * a tree, or restore a checkpoint. The kernel processes
  * the genesis when it starts (the dispatch rows; `main` → the tree).
  */
-export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: Stamp = clockNow()): Promise<Booted> {
+export async function boot(k: Kernel, src: BootSource, c: GenesisConfig, time: Stamp = clockNow()): Promise<Booted> {
   if (await k.store.log.tip()) throw new Error("the store already has a log: boot only into an empty store");
   if (src.kind === "checkpoint") {
     for (const b of src.blocks) await k.putBlock(b.cid, b.bytes);
     await k.restore(src.state);
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
-  // A tree takes from the kernel only the front door, unless its bin/ has one (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them). No shell (#83): the shell is an app.
   const t = await readSystemTree(src.objects, src.root);
-  const kernelPrograms = t.programs.some((p) => p.name === "frontdoor") ? {} : await k.call("programs", ["frontdoor"]) as Record<string, CID>;
   let n = 0;
   for (const o of t.objects) if (!(await k.hasBlock(o.cid))) { await k.putBlock(o.cid, o.bytes); n++; }
-  for (const m of t.modules) {
-    if (m.bytes) { if (!(await k.hasBlock(m.cid))) { await k.putBlock(m.cid, m.bytes); n++; } }
-    else if (!(await k.hasBlock(m.cid))) throw new Error(`incomplete: bin/${m.name}.cid names ${m.cid}, which neither the source nor the kernel holds`);
-  }
-  // The front door is the kernel's when the tree brings none; every handler comes from bin/
-  const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
-  for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  // A tree that names no http route takes the stock ones (the handshake, the mail program's /sendMessage, the explorer), as a tree
-  // with no etc/routes.json did before #143; each is dropped when the tree lacks its program.
-  // The handshake route is the transport's own: a tree that names http routes of its own gets it too.
-  const specs = t.dispatch.some((r) => r.transport === "http")
-    ? [...t.dispatch, ...(t.dispatch.some((r) => r.transport === "http" && r.address === HANDSHAKE_ROW.address) ? [] : [HANDSHAKE_ROW])]
-    : [...t.dispatch, ...STOCK_HTTP];
-  let s: System = resolveSystem(c, programs, t.config, t.root, specs);
-  const isClaim = (r: DispatchRow) => r.program === "kernel" && r.fn === "claim";
-  // An image (#89, #143): no root, so it must be claimable — its routes carry the claim route.
-  if (!c.root?.length && !s.dispatch.some(isClaim)) throw new Error(`an image (a genesis with no root) needs a claim route in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
-  // An image booted with root named (#142: the host skein): born as a claim would leave it — no claim route.
-  if (c.root?.length && s.dispatch.some(isClaim)) s = { ...s, dispatch: s.dispatch.filter((r) => !isClaim(r)) };
+  let s: System = resolveSystem(c, t.config, t.routes, t.root);
+  const owned = (s.grants.root ?? []).length > 0;
+  // An image no one owns at birth (#89): it must be claimable — its rows carry the claim row (SPEC 3: kernel.claim, role user).
+  if (!owned && !s.routes.some(isClaimRow)) throw new Error(`an image with no root at birth needs a claim row in ${ROUTES}: {"kind": "request", "path": "/kernel/claim", "role": "user", "handler": "kernel.claim"}`);
+  // Born owned (root granted at birth): as a claim would leave it — no claim row.
+  if (owned) s = { ...s, routes: s.routes.filter((r) => !isClaimRow(r)) };
   let apps: Booted["apps"];
   if (t.apps) {
     const born = await installAtBirth(k, src.objects, t, s, c, src.apps);
-    s = { ...s, dispatch: [...s.dispatch, ...born.rows], heads: born.heads, ...withGrants(s, born.grants) };
+    s = { ...s, routes: [...s.routes, ...born.rows], heads: born.heads, ...withGrants(s, born.grants) };
     n += born.put;
     apps = born.apps;
   }
   const entry = await writeSystemGenesis(k, c, s, time);
-  return { entry, tree: t.root, objects: n, programs: Object.keys(programs), ...(apps ? { apps } : {}) };
+  return { entry, tree: t.root, objects: n, programs: [], ...(apps ? { apps } : {}) };
 }
 
 /**
@@ -298,7 +245,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
  * at creation (`appConfig`) is merged over its manifest's, as an install's `--config` is. Their
  * objects and records are put into the store; the routes and heads go into the genesis.
  */
-export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, imageObjects: Objects, t: SystemTree, s: System, c: Genesis2Config, resolved: Record<string, CID> = {}): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; grants: GrantOp[]; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
+export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, imageObjects: Objects, t: SystemTree, s: System, c: GenesisConfig, resolved: Record<string, CID> = {}): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; grants: GrantOp[]; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
   const fetched = new MemBlocks();
   const objects = anyOf(imageObjects, fetched);
   const local = new MemBlocks();
@@ -313,11 +260,7 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
     get: async (cid: CID) => dagCbor.decode(await bytes(cid)),
     putBlock: async (cid: CID, b: Uint8Array) => { local.map.set(cid.toString(), { cid, bytes: b }); },
   } as unknown as ViewStore;
-  const view: InstanceView = {
-    store, identity: c.identity, programs: s.programs,
-    addressBook: (c.addressBook ?? []).map((e) => ({ key: Buffer.from(e.key).toString("hex"), transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })),
-    heads: [], dispatch: [...s.dispatch],
-  };
+  const view: InstanceView = { store, identity: c.identity, heads: [], dispatch: [...s.routes] };
   const rows: DispatchRow[] = [];
   const heads = new Map<string, CID>();
   // Call permissions: what each app's manifest asks (calls, services), written into the genesis: at birth the image is the approver.
@@ -336,7 +279,6 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
     const config = c.appConfig?.[app.checked.manifest.name];
     if (config) app.checked.manifest.config = mergeConfig(app.checked.manifest.config, config);
     const p = await planInstall(app, view, { modules: objects });
-    if (p.start) throw new Error(`${APPS}: ${p.app}: its start message is root's, sent by an install by message; a genesis carries no message (install ${p.app} after the claim)`);
     for (const r of p.records) { local.map.set(r.cid.toString(), r); await put1(r); }
     for (const h of p.heads) {
       heads.set(h.name, h.tree);
@@ -346,18 +288,10 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, i
     grants.push(...p.grants.filter((g) => g.op === "add"));
     apps.push({ name: p.app, version: p.version, notes: p.notes });
   }
-  // #147: a root route's handler may be `<app>.<role>` — an app installed above, its program record (as `skein routes add`).
-  const named: Record<string, CID> = { ...s.programs };
-  for (const r of t.apps!.routes ?? []) {
-    const role = typeof r.program === "string" ? /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(r.program) : null;
-    if (!role || named[r.program!]) continue;
-    const app = await appRecordIn(view, role[1]!);
-    if (!app) throw new Error(`${APPS}: route ${r.address}: handler ${r.program}: no app ${role[1]} installed at birth`);
-    const cid = app.record.programs[role[2]!];
-    if (!cid) throw new Error(`${APPS}: route ${r.address}: handler ${r.program}: app ${role[1]} has no program ${role[2]} (${Object.keys(app.record.programs).join(", ")})`);
-    named[r.program!] = cid;
-  }
-  for (const r of rowsOf(t.apps!.routes ?? [], named)) {
+  // Root's own rows (etc/apps.json `routes`), as the kernel takes them: a handler of an app installed above.
+  const own = rowsOf(t.apps!.routes ?? []);
+  for (const r of own) {
+    if (view.dispatch.some((x) => rowKey(x) === rowKey(r))) throw new Error(`${APPS}: routes: ${rowKey(r)}: another row has it`);
     const p = await planRootRoute(view, "add", r);
     for (const x of p.rows) { rows.push(x.row); view.dispatch.push(x.row); }
   }
@@ -380,31 +314,13 @@ export function withGrants(s: Pick<System, "calls" | "services">, grants: GrantO
 /** The program records' CIDs a tree's bin/ yields (as `boot` puts them), without a kernel. */
 export function programCid(record: Record<string, unknown>): CID { return encode(record).cid; }
 
-/** The stock system as files (`skein-host system <dir>`): bin/*.cid + bin/*.json from the kernel's records, etc/. */
-export async function stockSystemFiles(k: Kernel): Promise<Record<string, string>> {
-  const programs = await k.call("programs") as Record<string, CID>;
-  const files: Record<string, string> = {};
-  for (const [name, cid] of Object.entries(programs)) {
-    const r = await k.store.get(cid) as unknown as { code: { wasm: CID }; inputs: unknown; services: string[]; description: string };
-    files[`${BIN}/${name}.cid`] = `${r.code.wasm.toString()}\n`;
-    files[`${BIN}/${name}.json`] = `${JSON.stringify({ inputs: r.inputs, services: r.services, description: r.description }, null, 2)}\n`;
-  }
-  const { DEFAULTS } = await import("../runtime/log.ts");
-  const { STOCK_DISPATCH, STOCK_ROLES, STOCK_SCOPES } = await import("./genesis.ts");
-  files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"], scopes: STOCK_SCOPES, roles: STOCK_ROLES }, null, 2)}\n`;
-  // The stock routes (#77, #143): the boxes, the events and the HTTP routes (the admin routes are every genesis's).
-  files[DISPATCH] = `${JSON.stringify(STOCK_DISPATCH, null, 2)}\n`;
-  return files;
-}
-
-
 /**
  * Boot a store file that no router holds yet (`skein-host add --boot/--packet`,
  * tests): start its kernel, `boot`, stop it. The router then hydrates it as
  * any other store; the kernel processes the genesis at that first start.
  */
-export async function bootStore(o: { db: string; handle: string; domain: string; command?: string; env?: Record<string, string | undefined>; log?(line: string): void }, src: BootSource, c: Genesis2Config, time?: Stamp): Promise<Booted> {
-  const { Kernel, KernelHost } = await import("./kernel.ts");
+export async function bootStore(o: { db: string; handle: string; domain: string; command?: string; env?: Record<string, string | undefined>; log?(line: string): void }, src: BootSource, c: GenesisConfig, time?: Stamp): Promise<Booted> {
+  const { KernelHost } = await import("./kernel.ts");
   const { mkdirSync } = await import("node:fs");
   const { dirname } = await import("node:path");
   const { parseRocksSpec, refuseLmdb } = await import("../runtime/index-store.ts");
@@ -430,13 +346,8 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
     } finally { await host.release(); }
   }
   refuseLmdb(o.db);
-  mkdirSync(dirname(o.db), { recursive: true });
-  const k = new Kernel({ db: o.db, handle: o.handle, domain: o.domain, command: o.command, env: o.env, log: o.log });
-  try {
-    return await boot(k, src, c, time);
-  } finally {
-    await k.stop(5000);
-  }
+  void mkdirSync; void dirname;
+  throw new Error(`${o.db}: an instance's store is a set of the host's SQLite or RocksDB database (sqlite:<db>#<handle>, rocksdb:<dir>#<handle>): the one-process-per-instance serve mode is gone (SPEC 5)`);
 }
 
 // ---------------------------------------------------------------- more sources
@@ -475,8 +386,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 export const WASM_DIR = join(ROOT, "wasm");
 /** The default image (#89): a user skein's — no root in it, a claim route. */
 export const DEFAULT_IMAGE = join(ROOT, "images/default");
-/** The host image's own part (#142): merged over the default image (mergeImages), the host skein's image. */
-export const HOST_IMAGE = join(ROOT, "images/host");
 
 /**
  * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
@@ -507,7 +416,7 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
         const both = (x.install ?? []).map(appKey).filter((p) => theirs.has(p));
         if (both.length) throw new Error(`${APPS}: ${both.join(", ")} installed by both images`);
         // #147: a root route of `over` at a route of `base`'s (same transport, address, prefix) replaces it.
-        const key = (r: DispatchSpec) => `${r.transport ?? "mailbox"} ${r.address}${r.prefix ? " prefix" : ""}`;
+        const key = (r: DispatchRow) => rowKey(r);
         const mine = new Set((y.routes ?? []).map(key));
         const routes = [...(x.routes ?? []).filter((r) => !mine.has(key(r))), ...(y.routes ?? [])];
         const h = hashBlob(new TextEncoder().encode(`${JSON.stringify({ install: [...(x.install ?? []), ...(y.install ?? [])], ...(routes.length ? { routes } : {}) }, null, 2)}\n`));
@@ -525,13 +434,12 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
 }
 
 /**
- * #152: an image directory with no `bin/` is an overlay — it carries what it adds (an app repository's
- * `image/`: `etc/apps.json` alone) and is merged over the default image before boot, as images/host is;
- * one with `bin/` is a complete image of its own.
+ * #152: an image directory with no etc/routes.json is an overlay — it carries what it adds (an app
+ * repository's `image/`: `etc/apps.json` alone) and is merged over the default image before boot; one
+ * with etc/routes.json is a complete image of its own.
  */
 export function isOverlayImage(dir: string): boolean {
-  const bin = join(dir, BIN);
-  return !(existsSync(bin) && statSync(bin).isDirectory());
+  return !existsSync(join(dir, ROUTES));
 }
 
 /** An image's static part: its tree, its objects, the apps it names beside it (imageDir). */
@@ -561,16 +469,14 @@ export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSour
 }
 
 /**
- * An image by the names a create or `skein-host add --image` gives (skein next, SPEC 8: the image as the
- * repository holds it — no live chain part, image-chain.ts is gone): `default` (images/default); `host`
- * (images/host merged over it, #142); `overlay` a directory with no bin/ merged over it (#152). With the
- * repo's pinned modules beside its objects (imageSource).
+ * An image by the names a create or `skein-host add --image` gives: `default` (images/default), or
+ * `overlay` a directory with no etc/routes.json merged over it (#152). With the repo's pinned modules
+ * beside its objects (imageSource).
  */
-export async function namedImageSource(o: { host?: boolean; image?: string; overlay?: string } = {}): Promise<BootSource & { kind: "tree" }> {
-  if (o.image !== undefined && o.image !== "default" && o.image !== "host") throw new Error(`image ${JSON.stringify(o.image)}: this host has default, host`);
-  const over = o.overlay ?? (o.host || o.image === "host" ? HOST_IMAGE : undefined);
-  if (over === undefined) return await imageSource(DEFAULT_IMAGE);
-  const s = await overlayImage(await imageDir(DEFAULT_IMAGE), over);
+export async function namedImageSource(o: { image?: string; overlay?: string } = {}): Promise<BootSource & { kind: "tree" }> {
+  if (o.image !== undefined && o.image !== "default") throw new Error(`image ${JSON.stringify(o.image)}: this host has default`);
+  if (o.overlay === undefined) return await imageSource(DEFAULT_IMAGE);
+  const s = await overlayImage(await imageDir(DEFAULT_IMAGE), o.overlay);
   return { kind: "tree", root: s.root, objects: anyOf(s.objects, wasmDirObjects(WASM_DIR)), apps: s.apps };
 }
 

@@ -1,27 +1,15 @@
 #!/usr/bin/env bash
-# Build skein's own programs into wasm/<name>.wasm and print their
-# CIDv1(raw, sha2-256) (scripts/pin-programs.sh writes them into the pins):
-# all Zig 0.16.0 (mise.toml), wasm32-wasi, over the SDK (shruggr/skein-sdk, a
-# Zig package dependency by URL+hash, #75 — `zig build` fetches it; override
-# with a sibling checkout via scripts/sdk-local.sh) — the boundary programs
-# (the mail program, the front door, resolve; the install handlers went with #77: those are kernel
-# operations), plus the wire-probe test program.
-#
-# The apps' modules are built in their own repos (#71, #83) and installed
-# with them, never pinned here: the shell and run-handler in
-# shruggr/skein-shell, the chat loop in shruggr/skein-chat, the site in
-# shruggr/skein-site, the overlay engine in shruggr/skein-overlay.
+# Build skein's own test program into wasm/wire-probe.wasm and print its CIDv1(raw, sha2-256): Zig 0.16.0
+# (mise.toml), wasm32-wasi, over the SDK (shruggr/skein-sdk, a Zig package dependency by URL+hash;
+# override with a sibling checkout via scripts/sdk-local.sh). skein next: the boundary programs (the
+# mail program, the front door, resolve) are gone — the kernel runs a row's handler directly — and the
+# apps' modules are built in their own repos and installed with them, never pinned here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-programs=(mail frontdoor resolve)
-for p in "${programs[@]}"; do
-  (cd "programs/$p" && zig build)
-  cp "programs/$p/zig-out/bin/$p.wasm" "wasm/$p.wasm"
-done
 (cd programs/test/wire-probe && zig build)
 cp programs/test/wire-probe/zig-out/bin/wire-probe.wasm wasm/wire-probe.wasm
 node --experimental-strip-types --no-warnings -e '
   const { readFileSync } = await import("node:fs");
   const { rawCid } = await import("./src/runtime/programs.ts");
-  for (const p of process.argv.slice(1)) console.log(p, rawCid(readFileSync(`wasm/${p}.wasm`)).toString());
-' "${programs[@]}" wire-probe
+  console.log("wire-probe", rawCid(readFileSync("wasm/wire-probe.wasm")).toString());
+'

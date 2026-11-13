@@ -1,0 +1,7 @@
+[
+  { "kind": "request", "path": "/kernel/objects", "role": "root", "handler": "kernel.objects" },
+  { "kind": "request", "path": "/kernel/head", "role": "root", "handler": "kernel.head" },
+  { "kind": "request", "path": "/kernel/route", "role": "root", "handler": "kernel.route" },
+  { "kind": "request", "path": "/kernel/grant", "role": "root", "handler": "kernel.grant" },
+  { "kind": "request", "path": "/kernel/claim", "role": "user", "handler": "kernel.claim" }
+]

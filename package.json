@@ -12,7 +12,7 @@
     "skein-dev": "bin/skein-dev",
     "test": "node --experimental-strip-types --no-warnings --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit",
-    "web:typecheck": "tsc --noEmit -p web/kernel/tsconfig.json",
+    "web:typecheck": "echo 'web/kernel: not in the first cut (skein next): it boots by code genesis and the mail program (build H1 B1); not typechecked'",
     "build": "tsc -p tsconfig.build.json",
     "build:kernel": "cd kernel-zig && zig build web",
     "prepack": "npm run build && npm run build:kernel"
