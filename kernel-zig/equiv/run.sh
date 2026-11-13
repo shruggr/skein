@@ -1,31 +1,23 @@
 #!/usr/bin/env bash
 # The Zig kernel's feature scenarios, each run once on one backend, and its
-# replay exactness (issue #5: the Zig kernel is its own reference): every
-# scenario's stores replay to themselves exactly (replays.ts), and a generated
-# corpus (format 2, issue #33) likewise.
+# replay exactness (issue #5: the Zig kernel is its own reference).
 #
-# One backend: SQLite files, one `skein-kernel serve` per instance (the
-# default mode, which every scenario supports). The scenarios of the
-# one-process host (`skein-kernel host`, RocksDB) run there because the feature
-# exists only there: pool.ts (the worker pool), hostchain.ts (the host chain),
-# teranode.ts (the host chain's tracker). Nothing here compares databases: the
-# backends are compared once by the storage interface tests
-# (kernel-zig/src/store_iface_test.zig, src/host/store-iface.test.ts). The
-# two-implementation pairs, one comparison each: the TS index rebuild
-# (src/runtime/index-store.ts derive) against the kernel's index, in
-# event-order.ts; the wasm kernel the host loads (V8, the shim's store)
-# against the native kernel, in wasm-host.ts; instrumented fuel against
-# wasmtime's, in the unit tests (src/wasm_fuel_test.zig).
-#
-# A RocksDB database's host-read socket is <db dir>/kernel.sock: keep $TMPDIR
-# short (a Unix socket path is at most 107 bytes). Needs node (26) and the
-# repo's node_modules; the browser parts need Playwright and a Chromium
-# (SKEIN_EQUIV_BROWSER=0 skips them, with a note). Never touches the stores
-# under $SKEIN_HOME. The shell and the chat loop are apps (#83): the drivers
-# that run them install shruggr/skein-shell and shruggr/skein-chat at
-# src/testapps.ts's pinned commits (fetched once into $TMPDIR/skein-apps), or
-# $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR (checkouts). The unit tests are
-# `zig build test` (README), not run here.
+# skein next (2026-11-13, build K): EVERY scenario below WAITS for the host build
+# (H2: the router onto CHECK/COMMIT, request records, rows with roles — the
+# kernel's surface in src/host/kernel.ts) and, for those that install the chain,
+# overlay or 1color apps, the chain/overlay build (C). They drive the kernel
+# through the Node host and through apps from other repos not yet rebuilt, so
+# none passes until those land. Deleted with the mechanisms they tested: serve.ts
+# (serve mode), git.ts and git-clone.ts (the shell runner), fetch.ts (the
+# component runner, the fetch intention), rest-on.ts (on with no fn: await a
+# name now), door-spv.ts and event-beef.ts (kernel.beef: the chain app's check
+# now, tested in skein-sdk chain/door), libp2p.ts and emit-events.ts (libp2p
+# rows, subscriptions as a match source), inboxes.ts and corpus.ts (mail),
+# host.ts, site.ts, files.ts and collection.ts (the instance manager, onboarding,
+# the management site and the collection app: out of the first cut),
+# image-chain.ts (the image-chain live copy), browser.ts and browser-live.ts
+# (the browser host and its front door). The kernel's own tests are
+# `zig build test` (README).
 #
 #   kernel-zig/equiv/run.sh
 set -euo pipefail
@@ -40,55 +32,18 @@ status=0
 echo "== build (the native kernel, and the browser build wasm-host.ts loads)"
 (cd "$kz" && mise exec -- zig build --release && mise exec -- zig build web --release)
 
-echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
-"${node[@]}" "$kz/equiv/git.ts" | grep -E "^(ok|FAIL)|failed$|all ok" || status=1 # pipefail: git.ts's status counts
-
-ms() { echo $(( $(date +%s%N) / 1000000 )); }
-echo "== replay, Zig against Zig: a generated corpus (format 2, written by the Zig kernel through the router)"
-t0=$(ms)
-"${node[@]}" "$kz/equiv/corpus.ts" "$work/gen" > "$work/gen.list"
-t1=$(ms)
-mapfile -t gen < "$work/gen.list"
-"${node[@]}" "$kz/equiv/replays.ts" "${gen[@]}" || status=1
-t2=$(ms)
-
-echo "timing: the corpus driven $((t1 - t0)) ms, replays.ts over it $((t2 - t1)) ms"
-
-# The browser (issue #35): an instance in headless Chrome, and libp2p's live
-# step in a tab (libp2p.ts: without a browser it would only repeat npm test's
-# src/host/p2p-router.test.ts). SKEIN_EQUIV_BROWSER=0 skips them, and they are
-# skipped (with a note) without Playwright or Chromium.
-browser=1
-if [ "${SKEIN_EQUIV_BROWSER:-1}" = "0" ]; then
-  echo "== browser: skipped (SKEIN_EQUIV_BROWSER=0)"; browser=0
-elif ! command -v playwright > /dev/null || [ ! -x "${SKEIN_CHROMIUM:-/usr/bin/chromium}" ]; then
-  echo "== browser: skipped (no playwright on PATH or no Chromium at ${SKEIN_CHROMIUM:-/usr/bin/chromium})"; browser=0
-else
-  echo "== browser live (issue #35): an instance in Chrome, chatted on the page's own session with it (#126 step 4), delivers its inference request itself; the answer shown from the page identity's mailbox, nothing admitted; its store replayed natively"
-  "${node[@]}" "$kz/equiv/browser-live.ts" || status=1
-  echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip; a live step in the browser with no signer"
-  "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
-fi
 
 echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
 "${node[@]}" "$kz/equiv/boot.ts" || status=1
-echo "== a component's emit (#15, #70): the fetch component through the router's fetch provider, its answer an entry; replayed with no host to ask"
-"${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
 echo "== overlay services (#36, #79): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) and the chain app in a tree; submit/lookup through the router with the stock SDK clients (POST /submit is BRC-22 and synchronous, 0.9.2: the STEAK, 503 + Retry-After at the bound, waiters all answered; a plain POST admitted because its BEEF validates, #135), verdicts by message into box overlay/submit (0.7.6, #128), answered once (#112); the gate (the chain app's answer); the gossip; replayed"
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
-echo "== the BEEF intake on an event route (#121, #164): an event route naming kernel.beef (the call probe its handler); no chain state: refused; root sets chain/state (block 170's header); {kind: \"deploy\", beef} with its record beside the entry admitted, the entry naming the record the door rewrote (the envelope, its pointer record, the bitcoin-tx block held, the bytes never stored), the step reading the envelope; a bad BUMP and no BEEF refused, nothing written; the same event on a route with no filter as it is; replayed"
-"${node[@]}" "$kz/equiv/event-beef.ts" || status=1
 
-echo "== the BEEF proven at the door, always (#121): kernel.beef proves every BEEF with skein-sdk's verifier over the BEEF alone — on event, http and mailbox routes an Atomic BEEF with no BUMP and its parent absent refused 400 ERR_BEEF MissingInput, a txid-only parent UnknownTxidOnly, a bad BUMP RootMismatch, a failing script ScriptFailed, nothing written; a proven transaction, and a proven parent with its unmined child (marks [0, null], the BUMP proving the parent only) admitted; replayed"
-"${node[@]}" "$kz/equiv/door-spv.ts" || status=1
 
 echo "== the kernel appends (#163): N arrivals into one instance at once, none queued on the host side (the kernel's admit, as the HTTP front door and libp2p inbound call it) — on serve (SQLite): all land, n strictly increasing with each prev the entry before, stamps behind the tip raised, every arrival's record named by exactly one entry; a frame naming prev or n refused, nothing written"
 "${node[@]}" "$kz/equiv/appends.ts" || status=1
 
-echo "== files (#52, #125): skein-sdk's files module through the site app's handler (shruggr/skein-site at src/testapps.ts's pinned commit, or \$SKEIN_SITE_DIR, with test files in its tree), installed by the owner; its row /site/* and the owner's own rows to it (/favicon.ico, /): types, index, 301, 404s, 405, HEAD, ETag/304; each request an entry, no head moved; replayed"
-"${node[@]}" "$kz/equiv/files.ts" || status=1
 
 echo "== apps (#72, #76, #124): the owner's messages for shruggr/skein-site (#125: its row under /site/, the head its app record; the owner's own root row to its handler, \`skein dispatch --http\`, which an uninstall leaves) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
@@ -96,18 +51,8 @@ echo "== apps (#72, #76, #124): the owner's messages for shruggr/skein-site (#12
 echo "== the default image and the claim (#89, #127): an instance from images/default (no owner, the claim row from anyone, nothing at /, /site/ or /manifest.json (#125), the explorer nobody's until the claim); the owner's own message in box claim → the sender's admin rows (a key in the body not read), the claim row gone, the owner reads the explorer; a second claim refused; the owner installs chain, git and site by message (#152) and root's / to the site, which then serves /, /site/ and /manifest.json; git again sends only its head; the owner installs app-demo; an owned instance refuses a claim; add --image; a claim signed before the instance existed (no recipient) forwarded: the signer owns it; replayed"
 "${node[@]}" "$kz/equiv/claim.ts" || status=1
 
-echo "== the host skein, the instance manager and the onboarding app (#90, #142): skein-host init (the host skein from the host image, owned by the operator's key at birth: its admin rows and explorer row, no claim row; the onboarding app, its only app (#152: by its release tarball), installed with its config from the settings; the instance manager in its address book); skein-host grant (another key's rows, signed by the operator's key, over the control socket); a client's session creates alice with its own signed claim (forwarded by the manager as her first entry, before her hostname is published; none or another key's refused), she answers at her url and the client installs app-demo in her; a second create refused; replayed"
-"${node[@]}" "$kz/equiv/host.ts" || status=1
 
-echo "== deploy by hash (#91): the git app (shruggr/skein-git, src/testapps.ts's pinned commit, or \$SKEIN_GIT_DIR) clones one commit of a local repository served over smart HTTP (git http-backend) through the fetch provider — protocol v2, one shallow pack, checked against the hash — and answers {tree, app}; the manifest read by CID, the record rebuilt by the install client (the same CID), head + dispatch + start, the app runs; a hash not held, another commit's pack, a bad URL, no repository, no manifest refused; the client's skein install <url>#<hash> --instance (#142: one git.clone message, signed in the client, over the control socket; head and row only); replayed"
-"${node[@]}" "$kz/equiv/git-clone.ts" || status=1
 
-if [ "$browser" = 0 ]; then
-  echo "== the management site (#92): skipped (no browser, above)"
-else
-  echo "== the management site (#92): the site app (#125) installed in the host skein with the owner's root row, its page at /site/, in headless Chrome with a wallet in the tab (a stand-in for the 1sat services funds it); create alice from the page (the onboarding app), nothing written into the wallet, the page opens her view; chain, git and site there from birth (#141), git's owner row added by installing git again, then app-demo by hash through the git app (a local repository over git http-backend), the prompt approved, app-demo runs; the explorer renders her log and dispatch table, another key refused; Your skeins from the host (GET /skeins?key=, the skeins' grants): the host skein and alice; the host skein's page lists alice; the Inbox (#99): a payment delivered to your mailbox instance in metanet_inbox listed by the page (@bsv/message-box-client), Sync calls @1sat/actions' syncMetanetInbox with the wallet in the tab and shows its result; replayed"
-  "${node[@]}" "$kz/equiv/site.ts" || status=1
-fi
 
 echo "== overlay sync (#150; the settled design, David 2026-10-30): shruggr/skein-chain and shruggr/skein-overlay (sync.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) on three routers with libp2p, tm_sync registered on each; a token mined at 2 reaches the second host by announce-then-fetch (b's admit, the BEEF fetched from b), the anchors agree; one host offline for three blocks catches up from the other's beat (the locator on /skein/overlay/sync/1.0.0, answered by the engine's filter on its libp2p row (#154), the admitted lists pulled and their BUMPs checked, each missing transaction submitted) to equal anchors; a third host from genesis likewise; a transfer whose parent only one host holds, posted to another without it, refused at the door (#121: 400 MissingInput, nothing written, nothing wanted); the parent, an unmined tail never announced, reaches the others by the tail reconcile; replayed"
 "${node[@]}" "$kz/equiv/sync.ts" || status=1
@@ -124,11 +69,7 @@ echo "== the one-key host (#160, #161, #162): a host with ONE key (SKEIN_KEY_FIL
 echo "== the host loads the kernel (the settled split, 2026-10-31): onekey.ts and sync.ts on the WASM host (every instance a set of its host's one SQLite database, kernel-zig/zig-out/web/skein-kernel.wasm on a worker), #157's delivery as an emit (the server's signed answer an entry; forged ones refused at the door), every store replayed by the native kernel to the same state CID; front-door steps/s wasm vs native"
 "${node[@]}" "$kz/equiv/wasm-host.ts" || status=1
 
-echo "== the collection app (#151): a skein from the default image, claimed; root installs the chain app and shruggr/skein-collection (its engine with it; equiv/collection.ts's pinned commit, or \$SKEIN_COLLECTION_DIR) by message; nothing registered until root registers a collection's topic tm_col_<txid>_<vout> and the lookup ls_collection; the collection's mint, an item mint (another key's item not admitted), a transfer behind a funding input (its satoshi by the ordinal rule; the funding parent ancillary, /holds says so), an OrdLock v2 listing and its purchase, each mined and posted to /collection/submit; the four reads as read routes and as BRC-24 (items, history, listings, sales with its block's time); replayed"
-"${node[@]}" "$kz/equiv/collection.ts" || status=1
 
-echo "== subscriptions (#119) and beacons (#126): two apps (programs/test/app-demo's module under other names) on a router with libp2p; refusals as emitted; an app's subscribe {topic, program, fn} → the node subscribes it, a message published on it from a second router delivered by the subscription to that app's fn; another app's subscription does not take the topic; unsubscribe stops delivery; a row wins; a restarted router and kernel read the subscriptions from the log; beacons (#126): a beacon beats on its own clock, seen by the second router, nothing logged per beat, stopped by an unbeacon and an uninstall, beaten again after a restart; replayed"
-"${node[@]}" "$kz/equiv/emit-events.ts" || status=1
 
 echo "== the event index (skein 0.5.0): one router, two apps (programs/test/event-demo's module): a name not under the emitting app's own refused as emitted; evx's facts under three names; GET /@ix/events/<name path> (a name, a prefix, latest, after, limit) and evy's in-step read (the events import) the same rows; the stream the same read then live; replayed"
 "${node[@]}" "$kz/equiv/event-index.ts" || status=1
@@ -148,8 +89,6 @@ echo "== call permissions: one router, three apps (programs/test/perm-probe's mo
 echo "== an event's place identifies one event: one router, two apps (programs/test/perm-probe's module); one step's facts from the caller and an in-VM callee, then the same with the caller resting on its own first fact (its delivery steps the thread again before the later facts go out): every fact on the live stream at the index's place, Last-Event-ID resumes right after; replayed"
 "${node[@]}" "$kz/equiv/event-place.ts" || status=1
 
-echo "== a thread resting on an event name (skein 0.5.4): on(name) with no fn ends the step resting; each fact under the name wakes the resting threads in the order they began resting, never another name's, their context intact, and they rest again; a kernel killed mid-delivery commits nothing of the entry and, restarted, wakes each once; replayed"
-"${node[@]}" "$kz/equiv/rest-on.ts" || status=1
 
 echo "== liveness (#138): two routers; an app on the second emits liveness for a topic an app on the first beacons on; the second's node subscribes it without admitting; GET /<app>/.live/<topic> (served by the host) shows the first's beat within a beat and the second's own; a bad signature never shows; the window drops a silent sender; unliveness and uninstall end it; replayed"
 "${node[@]}" "$kz/equiv/liveness.ts" || status=1
@@ -163,8 +102,6 @@ echo "== chain proof events (skein-chain 0.11.0, skein-sdk 0.21.0): a saved merk
 echo "== a large bundle (skein-chain 0.11.0, as in the live case): N bare transactions over a proven funding, the last one's BEEF ingested by one in-VM call (programs/test/ingester): every one has its intake status; replayed"
 "${node[@]}" "$kz/equiv/chain-bundle.ts" || status=1
 
-echo "== the image carries the header chain (#132, #156): a fake chaintracks' history (N regtest headers) and tip stream (M more), all before any skein exists; the host builds the default image's chain part from genesis at start and grows it per header; a skein created from the image holds chain/headers and chain/tip; the empty host chain imports them at her first start (chain-import; skein-host chain shows the image's tip); her owner installs the chain app (shruggr/skein-chain at image-chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR): the install's chain event and her chain state holds all N + M + 1 from genesis, no header fed, its maps the host chain's; the next header moves it on; add --image default boots from the same image; replayed"
-"${node[@]}" "$kz/equiv/image-chain.ts" || status=1
 
 echo "== headers from the Teranode P2P network (#156, teranode.ts): a host with no headers source makes alice and installs the chain app (no chain anywhere); restarted with the tracker (a fake Teranode mesh and data hub), it syncs the whole chain from the hub at start, fills the empty host chain from the image chain (headers runs) before alice is hydrated; her chain state holds it, a proof against it verifies, the next announced block moves her on; replayed — on the one-process host (RocksDB), where the host chain is"
 SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/teranode.ts" || status=1
@@ -172,8 +109,6 @@ SKEIN_EQUIV_STORE=rocksdb "${node[@]}" "$kz/equiv/teranode.ts" || status=1
 echo "== the host chain (#156, #133): two instances on one RocksDB host take three header runs; their chain/state headers and heights roots are the host chain record's, the tip read off them the host's; a proof on A verifies; a heavier branch replacing two headers reverts it (unproven, broadcast again) and leaves B on the new record; the gate (a host chain block through every set, A's record not through B's); replayed after the process stopped; timings: a block's frame and its event to 8 instances, chain-import of an image (HOSTCHAIN_IMPORT headers)"
 "${node[@]}" "$kz/equiv/hostchain.ts" || status=1
 
-echo "== serve: the process interface, fuel exhaustion, its stores replayed"
-"${node[@]}" "$kz/equiv/serve.ts" || status=1
 
 echo "== the worker pool (#158): 8 instances × 500 entries interleaved = serial, with 1 worker too; a call beside a step blocked on the wallet sees the state as committed; the member gate and host/chain; each set replayed after the process stopped; timings"
 "${node[@]}" "$kz/equiv/pool.ts" || status=1

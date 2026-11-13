@@ -1,39 +1,35 @@
 # kernel-zig
 
-The skein kernel in Zig: the block store, the input log, the index (IPLD
-maps in the store and one state record), the scheduler, the kernel's four
-tables (objects, heads with their owner, the dispatch table, the address
-book), the filesystem over the store, the WASI preview1 imports and the
-`skein` imports, and the same as a WASI 0.2 world for components. It runs
-wasm programs through wasmtime's C API, and builds for
-`wasm32-freestanding` for the browser host. It is the one kernel
-implementation: the same log gives the same entries, records, CIDs, derived
-state and fuel on every replay, and the equivalence suite checks that Zig
-against Zig.
+The skein kernel in Zig: the block store, the input log, the index (IPLD maps in the store and one
+state record), the scheduler, the kernel's tables (objects, heads, the route table, the grants),
+the WASI preview1 imports and the `skein` imports. It runs wasm programs through wasmtime's C API
+natively (`skein-kernel host`, one process for every instance of a host, RocksDB) and builds for
+`wasm32-freestanding` (the wasm kernel the Node host loads on a worker per instance). The same log
+gives the same entries, records, CIDs, derived state and fuel on every replay.
 
-The kernel at log format 10 (#146: the BEEF envelope beside the pointer
-record — "Format 10" below). Format 9 (#143): routes without senders,
-filters before anything is recorded, roles and the grants head, root
-instead of an owner. Format 8: one dispatch table routes (rows for boxes, HTTP
-paths, libp2p topics and protocols), and the kernel matches every
-transport's packages against it, first match wins (#115, `dispatch.zig`:
-the front door is handed the matched row and only verifies who the package
-is from, BRC-103/104 or GossipSub's signature, then runs the row's
-handler); the admin operations (`objects`,
-`head`, `dispatch`, `peers`) are the kernel's own, on messages from the
-owner or a delegate, and so is the claim (#89: an image's genesis names no
-owner; a message at its claim row writes its sender's admin rows and
-removes the row, #127); a program advances only heads in its write scope (an
-app's `<app>/…`; a genesis-wired program's genesis `scopes`); every package
-a transport carries in is an entry and the front door is stepped on it; a
-step's way out is `emit` (a message to a key the address book
-names — unsigned, its transport proves its sender, #126 step 4 — or an event: an intention the runtime answers, a broadcast, a
-subscription, a beacon, a `deliver` to a messagebox the host carries over
-BRC-104 — #157: the in-step `authfetch` is gone), and the answer is an entry; a deadline or a shell's sleep
-is a `deadline` event the host's waker keeps (#126). The host
-(`src/host/`, TypeScript) drives it over one channel per kernel; the host
-is transports + providers + store + signer and routes nothing. History: the
-format sections below say what each format changed.
+**skein next (store format 12, 2026-11-13; plans/skein-next/SPEC.md).** An instance is a log, a
+store, a route table with roles, and programs. An arrival earns its entry in one of two ways: its
+SENDER is proven (a signed request: `brc104` or `signed`, door.zig) or its CONTENT is proven (its
+row's checks: the chain app's `chain.beef`, a proof check). Two kernel calls: CHECK (reads only;
+signature, row, role gate, checks; a refusal writes nothing; a read row answers) and COMMIT (the
+recheck at the tip, the gate again if the grants moved, the blocks and the entry written, the step
+run to completion, the handler's answer returned). The row's handler runs directly — an app's
+function (the request's thread) or a kernel operation (objects, head, route, grant, claim) that
+returns data. Later work: `launch` (no wait), `await(name | thread)`, `on(name, fn)`. Gone: the
+`serve` mode, mail and the address book, the front door / mail / resolve programs, middleware,
+`kernel.brc104` sessions, `kernel.beef` (now the chain app's, skein-sdk chain/door), `deadline`,
+`authfetch`, the shell and component runners (extras/ at the repo root). The interface as built —
+records, rows, the CHECK and COMMIT frames, what a check / recheck / handler receives and returns,
+the import table, the genesis — is "The host surface" below; the sections after it describe the
+kernel up to v0.9.1 and are history until they are rewritten.
+
+## The host surface (skein next)
+
+See plans/skein-next/build-K.md, "THE INTERFACE AS BUILT" (the planner's copy), and the source:
+src/log.zig (records, entries, genesis), src/dispatch.zig (rows), src/grants.zig (roles),
+src/door.zig (signature schemes), src/scheduler.zig (CHECK, COMMIT, the handler contract,
+`checkOutValue` / `commitOutValue`), src/host.zig and src/web.zig (the frames), src/program.zig
+(the import table).
 
 ## Build
 
@@ -103,23 +99,15 @@ unchecked.
 ## Run
 
 ```
-skein-kernel serve                         # the kernel process the host spawns
-skein-kernel replay <source.db> <out.db>   # the log alone into a fresh store, no wallet
-skein-kernel shell <store.db> [<program>] < cases.json # shell cases on stdin, as equiv/git.ts passes them (the shell program by CID, else the shell app's: head shell/app)
-skein-kernel dump <store.db>               # the derived state read through the index, as JSON (either format, read only)
-skein-kernel fuel <store.db> [--since n]   # fuel per thread and in total, from the steps whose input is entry n or later
+skein-kernel host                          every instance of the host, one process (SKEIN_STORE_ROCKSDB, SKEIN_WORKERS)
+skein-kernel replay <source.db> <out.db>   the log alone into a fresh store, no wallet
+skein-kernel dump <store.db>               the derived state read through the index, as JSON (read only)
+skein-kernel fuel <store.db> [--since n]   fuel per thread and in total
+skein-kernel migrate --from <store> --into rocksdb:<db dir> --set <handle>
 ```
 
-`serve` is started by the host (`src/host/kernel.ts`) with `SKEIN_DB`,
-`SKEIN_HANDLE` and `SKEIN_HOME`, installs the pinned modules from `wasm/`
-(the boundary programs and the wallet; #83: no shell) into a store that lacks them, speaks frames on stdin/stdout and writes its
-log lines — among them `skein runtime <identity> (<handle>@<domain>) · pid …
-· db …` once running — on stderr; it stops at EOF on stdin or on
-SIGINT/SIGTERM. Since #30 the store file holds blocks and the state
-pointer only: the explorer and
-`skein-dev` open a store file through `src/runtime/index-store.ts`, which
-reads the maps when the file has the state pointer and the old tables when
-it does not — see "The index" below.
+(skein next: `serve` and `shell` are gone.) `zig build web` builds zig-out/web/skein-kernel.wasm,
+which src/host/wasm-kernel.ts loads.
 
 ## Fuel (issue #5)
 

@@ -18,9 +18,10 @@
 // whose update names the same app, role and fn. So the subscriptions to a name, in key order, are in the order they
 // were made. A fact (log.zig indexedName) steps each, the scheduler's `deliverFact`.
 //
-// 0.5.4: `on(name)` with no fn rests the calling THREAD on the name instead (scheduler `hOn`,
-// `wakeResting`): no update of this chain; the thread's own updates carry `restsOn`, the waits index
-// (index.zig `awaits`) holds name ‖ 0 ‖ n ‖ origin.
+// skein next: `on` always names a function (an empty one is refused); a thread that wants to
+// resume on a fact awaits its name (scheduler `hAwait`, `wakeAwaiting`): no update of this chain;
+// the thread's waiting update carries `restsOn`, the waits index (index.zig `awaits`) holds
+// name ‖ 0 ‖ s ‖ origin, and it resumes once.
 const std = @import("std");
 const cbor = @import("cbor");
 const storem = @import("store.zig");

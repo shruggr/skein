@@ -28,9 +28,9 @@
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
 //   resting   ord ‖ origin               → null                (threads not finished: what start resumes, 0.8.0: in
 //                                                              the order of their tips' step numbers; 0: no update yet)
-//   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject;
-//             name ‖ 0 ‖ s ‖ origin                            0.5.4: and threads resting on an event name, `restsOn`,
-//                                                              0.8.0: s the step number of the update that began the rest)
+//   awaits    thread ‖ at ‖ origin       → null                (skein next: threads awaiting a thread, `awaits`;
+//             name ‖ 0 ‖ s ‖ origin                            and threads awaiting a fact's name, `restsOn`,
+//                                                              s the step number of the update that began the wait)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`;
 //                                                              and a kept bitcoin transaction's inputs, from the
