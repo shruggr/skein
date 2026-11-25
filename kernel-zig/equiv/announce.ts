@@ -246,7 +246,11 @@ try {
   check(s1.status === 200, `(i) t1 (unmined) posted to b: ${s1.status} ${s1.text.slice(0, 80)}`);
   const got1 = await until("a and c hold t1", async () => (await holds("a", t1.id("hex")) && await holds("c", t1.id("hex"))) || undefined, 30_000).catch(() => false);
   check(got1 === true, "(i) a fetched t1 from b on b's admit, admitted it; c fetched it from a on a's admit");
-  check(asked.a.includes(`b tx ${t1.id("hex")}`) && asked.c.includes(`a tx ${t1.id("hex")}`) && !asked.c.some((x) => x.startsWith("b ")), `(i) a asked b, c asked a (c never asked b): a ${JSON.stringify(asked.a.filter((x) => x.endsWith(t1.id("hex"))))}, c ${JSON.stringify(asked.c.filter((x) => x.endsWith(t1.id("hex"))))}`);
+  // c may also ask b's TAIL: b's beat reaches c relayed through a's GossipSub mesh, and when its tail digest
+  // is not c's (t1 admitted on b, not yet on c) c reconciles with b (sync.ts `reconcile`, the tail; (iv)
+  // relies on it). Whether that beat lands before c holds t1 is timing. What (i) guarantees is the
+  // announce path: c fetched t1 from a, and never asked b for it.
+  check(asked.a.includes(`b tx ${t1.id("hex")}`) && asked.c.includes(`a tx ${t1.id("hex")}`) && !asked.c.includes(`b tx ${t1.id("hex")}`), `(i) a asked b for t1, c asked a for it (c never asked b for t1): a ${JSON.stringify(asked.a.filter((x) => x.endsWith(t1.id("hex"))))}, c ${JSON.stringify(asked.c.filter((x) => x.endsWith(t1.id("hex"))))}${asked.c.includes("b tail") ? " — c also asked b's tail (b's relayed beat)" : ""}`);
   check(!connected("c", "b") && !connected("b", "c"), "(i) b and c never connected: c heard only a's admit");
   check(asked.a.filter((x) => x.endsWith(t1.id("hex"))).length === 1 && asked.c.filter((x) => x.endsWith(t1.id("hex"))).length === 1, "(i) each node fetched t1 once");
 
@@ -265,6 +269,9 @@ try {
   const got3 = await until("a holds t3", async () => (await holds("a", t3id)) || undefined, 30_000).catch(() => false);
   check(got3 === true, "(ii) c's admit added c to the set: one more try, from c — taken");
   check(asked.a.filter((x) => x.endsWith(t3id)).join(" | ") === `b tx ${t3id} | c tx ${t3id}`, `(ii) a asked b, then c, once each: ${asked.a.filter((x) => x.endsWith(t3id)).map((x) => x.split(" ")[0]).join(" → ")}`);
+  // a holds t3 as soon as its submission is admitted; the fetch that submitted it drops the entry when
+  // the submission's answer comes back (sync.ts `pursue`, after `fetchInto`): wait for that fetch to end.
+  await r("a").sync!.idle();
   check(!r("a").sync!.pending("a").some((x) => x.txid === t3id), "(ii) the entry dropped on its taking");
 
   // ------------------------------------------------ (iii) a beacon replace does not publish
